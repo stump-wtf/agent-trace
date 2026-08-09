@@ -6,11 +6,11 @@ package classify
 // readCommand, verifyCommand).
 func ActionFor(tool string, input map[string]any, result string) string {
 	switch tool {
-	case "Read", "read":
+	case "Read", "read", "view":
 		return ActionRead
-	case "Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", "write", "edit":
+	case "Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", "write", "edit", "multiedit":
 		return ActionEdit
-	case "Grep", "Glob", "LS", "view_image", "grep", "find", "ls":
+	case "Grep", "Glob", "LS", "view_image", "grep", "find", "ls", "glob":
 		return ActionSearch
 	case "Bash", "bash", "exec_command", "write_stdin", "js", "js_repl":
 		command := firstString(input, "command", "cmd", "code", "chars", "script", "_raw")
@@ -97,14 +97,14 @@ func TargetsForWith(opts *Options, cwd, tool string, input map[string]any, resul
 	}
 
 	switch tool {
-	case "Read", "read":
+	case "Read", "read", "view":
 		if path, ok := input["file_path"].(string); ok {
 			add(path, TouchRead, false, readLines(input), "")
 		}
 		if path, ok := input["path"].(string); ok {
 			add(path, TouchRead, false, readLines(input), "")
 		}
-	case "Write", "Edit", "MultiEdit", "NotebookEdit", "write", "edit":
+	case "Write", "Edit", "MultiEdit", "NotebookEdit", "write", "edit", "multiedit":
 		if path, ok := input["file_path"].(string); ok {
 			add(path, TouchEdit, false, nil, "")
 		}
@@ -123,7 +123,7 @@ func TargetsForWith(opts *Options, cwd, tool string, input map[string]any, resul
 				add(path, TouchHit, true, nil, "")
 			}
 		}
-	case "Glob", "LS", "find", "ls":
+	case "Glob", "LS", "find", "ls", "glob":
 		for _, hit := range parsePathHits(result) {
 			add(hit.path, TouchHit, false, nil, "")
 		}
