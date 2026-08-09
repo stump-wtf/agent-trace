@@ -66,6 +66,22 @@ const (
 	ActionOther  = "other"
 )
 
+// Options controls I/O-dependent behavior in an otherwise pure package.
+// Pass nil to keep all weak targets and use path heuristics only for
+// outside-scope classification. The tail package supplies an Options with
+// real os.Stat-backed FileExists and real home/tmp dirs.
+type Options struct {
+	// FileExists reports whether a repo-relative path exists on disk.
+	// nil keeps all weak targets (no filtering).
+	FileExists func(cwd, rel string) bool
+	// HomeDir overrides the home directory for outside-scope classification.
+	// Empty falls back to path heuristics only (/tmp prefix → "tmp", else "other").
+	HomeDir string
+	// TmpDir overrides the temp directory for outside-scope classification.
+	// Empty falls back to "/tmp".
+	TmpDir string
+}
+
 // Touch constants used in Target.Touch. Ranked by RankTouch: edit > read > hit.
 const (
 	TouchEdit = "edit"

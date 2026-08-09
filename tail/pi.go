@@ -135,6 +135,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 		EndedAt:   header.Timestamp,
 	}
 
+	opts := osClassifyOptions()
 	pending := map[string]classify.ToolCall{}
 	pendingOrder := []string{}
 	var events []classify.Event
@@ -209,7 +210,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 					continue
 				}
 				delete(pending, msg.ToolCallID)
-				events = append(events, classify.BuildEvent(seq, meta.Cwd, call, classify.ToolResult{
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{
 					Content: piContentText(msg.Content),
 					IsError: msg.IsError,
 				}))
@@ -221,7 +222,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 					Timestamp: entry.Timestamp,
 				}
 				isErr := msg.ExitCode != nil && *msg.ExitCode != 0
-				events = append(events, classify.BuildEvent(seq, meta.Cwd, call, classify.ToolResult{
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{
 					Content: msg.Output,
 					IsError: isErr,
 				}))
@@ -232,7 +233,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 	// Flush orphaned tool calls.
 	for _, id := range pendingOrder {
 		if call, ok := pending[id]; ok {
-			events = append(events, classify.BuildEvent(seq, meta.Cwd, call, classify.ToolResult{}))
+			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{}))
 			seq++
 		}
 	}

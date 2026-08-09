@@ -3,9 +3,32 @@ package tail
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
 )
+
+// osClassifyOptions returns Options backed by the real filesystem — an
+// os.Stat-based FileExists and real home/tmp dirs. Adapters pass this to
+// classify.BuildEventWith so weak-target filtering and outside-scope
+// detection work correctly end-to-end.
+func osClassifyOptions() *classify.Options {
+	home, _ := os.UserHomeDir()
+	return &classify.Options{
+		FileExists: func(cwd, rel string) bool {
+			if cwd == "" || rel == "" {
+				return false
+			}
+			abs := filepath.Join(cwd, filepath.FromSlash(rel))
+			_, err := os.Stat(abs)
+			return err == nil
+		},
+		HomeDir: home,
+		TmpDir:  os.TempDir(),
+	}
+}
 
 // sessionKey produces a stable identifier for a session file, independent of
 // the agent-level session ID. Codex resume rollouts can share an ID across

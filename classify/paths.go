@@ -2,14 +2,13 @@ package classify
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 )
 
-func normalizePath(cwd, base, path string) (string, *OutsideTouch, bool) {
+func normalizePath(opts *Options, cwd, base, path string) (string, *OutsideTouch, bool) {
 	path = strings.TrimSpace(strings.Trim(path, `"'`))
 	if path == "" || strings.Contains(path, "\n") {
 		return "", nil, false
@@ -30,7 +29,7 @@ func normalizePath(cwd, base, path string) (string, *OutsideTouch, bool) {
 					return filepath.ToSlash(rel), nil, true
 				}
 			}
-			return "", &OutsideTouch{Scope: outsideScope(abs), Path: abs}, true
+			return "", &OutsideTouch{Scope: outsideScope(opts, abs), Path: abs}, true
 		}
 		return filepath.ToSlash(clean), nil, true
 	}
@@ -41,17 +40,24 @@ func normalizePath(cwd, base, path string) (string, *OutsideTouch, bool) {
 			return filepath.ToSlash(rel), nil, true
 		}
 	}
-	return "", &OutsideTouch{Scope: outsideScope(abs), Path: abs}, true
+	return "", &OutsideTouch{Scope: outsideScope(opts, abs), Path: abs}, true
 }
 
-func outsideScope(path string) string {
-	home, _ := os.UserHomeDir()
+func outsideScope(opts *Options, path string) string {
+	home := ""
+	if opts != nil {
+		home = opts.HomeDir
+	}
 	if home != "" {
 		if rel, err := filepath.Rel(home, path); err == nil && !strings.HasPrefix(rel, "..") {
 			return "home"
 		}
 	}
-	if strings.HasPrefix(path, os.TempDir()) || strings.HasPrefix(path, "/tmp") {
+	tmp := "/tmp"
+	if opts != nil && opts.TmpDir != "" {
+		tmp = opts.TmpDir
+	}
+	if strings.HasPrefix(path, tmp) {
 		return "tmp"
 	}
 	return "other"

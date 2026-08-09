@@ -1,10 +1,5 @@
 package classify
 
-import (
-	"os"
-	"path/filepath"
-)
-
 // ActionFor classifies a tool call into a semantic action based on the tool
 // name, its input parameters, and the result content. Shell commands are
 // further classified by inspecting the command text (searchCommand,
@@ -66,12 +61,19 @@ func ActionFor(tool string, input map[string]any, result string) string {
 }
 
 // TargetsFor extracts repo file targets and out-of-repo touches from a tool
-// call. cwd is the session's working directory for resolving relative paths.
+// call using default Options. cwd is the session's working directory for
+// resolving relative paths.
 func TargetsFor(cwd, tool string, input map[string]any, result string) ([]Target, []OutsideTouch) {
+	return TargetsForWith(nil, cwd, tool, input, result)
+}
+
+// TargetsForWith is the Options-aware variant. Pass nil opts to keep all weak
+// targets and use path heuristics for outside-scope classification.
+func TargetsForWith(opts *Options, cwd, tool string, input map[string]any, result string) ([]Target, []OutsideTouch) {
 	var targets []Target
 	var outside []OutsideTouch
 	add := func(path, touch string, weak bool, lines [][2]int, base string) {
-		rel, out, ok := normalizePath(cwd, base, path)
+		rel, out, ok := normalizePath(opts, cwd, base, path)
 		if !ok {
 			return
 		}
@@ -79,7 +81,7 @@ func TargetsFor(cwd, tool string, input map[string]any, result string) ([]Target
 			outside = append(outside, *out)
 			return
 		}
-		if weak && !repoPathExists(cwd, rel) {
+		if weak && opts != nil && opts.FileExists != nil && !opts.FileExists(cwd, rel) {
 			return
 		}
 		for i := range targets {
@@ -193,12 +195,16 @@ func TargetsFor(cwd, tool string, input map[string]any, result string) ([]Target
 	return targets, outside
 }
 
-// BuildEvent constructs a classified Event from a ToolCall + ToolResult pair.
-// seq is the event sequence number within the trace; cwd is the session
-// working directory for path resolution.
+// BuildEvent constructs a classified Event from a ToolCall + ToolResult pair
+// using default Options.
 func BuildEvent(seq int, cwd string, call ToolCall, result ToolResult) Event {
+	return BuildEventWith(nil, seq, cwd, call, result)
+}
+
+// BuildEventWith is the Options-aware variant.
+func BuildEventWith(opts *Options, seq int, cwd string, call ToolCall, result ToolResult) Event {
 	action := ActionFor(call.Name, call.Input, result.Content)
-	targets, outside := TargetsFor(cwd, call.Name, call.Input, result.Content)
+	targets, outside := TargetsForWith(opts, cwd, call.Name, call.Input, result.Content)
 	if targets == nil {
 		targets = []Target{}
 	}
@@ -245,13 +251,4 @@ func readLines(input map[string]any) [][2]int {
 		return [][2]int{{offset, offset}}
 	}
 	return [][2]int{{offset, offset + limit - 1}}
-}
-
-func repoPathExists(cwd, rel string) bool {
-	if cwd == "" || rel == "" {
-		return false
-	}
-	abs := filepath.Join(cwd, filepath.FromSlash(rel))
-	_, err := os.Stat(abs)
-	return err == nil
 }

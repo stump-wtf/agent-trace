@@ -145,6 +145,7 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 	}
 
 	recognized := false
+	opts := osClassifyOptions()
 	pending := map[string]classify.ToolCall{}
 	pendingOrder := []string{}
 	var events []classify.Event
@@ -230,7 +231,7 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 					Content: classify.ContentToString(item.Content),
 					IsError: item.IsError,
 				}
-				events = append(events, classify.BuildEvent(seq, meta.Cwd, call, result))
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
 				seq++
 			}
 		}
@@ -238,7 +239,7 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 	// Flush orphaned tool calls (no result received).
 	for _, id := range pendingOrder {
 		if call, ok := pending[id]; ok {
-			events = append(events, classify.BuildEvent(seq, meta.Cwd, call, classify.ToolResult{}))
+			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{}))
 			seq++
 		}
 	}
