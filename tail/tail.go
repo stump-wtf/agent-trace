@@ -21,24 +21,24 @@ const (
 
 // SessionMeta is lightweight metadata for a discovered session file.
 type SessionMeta struct {
-	Key       string // stable hash of harness + path
-	ID        string // agent-level session ID
-	Harness   Harness
-	Path      string // absolute path to the .jsonl file
-	Cwd       string // working directory the session ran in
-	Model     string // model identifier (if available)
-	Title     string // session title or first user message
-	StartedAt string // ISO 8601 timestamp
-	EndedAt   string // ISO 8601 timestamp
+	Key       string  `json:"key"`
+	ID        string  `json:"id"`
+	Harness   Harness `json:"harness"`
+	Path      string  `json:"path"`
+	Cwd       string  `json:"cwd,omitempty"`
+	Model     string  `json:"model,omitempty"`
+	Title     string  `json:"title,omitempty"`
+	StartedAt string  `json:"startedAt,omitempty"`
+	EndedAt   string  `json:"endedAt,omitempty"`
 }
 
 // Event pairs a classified tool interaction with its source session metadata.
 type Event struct {
-	Session    SessionMeta
-	Classified classify.Event
-	RawCall    classify.ToolCall
-	RawResult  classify.ToolResult
-	ReceivedAt time.Time // when the tailer observed this event
+	Session    SessionMeta         `json:"session"`
+	Classified classify.Event      `json:"classified"`
+	RawCall    classify.ToolCall   `json:"rawCall,omitempty"`
+	RawResult  classify.ToolResult `json:"rawResult,omitempty"`
+	ReceivedAt time.Time           `json:"receivedAt"`
 }
 
 // IdleConfig controls idle detection thresholds.

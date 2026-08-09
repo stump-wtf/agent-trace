@@ -41,31 +41,31 @@ const (
 // information for any OTel exporter to serialize without depending on the
 // go.opentelemetry.io/otel SDK at compile time.
 type Span struct {
-	TraceID      string // 32-char hex
-	SpanID       string // 16-char hex
-	ParentSpanID string // empty for root spans
-	Name         string
-	Kind         SpanKind
-	StartTime    time.Time
-	EndTime      time.Time
-	Attributes   map[string]string
-	Status       StatusCode
-	StatusMsg    string
-	Events       []SpanEvent
+	TraceID      string            `json:"traceId"`
+	SpanID       string            `json:"spanId"`
+	ParentSpanID string            `json:"parentSpanId,omitempty"`
+	Name         string            `json:"name"`
+	Kind         SpanKind          `json:"kind"`
+	StartTime    time.Time         `json:"startTime"`
+	EndTime      time.Time         `json:"endTime"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
+	Status       StatusCode        `json:"status"`
+	StatusMsg    string            `json:"statusMsg,omitempty"`
+	Events       []SpanEvent       `json:"events,omitempty"`
 }
 
 // SpanEvent is a timestamped annotation within a span.
 type SpanEvent struct {
-	Name       string
-	Timestamp  time.Time
-	Attributes map[string]string
+	Name       string            `json:"name"`
+	Timestamp  time.Time         `json:"timestamp"`
+	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
 // Trace is a collection of spans forming one agent session's trace.
 type Trace struct {
-	TraceID string
-	Session tail.SessionMeta
-	Spans   []Span
+	TraceID string           `json:"traceId"`
+	Session tail.SessionMeta `json:"session"`
+	Spans   []Span           `json:"spans"`
 }
 
 // BuildTrace converts a session's classified events and marks into an OTel
