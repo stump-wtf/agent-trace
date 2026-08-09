@@ -93,6 +93,9 @@ func (a PiAdapter) Summarize(path string) (SessionMeta, error) {
 		if entry.Type == "model_change" && entry.ModelID != "" {
 			meta.Model = entry.ModelID
 		}
+		if entry.Type == "session_info" && entry.Name != "" {
+			meta.Title = entry.Name
+		}
 		if entry.Type == "message" {
 			var msg piMessage
 			if json.Unmarshal(entry.Message, &msg) != nil {
@@ -102,6 +105,9 @@ func (a PiAdapter) Summarize(path string) (SessionMeta, error) {
 				meta.Model = msg.Model
 			}
 		}
+	}
+	if meta.Title == "" {
+		meta.Title = piSessionTitle(entries, "", path)
 	}
 	return meta, err
 }
@@ -133,6 +139,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 	pendingOrder := []string{}
 	var events []classify.Event
 	var marks []classify.Mark
+	firstUserText := ""
 	seq := 0
 
 	for _, entry := range linearizePi(entries) {
@@ -148,7 +155,16 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 				meta.Model = entry.ModelID
 			}
 		case "compaction":
-			marks = append(marks, classify.Mark{Seq: seq, Type: "compaction"})
+			marks = append(marks, classify.Mark{Seq: seq, Timestamp: entry.Timestamp, Type: "compaction"})
+		case "branch_summary":
+			marks = append(marks, classify.Mark{
+				Seq:       seq,
+				Timestamp: entry.Timestamp,
+				Type:      "compaction",
+				Note:      truncateRunes("branch: "+entry.Summary, 2000, "…"),
+			})
+		case "custom_message":
+			// Extension-injected context, not a real user turn.
 		case "message":
 			var msg piMessage
 			if json.Unmarshal(entry.Message, &msg) != nil {
@@ -158,10 +174,14 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 			case "user":
 				text := piContentText(msg.Content)
 				if !injectedUserMessage(text) {
+					if firstUserText == "" {
+						firstUserText = text
+					}
 					marks = append(marks, classify.Mark{
-						Seq:  seq,
-						Type: "user-message",
-						Note: truncateRunes(text, 2000, "…"),
+						Seq:       seq,
+						Timestamp: entry.Timestamp,
+						Type:      "user-message",
+						Note:      truncateRunes(text, 2000, "…"),
 					})
 				}
 			case "assistant":
@@ -216,6 +236,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 			seq++
 		}
 	}
+	meta.Title = piSessionTitle(entries, firstUserText, path)
 	return events, marks, meta, err
 }
 
@@ -357,4 +378,24 @@ func piContentText(raw json.RawMessage) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// piSessionTitle mirrors pi's getSessionName: the latest session_info entry
+// wins (an empty name explicitly clears), else the first user message
+// previewed to 240 runes, else filepath.Base(path).
+func piSessionTitle(entries []piRawEntry, firstUserText, path string) string {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type != "session_info" {
+			continue
+		}
+		if entries[i].Name != "" {
+			return entries[i].Name
+		}
+		break
+	}
+	if firstUserText != "" {
+		preview := strings.Join(strings.Fields(firstUserText), " ")
+		return truncateRunes(preview, 240, "…")
+	}
+	return filepath.Base(path)
 }
