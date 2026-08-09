@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -416,19 +417,56 @@ func parseCodexInputText(text string) map[string]any {
 	return input
 }
 
+var exitCodeRe = regexp.MustCompile(`(?im)^(?:Process exited with code|Exit code:)\s*([0-9]+)\s*$`)
+
 // commandOutputFailed infers failure from command output text. Codex doesn't
 // set an explicit error flag like Claude Code does, so we estimate.
+// Ported verbatim from mindwalk internal/adapter/codex/adapter.go.
 func commandOutputFailed(output string) bool {
-	lower := strings.ToLower(output)
-	patterns := []string{
-		"exit code 1", "exit code 2", "command failed",
-		"error:", "fatal:", "panic:", "traceback",
-		"script failed", "timed out",
+	trimmed := strings.TrimSpace(output)
+	var envelope struct {
+		ExitCode *int  `json:"exit_code"`
+		TimedOut *bool `json:"timed_out"`
+		Metadata struct {
+			ExitCode *int `json:"exit_code"`
+		} `json:"metadata"`
 	}
-	for _, p := range patterns {
-		if strings.Contains(lower, p) {
+	if json.Unmarshal([]byte(trimmed), &envelope) == nil {
+		if envelope.ExitCode != nil {
+			return *envelope.ExitCode != 0
+		}
+		if envelope.Metadata.ExitCode != nil {
+			return *envelope.Metadata.ExitCode != 0
+		}
+		if envelope.TimedOut != nil && *envelope.TimedOut {
 			return true
 		}
 	}
-	return false
+	if strings.HasPrefix(strings.ToLower(trimmed), "apply_patch verification failed") {
+		return true
+	}
+	firstLine := trimmed
+	if newline := strings.IndexByte(firstLine, '\n'); newline >= 0 {
+		firstLine = firstLine[:newline]
+	}
+	status := strings.ToLower(strings.TrimSpace(firstLine))
+	switch {
+	case strings.HasPrefix(status, "script completed"), strings.HasPrefix(status, "script running"):
+		return false
+	case strings.HasPrefix(status, "script failed"):
+		return true
+	}
+	header := trimmed
+	for _, marker := range []string{"\nOutput:\n", "\nFinal output:\n"} {
+		if index := strings.Index(header, marker); index >= 0 {
+			header = header[:index]
+		}
+	}
+	for _, line := range strings.Split(header, "\n") {
+		if strings.EqualFold(strings.TrimSpace(line), "aborted by user") {
+			return true
+		}
+	}
+	match := exitCodeRe.FindStringSubmatch(header)
+	return len(match) == 2 && match[1] != "0"
 }
