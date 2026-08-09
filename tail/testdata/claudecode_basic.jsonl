@@ -1,0 +1,7 @@
+{"type":"user","timestamp":"2026-01-01T10:00:00Z","sessionId":"cc-session-1","cwd":"/home/user/project","gitBranch":"main","message":{"role":"user","content":"fix the login bug"}}
+{"type":"assistant","timestamp":"2026-01-01T10:00:01Z","sessionId":"cc-session-1","message":{"role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"/home/user/project/src/login.go"}}]}}
+{"type":"user","timestamp":"2026-01-01T10:00:02Z","sessionId":"cc-session-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"func login() {}"}]}}
+{"type":"assistant","timestamp":"2026-01-01T10:00:03Z","sessionId":"cc-session-1","message":{"role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"call-2","name":"Edit","input":{"file_path":"/home/user/project/src/login.go"}}]}}
+{"type":"user","timestamp":"2026-01-01T10:00:04Z","sessionId":"cc-session-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-2","content":"edited","is_error":false}]}}
+{"type":"assistant","timestamp":"2026-01-01T10:00:05Z","sessionId":"cc-session-1","message":{"role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"call-3","name":"Bash","input":{"command":"go test ./..."}}]}}
+{"type":"user","timestamp":"2026-01-01T10:00:06Z","sessionId":"cc-session-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-3","content":"PASS","is_error":false}]}}
