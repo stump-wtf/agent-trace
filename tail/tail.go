@@ -34,7 +34,7 @@ type SessionMeta struct {
 
 // Event pairs a classified tool interaction with its source session metadata.
 type Event struct {
-	Session SessionMeta
+	Session    SessionMeta
 	Classified classify.Event
 	RawCall    classify.ToolCall
 	RawResult  classify.ToolResult
