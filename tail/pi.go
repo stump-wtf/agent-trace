@@ -1,0 +1,360 @@
+package tail
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+)
+
+// PiAdapter discovers and parses Pi agent session logs from
+// ~/.pi/agent/sessions/. Pi sessions are append-only trees that get
+// linearized before parsing.
+type PiAdapter struct {
+	Dir string // override default session directory
+}
+
+func (a PiAdapter) Harness() Harness { return HarnessPi }
+
+func (a PiAdapter) SessionDir() string {
+	if a.Dir != "" {
+		return a.Dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pi", "agent", "sessions")
+}
+
+// ListSessions walks the session directory and returns metadata for each
+// recognized Pi session file, sorted newest-first.
+func (a PiAdapter) ListSessions() ([]SessionMeta, error) {
+	dir := a.SessionDir()
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return nil, nil
+	}
+	var metas []SessionMeta
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
+			return nil
+		}
+		meta, err := a.Summarize(path)
+		if err == nil {
+			metas = append(metas, meta)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(metas, func(i, j int) bool {
+		return metas[i].EndedAt > metas[j].EndedAt
+	})
+	return metas, nil
+}
+
+// Summarize extracts metadata from a Pi session file.
+func (a PiAdapter) Summarize(path string) (SessionMeta, error) {
+	header, entries, recognized, err := readPiSession(path)
+	if err != nil && !recognized {
+		return SessionMeta{}, err
+	}
+	if !recognized {
+		return SessionMeta{}, fmt.Errorf("not a pi session: %s", path)
+	}
+	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if header.ID != "" {
+		id = header.ID
+	}
+	meta := SessionMeta{
+		Key:       sessionKey(string(a.Harness()), path),
+		ID:        id,
+		Harness:   a.Harness(),
+		Path:      path,
+		Cwd:       header.Cwd,
+		StartedAt: header.Timestamp,
+		EndedAt:   header.Timestamp,
+	}
+	for _, entry := range linearizePi(entries) {
+		if entry.Timestamp != "" {
+			if meta.StartedAt == "" {
+				meta.StartedAt = entry.Timestamp
+			}
+			meta.EndedAt = entry.Timestamp
+		}
+		if entry.Type == "model_change" && entry.ModelID != "" {
+			meta.Model = entry.ModelID
+		}
+		if entry.Type == "message" {
+			var msg piMessage
+			if json.Unmarshal(entry.Message, &msg) != nil {
+				continue
+			}
+			if msg.Role == "assistant" && msg.Model != "" && meta.Model == "" {
+				meta.Model = msg.Model
+			}
+		}
+	}
+	return meta, err
+}
+
+// Parse reads a complete Pi session file and returns classified events.
+func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+	header, entries, recognized, err := readPiSession(path)
+	if err != nil && !recognized {
+		return nil, nil, SessionMeta{}, err
+	}
+	if !recognized {
+		return nil, nil, SessionMeta{}, fmt.Errorf("not a pi session: %s", path)
+	}
+	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if header.ID != "" {
+		id = header.ID
+	}
+	meta := SessionMeta{
+		Key:       sessionKey(string(a.Harness()), path),
+		ID:        id,
+		Harness:   a.Harness(),
+		Path:      path,
+		Cwd:       header.Cwd,
+		StartedAt: header.Timestamp,
+		EndedAt:   header.Timestamp,
+	}
+
+	pending := map[string]classify.ToolCall{}
+	pendingOrder := []string{}
+	var events []classify.Event
+	var marks []classify.Mark
+	seq := 0
+
+	for _, entry := range linearizePi(entries) {
+		if entry.Timestamp != "" {
+			if meta.StartedAt == "" {
+				meta.StartedAt = entry.Timestamp
+			}
+			meta.EndedAt = entry.Timestamp
+		}
+		switch entry.Type {
+		case "model_change":
+			if entry.ModelID != "" {
+				meta.Model = entry.ModelID
+			}
+		case "compaction":
+			marks = append(marks, classify.Mark{Seq: seq, Type: "compaction"})
+		case "message":
+			var msg piMessage
+			if json.Unmarshal(entry.Message, &msg) != nil {
+				continue
+			}
+			switch msg.Role {
+			case "user":
+				text := piContentText(msg.Content)
+				if !injectedUserMessage(text) {
+					marks = append(marks, classify.Mark{
+						Seq:  seq,
+						Type: "user-message",
+						Note: truncateRunes(text, 2000, "…"),
+					})
+				}
+			case "assistant":
+				if msg.Model != "" && meta.Model == "" {
+					meta.Model = msg.Model
+				}
+				for _, block := range piContentBlocks(msg.Content) {
+					if block.Type != "toolCall" || block.ID == "" {
+						continue
+					}
+					call := classify.ToolCall{
+						ID:        block.ID,
+						Name:      block.Name,
+						Input:     block.Arguments,
+						Timestamp: entry.Timestamp,
+					}
+					if _, exists := pending[call.ID]; !exists {
+						pendingOrder = append(pendingOrder, call.ID)
+					}
+					pending[call.ID] = call
+				}
+			case "toolResult":
+				call, ok := pending[msg.ToolCallID]
+				if !ok {
+					continue
+				}
+				delete(pending, msg.ToolCallID)
+				events = append(events, classify.BuildEvent(seq, meta.Cwd, call, classify.ToolResult{
+					Content: piContentText(msg.Content),
+					IsError: msg.IsError,
+				}))
+				seq++
+			case "bashExecution":
+				call := classify.ToolCall{
+					Name:      "bash",
+					Input:     map[string]any{"command": msg.Command},
+					Timestamp: entry.Timestamp,
+				}
+				isErr := msg.ExitCode != nil && *msg.ExitCode != 0
+				events = append(events, classify.BuildEvent(seq, meta.Cwd, call, classify.ToolResult{
+					Content: msg.Output,
+					IsError: isErr,
+				}))
+				seq++
+			}
+		}
+	}
+	// Flush orphaned tool calls.
+	for _, id := range pendingOrder {
+		if call, ok := pending[id]; ok {
+			events = append(events, classify.BuildEvent(seq, meta.Cwd, call, classify.ToolResult{}))
+			seq++
+		}
+	}
+	return events, marks, meta, err
+}
+
+// Pi-specific types.
+
+type piRawEntry struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	ParentID  string          `json:"parentId"`
+	Timestamp string          `json:"timestamp"`
+	Cwd       string          `json:"cwd"`
+	Message   json.RawMessage `json:"message"`
+	ModelID   string          `json:"modelId"`
+	Summary   string          `json:"summary"`
+	Name      string          `json:"name"`
+}
+
+type piMessage struct {
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"`
+	Model      string          `json:"model"`
+	ToolCallID string          `json:"toolCallId"`
+	IsError    bool            `json:"isError"`
+	Command    string          `json:"command"`
+	Output     string          `json:"output"`
+	ExitCode   *int            `json:"exitCode"`
+}
+
+type piContentBlock struct {
+	Type      string         `json:"type"`
+	Text      string         `json:"text"`
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+func isPiHeader(data []byte) bool {
+	var probe struct {
+		Type string          `json:"type"`
+		ID   json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(data, &probe) != nil {
+		return false
+	}
+	return probe.Type == "session" && len(probe.ID) > 0 && probe.ID[0] == '"'
+}
+
+func readPiSession(path string) (header piRawEntry, entries []piRawEntry, recognized bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return piRawEntry{}, nil, false, err
+	}
+	defer f.Close()
+	sawEntry := false
+	err = ReadJSONLines(f, func(data []byte) {
+		var entry piRawEntry
+		if json.Unmarshal(data, &entry) != nil {
+			if !json.Valid(data) {
+				return
+			}
+			sawEntry = true
+			return
+		}
+		if !sawEntry {
+			sawEntry = true
+			if isPiHeader(data) {
+				header = entry
+				recognized = true
+			}
+			return
+		}
+		if recognized && entry.Type != "" {
+			entries = append(entries, entry)
+		}
+	})
+	return header, entries, recognized, err
+}
+
+// linearizePi walks the parentId chain from the last entry back to root,
+// producing chronological order. V1 files without IDs pass through as-is.
+func linearizePi(entries []piRawEntry) []piRawEntry {
+	leaf := -1
+	index := map[string]int{}
+	for i, entry := range entries {
+		if entry.ID != "" {
+			leaf = i
+			index[entry.ID] = i
+		}
+	}
+	if leaf < 0 {
+		return entries
+	}
+	var path []int
+	visited := map[int]bool{}
+	cur := leaf
+	for {
+		if visited[cur] {
+			break
+		}
+		visited[cur] = true
+		path = append(path, cur)
+		parent := entries[cur].ParentID
+		if parent == "" {
+			break
+		}
+		next, ok := index[parent]
+		if !ok {
+			break
+		}
+		cur = next
+	}
+	ordered := make([]piRawEntry, 0, len(path))
+	for i := len(path) - 1; i >= 0; i-- {
+		ordered = append(ordered, entries[path[i]])
+	}
+	return ordered
+}
+
+func piContentBlocks(raw json.RawMessage) []piContentBlock {
+	if len(raw) == 0 {
+		return nil
+	}
+	var blocks []piContentBlock
+	if json.Unmarshal(raw, &blocks) == nil {
+		return blocks
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil && s != "" {
+		return []piContentBlock{{Type: "text", Text: s}}
+	}
+	return nil
+}
+
+func piContentText(raw json.RawMessage) string {
+	var parts []string
+	for _, block := range piContentBlocks(raw) {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, strings.TrimSpace(block.Text))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
