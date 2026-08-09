@@ -88,7 +88,7 @@ func (a CodexAdapter) Summarize(path string) (SessionMeta, error) {
 				if payload.ID != "" {
 					meta.ID = payload.ID
 				}
-				if payload.Cwd != "" {
+				if payload.Cwd != "" && meta.Cwd == "" {
 					meta.Cwd = payload.Cwd
 				}
 			}
@@ -102,6 +102,9 @@ func (a CodexAdapter) Summarize(path string) (SessionMeta, error) {
 	})
 	if !recognized {
 		return SessionMeta{}, fmt.Errorf("not a Codex session: %s", path)
+	}
+	if meta.Title == "" {
+		meta.Title = filepath.Base(path)
 	}
 	return meta, err
 }
@@ -127,24 +130,10 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	results := map[string]classify.ToolResult{}
 	callOrder := []string{}
 	var marks []classify.Mark
-	seq := 0
 
 	err = ReadJSONLines(f, func(data []byte) {
 		var line codexRawLine
 		if json.Unmarshal(data, &line) != nil {
-			return
-		}
-		if line.Type == "session_meta" {
-			recognized = true
-			var payload codexSessionMeta
-			if json.Unmarshal(line.Payload, &payload) == nil {
-				if payload.ID != "" {
-					meta.ID = payload.ID
-				}
-				if payload.Cwd != "" {
-					meta.Cwd = payload.Cwd
-				}
-			}
 			return
 		}
 		if line.Timestamp != "" {
@@ -153,78 +142,131 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 			}
 			meta.EndedAt = line.Timestamp
 		}
-		if line.Type == "response_item" {
+		switch line.Type {
+		case "session_meta":
+			recognized = true
+			var payload codexSessionMeta
+			if json.Unmarshal(line.Payload, &payload) == nil {
+				if payload.ID != "" {
+					meta.ID = payload.ID
+				}
+				if payload.Cwd != "" && meta.Cwd == "" {
+					meta.Cwd = payload.Cwd
+				}
+			}
+		case "response_item":
+			recognized = true
 			var payload codexResponseItem
 			if json.Unmarshal(line.Payload, &payload) != nil {
 				return
 			}
-			switch payload.Type {
-			case "function_call", "custom_tool_call":
-				callID, name, input := decodeCodexCall(payload)
-				if callID == "" {
+			if callID, name, input, ok := decodeCodexCall(payload); ok {
+				if _, exists := calls[callID]; exists {
 					return
 				}
-				call := classify.ToolCall{
+				if name == "spawn_agent" {
+					marks = append(marks, classify.Mark{
+						Seq:       len(callOrder),
+						Timestamp: line.Timestamp,
+						Type:      "subagent",
+						Note:      name,
+					})
+				}
+				calls[callID] = classify.ToolCall{
 					ID:        callID,
 					Name:      name,
 					Input:     input,
 					Timestamp: line.Timestamp,
 				}
+				callOrder = append(callOrder, callID)
+				return
+			}
+			if callID, result, ok := decodeCodexOutput(payload); ok {
 				if _, exists := calls[callID]; !exists {
-					callOrder = append(callOrder, callID)
+					return
 				}
-				calls[callID] = call
-			case "function_call_output", "custom_tool_call_output":
-				callID, result := decodeCodexOutput(payload)
-				if callID == "" {
+				if _, exists := results[callID]; exists {
 					return
 				}
 				results[callID] = result
+				return
 			}
-		}
-		if line.Type == "message" {
-			var msg codexMessage
-			if json.Unmarshal(line.Payload, &msg) == nil && msg.Role == "user" {
-				text := strings.TrimSpace(msg.Content)
-				if text != "" && !injectedUserMessage(text) {
+			if payload.Type == "message" && payload.Role == "user" && payload.Content.HasText() {
+				text := payload.Content.Text()
+				if !injectedUserMessage(text) {
 					marks = append(marks, classify.Mark{
-						Seq:  seq,
-						Type: "user-message",
-						Note: truncateRunes(text, 2000, "…"),
+						Seq:       len(callOrder),
+						Timestamp: line.Timestamp,
+						Type:      "user-message",
+						Note:      truncateRunes(text, 2000, "…"),
 					})
 				}
 			}
+		case "message":
+			// Mirrors Summarize: a roleless "message" line is another
+			// source's shape (pi nests the payload), not a Codex line.
+			if line.Role == "" {
+				return
+			}
+			recognized = true
+			if line.Role == "user" && line.Content.HasText() {
+				text := line.Content.Text()
+				if !injectedUserMessage(text) {
+					marks = append(marks, classify.Mark{
+						Seq:       len(callOrder),
+						Timestamp: line.Timestamp,
+						Type:      "user-message",
+						Note:      truncateRunes(text, 2000, "…"),
+					})
+				}
+			}
+		case "event_msg":
+			recognized = true
+			var payload codexEventMsg
+			if json.Unmarshal(line.Payload, &payload) != nil {
+				return
+			}
+			if payload.Type == "context_compacted" {
+				marks = append(marks, classify.Mark{
+					Seq:       len(callOrder),
+					Timestamp: line.Timestamp,
+					Type:      "compaction",
+				})
+			}
+		case "":
+			if line.ID != "" {
+				recognized = true
+				meta.ID = line.ID
+			}
 		}
 	})
-	// Assemble events in call order.
-	for _, callID := range callOrder {
+
+	// Assemble events in call order, assigning sequential seq numbers.
+	events := make([]classify.Event, 0, len(callOrder))
+	for seq, callID := range callOrder {
 		call := calls[callID]
-		result := results[callID] // zero value if no result
-		events := append(([]classify.Event)(nil), classify.BuildEvent(seq, meta.Cwd, call, result))
-		_ = events
-		seq++
+		result := results[callID]
+		events = append(events, classify.BuildEvent(seq, meta.Cwd, call, result))
+	}
+
+	if meta.Title == "" {
+		meta.Title = filepath.Base(path)
 	}
 	if !recognized {
 		return nil, nil, SessionMeta{}, fmt.Errorf("not a Codex session: %s", path)
 	}
-	// Rebuild events properly.
-	var allEvents []classify.Event
-	seq = 0
-	for _, callID := range callOrder {
-		call := calls[callID]
-		result := results[callID]
-		allEvents = append(allEvents, classify.BuildEvent(seq, meta.Cwd, call, result))
-		seq++
-	}
-	return allEvents, marks, meta, err
+	return events, marks, meta, err
 }
 
 // Codex-specific types.
 
 type codexRawLine struct {
-	Type      string          `json:"type"`
-	Timestamp string          `json:"timestamp"`
-	Payload   json.RawMessage `json:"payload"`
+	Type      string           `json:"type"`
+	Timestamp string           `json:"timestamp"`
+	Payload   json.RawMessage  `json:"payload"`
+	ID        string           `json:"id"`
+	Role      string           `json:"role"`
+	Content   codexContentList `json:"content"`
 }
 
 type codexSessionMeta struct {
@@ -233,29 +275,82 @@ type codexSessionMeta struct {
 }
 
 type codexResponseItem struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id"`
-	CallID    string          `json:"call_id"`
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-	Input     json.RawMessage `json:"input"`
-	Output    any             `json:"output"`
+	Type      string           `json:"type"`
+	ID        string           `json:"id"`
+	Name      string           `json:"name"`
+	Arguments json.RawMessage  `json:"arguments"`
+	Input     json.RawMessage  `json:"input"`
+	CallID    string           `json:"call_id"`
+	Output    any              `json:"output"`
+	Role      string           `json:"role"`
+	Content   codexContentList `json:"content"`
 }
 
-type codexMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+type codexEventMsg struct {
+	Type string `json:"type"`
 }
 
-func decodeCodexCall(payload codexResponseItem) (string, string, map[string]any) {
+type codexContentList struct {
+	Items []codexContentItem
+}
+
+func (c *codexContentList) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		c.Items = []codexContentItem{{Type: "text", Text: s}}
+		return nil
+	}
+	var items []codexContentItem
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	c.Items = items
+	return nil
+}
+
+type codexContentItem struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func (c codexContentList) Text() string {
+	var parts []string
+	for _, item := range c.Items {
+		if strings.TrimSpace(item.Text) != "" {
+			parts = append(parts, strings.TrimSpace(item.Text))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (c codexContentList) HasText() bool {
+	for _, item := range c.Items {
+		if strings.TrimSpace(item.Text) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeCodexCall(payload codexResponseItem) (string, string, map[string]any, bool) {
+	switch payload.Type {
+	case "function_call", "custom_tool_call":
+	default:
+		return "", "", nil, false
+	}
 	callID := payload.CallID
 	if callID == "" {
 		callID = payload.ID
 	}
-	if callID == "" {
-		return "", "", nil
+	if callID == "" || payload.Name == "" {
+		return "", "", nil, false
 	}
-	name := payload.Name
 	var raw json.RawMessage
 	switch payload.Type {
 	case "function_call":
@@ -263,40 +358,62 @@ func decodeCodexCall(payload codexResponseItem) (string, string, map[string]any)
 	case "custom_tool_call":
 		raw = payload.Input
 	}
-	input := parseCodexInput(raw)
-	return callID, name, input
+	return callID, payload.Name, parseCodexInput(raw), true
 }
 
-func decodeCodexOutput(payload codexResponseItem) (string, classify.ToolResult) {
-	callID := payload.CallID
-	if callID == "" {
-		return "", classify.ToolResult{}
+func decodeCodexOutput(payload codexResponseItem) (string, classify.ToolResult, bool) {
+	switch payload.Type {
+	case "function_call_output", "custom_tool_call_output":
+	default:
+		return "", classify.ToolResult{}, false
+	}
+	if payload.CallID == "" {
+		return "", classify.ToolResult{}, false
 	}
 	output := classify.ContentToString(payload.Output)
-	return callID, classify.ToolResult{
+	return payload.CallID, classify.ToolResult{
 		Content: output,
 		IsError: commandOutputFailed(output),
-	}
+	}, true
 }
 
 func parseCodexInput(raw json.RawMessage) map[string]any {
-	if len(raw) == 0 {
-		return nil
+	input := map[string]any{}
+	if len(raw) == 0 || string(raw) == "null" {
+		return input
 	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) == nil {
-		return m
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		input["_raw"] = string(raw)
+		return input
 	}
-	// Try as string (some Codex calls serialize args as JSON string).
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		var inner map[string]any
-		if json.Unmarshal([]byte(s), &inner) == nil {
-			return inner
-		}
-		return map[string]any{"_raw": s}
+	switch v := value.(type) {
+	case map[string]any:
+		return v
+	case string:
+		return parseCodexInputText(v)
+	default:
+		encoded, _ := json.Marshal(v)
+		input["_raw"] = string(encoded)
+		return input
 	}
-	return nil
+}
+
+func parseCodexInputText(text string) map[string]any {
+	input := map[string]any{}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return input
+	}
+	if json.Unmarshal([]byte(trimmed), &input) == nil {
+		return input
+	}
+	var nested string
+	if json.Unmarshal([]byte(trimmed), &nested) == nil && nested != text {
+		return parseCodexInputText(nested)
+	}
+	input["_raw"] = text
+	return input
 }
 
 // commandOutputFailed infers failure from command output text. Codex doesn't

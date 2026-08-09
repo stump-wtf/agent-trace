@@ -1,0 +1,8 @@
+{"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":"sess-001","cwd":"/home/user/project"}}
+{"type":"message","timestamp":"2026-01-01T10:00:01Z","role":"user","content":"fix the login bug"}
+{"type":"response_item","timestamp":"2026-01-01T10:00:02Z","payload":{"type":"function_call","call_id":"call-1","name":"shell","arguments":{"command":"grep -rn 'login' src/"}}}
+{"type":"response_item","timestamp":"2026-01-01T10:00:03Z","payload":{"type":"function_call_output","call_id":"call-1","output":"src/login.go:42: func login() {"}}
+{"type":"message","timestamp":"2026-01-01T10:00:04Z","role":"user","content":"now fix the tests too"}
+{"type":"response_item","timestamp":"2026-01-01T10:00:05Z","payload":{"type":"custom_tool_call","call_id":"call-2","name":"apply_patch","input":{"patch":"*** Update File: src/login.go\n@@\n-old code\n+new code\n"}}}
+{"type":"response_item","timestamp":"2026-01-01T10:00:06Z","payload":{"type":"custom_tool_call_output","call_id":"call-2","output":"patch applied"}}
+{"type":"event_msg","timestamp":"2026-01-01T10:00:07Z","payload":{"type":"context_compacted"}}
