@@ -28,8 +28,10 @@ type SessionMeta struct {
 	Cwd       string  `json:"cwd,omitempty"`
 	Model     string  `json:"model,omitempty"`
 	Title     string  `json:"title,omitempty"`
+	GitBranch string  `json:"gitBranch,omitempty"`
 	StartedAt string  `json:"startedAt,omitempty"`
 	EndedAt   string  `json:"endedAt,omitempty"`
+	Auxiliary bool    `json:"-"`
 }
 
 // Event pairs a classified tool interaction with its source session metadata.

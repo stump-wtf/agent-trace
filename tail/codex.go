@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
 )
@@ -15,7 +17,8 @@ import (
 // CodexAdapter discovers and parses OpenAI Codex session logs from
 // ~/.codex/sessions/. Each session is a .jsonl file with response_item lines.
 type CodexAdapter struct {
-	Dir string // override default session directory
+	Dir       string // override default session directory
+	IndexPath string // override session_index.jsonl location for title resolution
 }
 
 func (a CodexAdapter) Harness() Harness { return HarnessCodex }
@@ -47,7 +50,7 @@ func (a CodexAdapter) ListSessions() ([]SessionMeta, error) {
 			return nil
 		}
 		meta, err := a.Summarize(path)
-		if err == nil {
+		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}
 		return nil
@@ -82,7 +85,14 @@ func (a CodexAdapter) Summarize(path string) (SessionMeta, error) {
 		if json.Unmarshal(data, &line) != nil {
 			return
 		}
-		if line.Type == "session_meta" {
+		if line.Timestamp != "" {
+			if meta.StartedAt == "" {
+				meta.StartedAt = line.Timestamp
+			}
+			meta.EndedAt = line.Timestamp
+		}
+		switch line.Type {
+		case "session_meta":
 			recognized = true
 			var payload codexSessionMeta
 			if json.Unmarshal(line.Payload, &payload) == nil {
@@ -92,17 +102,41 @@ func (a CodexAdapter) Summarize(path string) (SessionMeta, error) {
 				if payload.Cwd != "" && meta.Cwd == "" {
 					meta.Cwd = payload.Cwd
 				}
+				if payload.Git.Branch != "" {
+					meta.GitBranch = payload.Git.Branch
+				}
+				if payload.isSubagent() {
+					meta.Auxiliary = true
+				}
 			}
-		}
-		if line.Timestamp != "" {
-			if meta.StartedAt == "" {
-				meta.StartedAt = line.Timestamp
+		case "turn_context":
+			recognized = true
+			var payload codexTurnContext
+			if json.Unmarshal(line.Payload, &payload) == nil {
+				if payload.Cwd != "" && meta.Cwd == "" {
+					meta.Cwd = payload.Cwd
+				}
+				if payload.Model != "" && meta.Model == "" {
+					meta.Model = payload.Model
+				}
 			}
-			meta.EndedAt = line.Timestamp
+		case "response_item", "event_msg":
+			recognized = true
+		case "message":
+			if line.Role != "" {
+				recognized = true
+			}
+		case "":
+			if line.ID != "" {
+				recognized = true
+			}
 		}
 	})
 	if !recognized {
 		return SessionMeta{}, fmt.Errorf("not a Codex session: %s", path)
+	}
+	if meta.Title == "" {
+		meta.Title = a.titleFor(meta.ID)
 	}
 	if meta.Title == "" {
 		meta.Title = filepath.Base(path)
@@ -130,6 +164,8 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	calls := map[string]classify.ToolCall{}
 	results := map[string]classify.ToolResult{}
 	callOrder := []string{}
+	directPatches := map[string]bool{}
+	patchResults := map[string]codexEventMsg{}
 	var marks []classify.Mark
 
 	err = ReadJSONLines(f, func(data []byte) {
@@ -153,6 +189,23 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 				}
 				if payload.Cwd != "" && meta.Cwd == "" {
 					meta.Cwd = payload.Cwd
+				}
+				if payload.Git.Branch != "" && meta.GitBranch == "" {
+					meta.GitBranch = payload.Git.Branch
+				}
+				if payload.isSubagent() {
+					meta.Auxiliary = true
+				}
+			}
+		case "turn_context":
+			recognized = true
+			var payload codexTurnContext
+			if json.Unmarshal(line.Payload, &payload) == nil {
+				if payload.Cwd != "" && meta.Cwd == "" {
+					meta.Cwd = payload.Cwd
+				}
+				if payload.Model != "" && meta.Model == "" {
+					meta.Model = payload.Model
 				}
 			}
 		case "response_item":
@@ -180,6 +233,7 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 					Timestamp: line.Timestamp,
 				}
 				callOrder = append(callOrder, callID)
+				directPatches[callID] = payload.Type == "custom_tool_call" && name == "apply_patch"
 				return
 			}
 			if callID, result, ok := decodeCodexOutput(payload); ok {
@@ -204,8 +258,6 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 				}
 			}
 		case "message":
-			// Mirrors Summarize: a roleless "message" line is another
-			// source's shape (pi nests the payload), not a Codex line.
 			if line.Role == "" {
 				return
 			}
@@ -234,6 +286,11 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 					Type:      "compaction",
 				})
 			}
+			if payload.Type == "patch_apply_end" && payload.CallID != "" && directPatches[payload.CallID] {
+				if _, exists := patchResults[payload.CallID]; !exists {
+					patchResults[payload.CallID] = payload
+				}
+			}
 		case "":
 			if line.ID != "" {
 				recognized = true
@@ -242,14 +299,24 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 		}
 	})
 
-	// Assemble events in call order, assigning sequential seq numbers.
+	// Assemble events in call order, enriching apply_patch calls with
+	// authoritative per-file change lists from patch_apply_end events.
 	events := make([]classify.Event, 0, len(callOrder))
 	for seq, callID := range callOrder {
 		call := calls[callID]
 		result := results[callID]
+		if patchResult, ok := patchResults[callID]; ok {
+			call.Input = applyPatchChanges(call.Input, patchResult.Changes)
+			if patchResult.Success != nil {
+				result.IsError = !*patchResult.Success
+			}
+		}
 		events = append(events, classify.BuildEvent(seq, meta.Cwd, call, result))
 	}
 
+	if meta.Title == "" {
+		meta.Title = a.titleFor(meta.ID)
+	}
 	if meta.Title == "" {
 		meta.Title = filepath.Base(path)
 	}
@@ -271,8 +338,31 @@ type codexRawLine struct {
 }
 
 type codexSessionMeta struct {
-	ID  string `json:"id"`
-	Cwd string `json:"cwd"`
+	ID           string          `json:"id"`
+	Cwd          string          `json:"cwd"`
+	ThreadSource string          `json:"thread_source"`
+	Source       json.RawMessage `json:"source"`
+	Git          struct {
+		Branch     string `json:"branch"`
+		CommitHash string `json:"commit_hash"`
+	} `json:"git"`
+}
+
+func (p codexSessionMeta) isSubagent() bool {
+	if p.ThreadSource == "subagent" {
+		return true
+	}
+	if len(p.Source) == 0 {
+		return false
+	}
+	var source struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if json.Unmarshal(p.Source, &source) != nil {
+		return false
+	}
+	subagent := strings.TrimSpace(string(source.Subagent))
+	return subagent != "" && subagent != "null"
 }
 
 type codexResponseItem struct {
@@ -288,7 +378,17 @@ type codexResponseItem struct {
 }
 
 type codexEventMsg struct {
-	Type string `json:"type"`
+	Type    string `json:"type"`
+	CallID  string `json:"call_id"`
+	Success *bool  `json:"success"`
+	Changes map[string]struct {
+		Type string `json:"type"`
+	} `json:"changes"`
+}
+
+type codexTurnContext struct {
+	Cwd   string `json:"cwd"`
+	Model string `json:"model"`
 }
 
 type codexContentList struct {
@@ -469,4 +569,108 @@ func commandOutputFailed(output string) bool {
 	}
 	match := exitCodeRe.FindStringSubmatch(header)
 	return len(match) == 2 && match[1] != "0"
+}
+
+func applyPatchChanges(input map[string]any, changes map[string]struct {
+	Type string `json:"type"`
+}) map[string]any {
+	if len(changes) == 0 {
+		return input
+	}
+	merged := make(map[string]any, len(input)+1)
+	for key, value := range input {
+		merged[key] = value
+	}
+	patch := ""
+	for _, key := range []string{"patch", "input", "_raw"} {
+		if value, ok := input[key].(string); ok {
+			patch = value
+			break
+		}
+	}
+	if patch != "" && !strings.HasSuffix(patch, "\n") {
+		patch += "\n"
+	}
+	paths := make([]string, 0, len(changes))
+	for path := range changes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		operation := "Update"
+		switch strings.ToLower(changes[path].Type) {
+		case "add":
+			operation = "Add"
+		case "delete":
+			operation = "Delete"
+		}
+		patch += fmt.Sprintf("*** %s File: %s\n", operation, path)
+	}
+	merged["patch"] = patch
+	return merged
+}
+
+func (a CodexAdapter) indexPath() string {
+	if a.IndexPath != "" {
+		return a.IndexPath
+	}
+	if a.Dir != "" {
+		return filepath.Join(filepath.Dir(a.Dir), "session_index.jsonl")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".codex", "session_index.jsonl")
+}
+
+func (a CodexAdapter) titleFor(id string) string {
+	if id == "" {
+		return ""
+	}
+	index := a.indexPath()
+	if index == "" {
+		return ""
+	}
+	return loadCodexTitleIndex(index)[id]
+}
+
+var codexTitleIndexCache struct {
+	mu      sync.Mutex
+	path    string
+	size    int64
+	modTime time.Time
+	titles  map[string]string
+}
+
+func loadCodexTitleIndex(path string) map[string]string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	codexTitleIndexCache.mu.Lock()
+	defer codexTitleIndexCache.mu.Unlock()
+	if codexTitleIndexCache.path == path && codexTitleIndexCache.size == info.Size() && codexTitleIndexCache.modTime.Equal(info.ModTime()) {
+		return codexTitleIndexCache.titles
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	titles := map[string]string{}
+	_ = ReadJSONLines(f, func(data []byte) {
+		var row struct {
+			ID         string `json:"id"`
+			ThreadName string `json:"thread_name"`
+		}
+		if json.Unmarshal(data, &row) == nil && row.ID != "" && row.ThreadName != "" {
+			titles[row.ID] = row.ThreadName
+		}
+	})
+	codexTitleIndexCache.path = path
+	codexTitleIndexCache.size = info.Size()
+	codexTitleIndexCache.modTime = info.ModTime()
+	codexTitleIndexCache.titles = titles
+	return titles
 }
