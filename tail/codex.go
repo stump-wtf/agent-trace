@@ -161,6 +161,7 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	}
 
 	recognized := false
+	opts := osClassifyOptions()
 	calls := map[string]classify.ToolCall{}
 	results := map[string]classify.ToolResult{}
 	callOrder := []string{}
@@ -311,7 +312,7 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 				result.IsError = !*patchResult.Success
 			}
 		}
-		events = append(events, classify.BuildEvent(seq, meta.Cwd, call, result))
+		events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
 	}
 
 	if meta.Title == "" {
