@@ -88,7 +88,7 @@ func (a ClaudeCodeAdapter) Summarize(path string) (SessionMeta, error) {
 		if isCCLine(line) {
 			recognized = true
 		}
-		if line.SessionID != "" && meta.ID == "" {
+		if line.SessionID != "" {
 			meta.ID = line.SessionID
 		}
 		if line.Timestamp != "" {
