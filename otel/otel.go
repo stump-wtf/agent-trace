@@ -13,6 +13,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
@@ -71,13 +73,17 @@ type Trace struct {
 // BuildTrace converts a session's classified events and marks into an OTel
 // trace. Each user message starts a new parent span; tool calls become child
 // spans under the most recent parent. Events without a preceding user message
-// are grouped under a synthetic "session-start" root span.
+// are grouped under no parent (orphan top-level).
+//
+// EndTime is finalized after building: tool spans end at the next timeline
+// entry's start (or their own start if last), turn parent spans span from
+// their first child's start to their last child's end.
+//
+// Timestamps are deterministic: missing timestamps fall back to the nearest
+// event, then SessionMeta.StartedAt, then the zero time — never time.Now().
 func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []classify.Mark) Trace {
 	traceID := deriveTraceID(session.Key)
-	trace := Trace{
-		TraceID: traceID,
-		Session: session,
-	}
+	sessionStart := parseEventTimestamp(session.StartedAt)
 
 	// Merge events and marks into a single timeline ordered by sequence.
 	timeline := make([]timelineEntry, 0, len(events)+len(marks))
@@ -87,23 +93,37 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 	for _, e := range events {
 		timeline = append(timeline, timelineEntry{seq: e.Seq, isMark: false, event: e})
 	}
-	sortTimeline(timeline)
+	sort.SliceStable(timeline, func(i, j int) bool {
+		if timeline[i].seq != timeline[j].seq {
+			return timeline[i].seq < timeline[j].seq
+		}
+		// Marks before events on equal seq — marks open/close a turn boundary.
+		return timeline[i].isMark && !timeline[j].isMark
+	})
 
-	var currentParent Span
-	hasParent := false
+	// Compute start times for each timeline entry.
+	for i := range timeline {
+		if timeline[i].isMark {
+			timeline[i].startTime = resolveMarkTime(timeline[i].mark, events, sessionStart)
+		} else {
+			timeline[i].startTime = resolveEventTime(timeline[i].event, sessionStart)
+		}
+	}
+
+	var spans []Span
+	parentIdx := -1 // index into spans
 	spanCounter := 0
 
 	for _, entry := range timeline {
 		if entry.isMark {
 			switch entry.mark.Type {
 			case "user-message":
-				// Start a new parent span for this turn.
-				currentParent = Span{
+				span := Span{
 					TraceID:   traceID,
 					SpanID:    deriveSpanID(traceID, spanCounter),
 					Name:      truncate(entry.mark.Note, 128),
 					Kind:      SpanKindInternal,
-					StartTime: parseTimestamp(events, entry.seq),
+					StartTime: entry.startTime,
 					Attributes: map[string]string{
 						"agent.session.id":      session.ID,
 						"agent.session.harness": string(session.Harness),
@@ -111,12 +131,9 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					},
 					Status: StatusOK,
 				}
-				if hasParent {
-					currentParent.ParentSpanID = "" // top-level turn
-				}
-				hasParent = true
 				spanCounter++
-				trace.Spans = append(trace.Spans, currentParent)
+				parentIdx = len(spans)
+				spans = append(spans, span)
 
 			case "compaction":
 				span := Span{
@@ -124,18 +141,18 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					SpanID:    deriveSpanID(traceID, spanCounter),
 					Name:      "context-compaction",
 					Kind:      SpanKindInternal,
-					StartTime: parseTimestamp(events, entry.seq),
+					StartTime: entry.startTime,
 					Attributes: map[string]string{
 						"agent.session.id": session.ID,
 						"agent.event.type": "compaction",
 					},
 					Status: StatusOK,
 				}
-				if hasParent {
-					span.ParentSpanID = currentParent.SpanID
+				if parentIdx >= 0 {
+					span.ParentSpanID = spans[parentIdx].SpanID
 				}
 				spanCounter++
-				trace.Spans = append(trace.Spans, span)
+				spans = append(spans, span)
 
 			case "subagent":
 				span := Span{
@@ -143,7 +160,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					SpanID:    deriveSpanID(traceID, spanCounter),
 					Name:      fmt.Sprintf("subagent:%s", entry.mark.Note),
 					Kind:      SpanKindClient,
-					StartTime: parseTimestamp(events, entry.seq),
+					StartTime: entry.startTime,
 					Attributes: map[string]string{
 						"agent.session.id":    session.ID,
 						"agent.event.type":    "subagent",
@@ -151,11 +168,11 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					},
 					Status: StatusOK,
 				}
-				if hasParent {
-					span.ParentSpanID = currentParent.SpanID
+				if parentIdx >= 0 {
+					span.ParentSpanID = spans[parentIdx].SpanID
 				}
 				spanCounter++
-				trace.Spans = append(trace.Spans, span)
+				spans = append(spans, span)
 			}
 			continue
 		}
@@ -173,7 +190,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 			for _, t := range ev.Targets {
 				paths = append(paths, t.Path)
 			}
-			attrs["agent.targets"] = joinStrings(paths, ",")
+			attrs["agent.targets"] = strings.Join(paths, ",")
 		}
 		if len(ev.Outside) > 0 {
 			attrs["agent.outside_count"] = fmt.Sprintf("%d", len(ev.Outside))
@@ -187,8 +204,8 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 		}
 
 		parentID := ""
-		if hasParent {
-			parentID = currentParent.SpanID
+		if parentIdx >= 0 {
+			parentID = spans[parentIdx].SpanID
 		}
 
 		span := Span{
@@ -197,16 +214,63 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 			ParentSpanID: parentID,
 			Name:         ev.Summary,
 			Kind:         SpanKindInternal,
-			StartTime:    parseEventTimestamp(ev.Timestamp),
+			StartTime:    entry.startTime,
 			Attributes:   attrs,
 			Status:       status,
 			StatusMsg:    statusMsg,
 		}
 		spanCounter++
-		trace.Spans = append(trace.Spans, span)
+		spans = append(spans, span)
 	}
 
-	return trace
+	// Finalize EndTimes: each span ends at the next timeline entry's start,
+	// or its own start if it's the last entry. Turn parent spans span from
+	// their first child's start to their last child's end.
+	for i := range spans {
+		spans[i].EndTime = computeEndTime(spans, timeline, i, sessionStart)
+	}
+
+	return Trace{
+		TraceID: traceID,
+		Session: session,
+		Spans:   spans,
+	}
+}
+
+// computeEndTime determines the end time for span at index spanIdx.
+func computeEndTime(spans []Span, timeline []timelineEntry, spanIdx int, sessionStart time.Time) time.Time {
+	span := spans[spanIdx]
+
+	// For turn parent spans, span from first child's start to last child's end.
+	// We identify turn parents by the "agent.turn.type" attribute.
+	if _, isTurn := span.Attributes["agent.turn.type"]; isTurn {
+		var firstChild, lastChild time.Time
+		for i := range spans {
+			if spans[i].ParentSpanID == span.SpanID {
+				if firstChild.IsZero() {
+					firstChild = spans[i].StartTime
+				}
+				lastChild = spans[i].StartTime
+			}
+		}
+		if !lastChild.IsZero() {
+			return lastChild
+		}
+	}
+
+	// For other spans, end at the next timeline entry's start after this span.
+	spanStart := span.StartTime
+	for _, entry := range timeline {
+		if !entry.startTime.IsZero() && entry.startTime.After(spanStart) {
+			return entry.startTime
+		}
+	}
+
+	// Last span: end at sessionStart if it's later, else own start.
+	if !sessionStart.IsZero() && sessionStart.After(spanStart) {
+		return sessionStart
+	}
+	return spanStart
 }
 
 // deriveTraceID produces a deterministic 32-char hex trace ID from a session key.
@@ -221,30 +285,49 @@ func deriveSpanID(traceID string, seq int) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func parseTimestamp(events []classify.Event, seq int) time.Time {
+func resolveMarkTime(mark classify.Mark, events []classify.Event, sessionStart time.Time) time.Time {
+	if mark.Timestamp != "" {
+		return parseEventTimestamp(mark.Timestamp)
+	}
 	for _, e := range events {
-		if e.Seq == seq && e.Timestamp != "" {
+		if e.Seq == mark.Seq && e.Timestamp != "" {
 			return parseEventTimestamp(e.Timestamp)
 		}
 	}
-	return time.Now()
+	if !sessionStart.IsZero() {
+		return sessionStart
+	}
+	return time.Time{}
+}
+
+func resolveEventTime(event classify.Event, sessionStart time.Time) time.Time {
+	if event.Timestamp != "" {
+		return parseEventTimestamp(event.Timestamp)
+	}
+	if !sessionStart.IsZero() {
+		return sessionStart
+	}
+	return time.Time{}
 }
 
 func parseEventTimestamp(ts string) time.Time {
 	if ts == "" {
-		return time.Now()
+		return time.Time{}
 	}
 	t, err := time.Parse(time.RFC3339Nano, ts)
 	if err != nil {
 		t, err = time.Parse(time.RFC3339, ts)
 		if err != nil {
-			return time.Now()
+			return time.Time{}
 		}
 	}
 	return t
 }
 
 func truncate(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s
@@ -252,28 +335,10 @@ func truncate(s string, max int) string {
 	return string(runes[:max-1]) + "…"
 }
 
-func joinStrings(ss []string, sep string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += sep
-		}
-		result += s
-	}
-	return result
-}
-
 type timelineEntry struct {
-	seq    int
-	isMark bool
-	mark   classify.Mark
-	event  classify.Event
-}
-
-func sortTimeline(entries []timelineEntry) {
-	for i := 1; i < len(entries); i++ {
-		for j := i; j > 0 && entries[j].seq < entries[j-1].seq; j-- {
-			entries[j], entries[j-1] = entries[j-1], entries[j]
-		}
-	}
+	seq       int
+	isMark    bool
+	mark      classify.Mark
+	event     classify.Event
+	startTime time.Time
 }

@@ -2,7 +2,6 @@ package otel
 
 import (
 	"testing"
-	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
 	"gitea.stump.rocks/stump.wtf/agent-trace/tail"
@@ -72,8 +71,8 @@ func TestParseEventTimestamp(t *testing.T) {
 
 func TestParseEventTimestampInvalid(t *testing.T) {
 	parsed := parseEventTimestamp("not-a-timestamp")
-	if parsed.Before(time.Now().Add(-time.Minute)) {
-		t.Error("invalid timestamp should fall back to now")
+	if !parsed.IsZero() {
+		t.Error("invalid timestamp should return zero time, not time.Now()")
 	}
 }
 
