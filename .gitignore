@@ -1,0 +1,12 @@
+# Go
+*.out
+*.prof
+coverage.txt
+dist/
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

@@ -1,11 +1,11 @@
 package classify
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"fmt"
 	"strings"
 )
 

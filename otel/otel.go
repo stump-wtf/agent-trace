@@ -41,9 +41,9 @@ const (
 // information for any OTel exporter to serialize without depending on the
 // go.opentelemetry.io/otel SDK at compile time.
 type Span struct {
-	TraceID      string            // 32-char hex
-	SpanID       string            // 16-char hex
-	ParentSpanID string            // empty for root spans
+	TraceID      string // 32-char hex
+	SpanID       string // 16-char hex
+	ParentSpanID string // empty for root spans
 	Name         string
 	Kind         SpanKind
 	StartTime    time.Time
@@ -105,9 +105,9 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					Kind:      SpanKindInternal,
 					StartTime: parseTimestamp(events, entry.seq),
 					Attributes: map[string]string{
-						"agent.session.id":    session.ID,
+						"agent.session.id":      session.ID,
 						"agent.session.harness": string(session.Harness),
-						"agent.turn.type":     "user-message",
+						"agent.turn.type":       "user-message",
 					},
 					Status: StatusOK,
 				}
