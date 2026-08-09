@@ -49,7 +49,7 @@ func (a ClaudeCodeAdapter) ListSessions() ([]SessionMeta, error) {
 			return nil
 		}
 		meta, err := a.Summarize(path)
-		if err == nil {
+		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}
 		return nil
@@ -102,6 +102,12 @@ func (a ClaudeCodeAdapter) Summarize(path string) (SessionMeta, error) {
 		}
 		if line.Cwd != "" && meta.Cwd == "" {
 			meta.Cwd = line.Cwd
+		}
+		if line.GitBranch != "" && meta.GitBranch == "" {
+			meta.GitBranch = line.GitBranch
+		}
+		if line.IsSidechain {
+			meta.Auxiliary = true
 		}
 		if len(line.Message) > 0 {
 			var msg ccMessage
@@ -158,6 +164,12 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 		}
 		if line.Cwd != "" && meta.Cwd == "" {
 			meta.Cwd = line.Cwd
+		}
+		if line.GitBranch != "" && meta.GitBranch == "" {
+			meta.GitBranch = line.GitBranch
+		}
+		if line.IsSidechain {
+			meta.Auxiliary = true
 		}
 		if line.Timestamp != "" {
 			if meta.StartedAt == "" {
