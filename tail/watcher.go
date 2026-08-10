@@ -31,6 +31,12 @@ type Adapter interface {
 	SessionDir() string
 	ListSessions() ([]SessionMeta, error)
 	Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error)
+	// WithRoot returns a copy of the adapter configured to discover sessions
+	// under the given root directory instead of the compiled-in default.
+	// This lets a consumer holding []Adapter from DefaultAdapters retarget
+	// them without type-switching over every concrete type. Passing an
+	// empty string restores the default behaviour.
+	WithRoot(dir string) Adapter
 }
 
 // DefaultAdapters returns adapters for all supported agent harnesses.
@@ -40,6 +46,18 @@ func DefaultAdapters() []Adapter {
 		CodexAdapter{},
 		PiAdapter{},
 	}
+}
+
+// DefaultAdaptersIn returns adapters for all supported agent harnesses,
+// each configured to discover sessions under root. It is shorthand for
+// calling WithRoot on every adapter returned by DefaultAdapters. Passing
+// an empty string is equivalent to DefaultAdapters.
+func DefaultAdaptersIn(root string) []Adapter {
+	out := make([]Adapter, 0, 4)
+	for _, a := range DefaultAdapters() {
+		out = append(out, a.WithRoot(root))
+	}
+	return out
 }
 
 // NewWatcher creates a watcher with the given config and adapters.

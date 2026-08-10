@@ -27,6 +27,15 @@ type OpenCodeAdapter struct {
 
 func (a OpenCodeAdapter) Harness() Harness { return HarnessOpenCode }
 
+// WithRoot returns a copy of the adapter with DBPath set to
+// root/.opencode/opencode.db. Pass an empty string to restore the default.
+func (a OpenCodeAdapter) WithRoot(root string) Adapter {
+	if root == "" {
+		return OpenCodeAdapter{}
+	}
+	return OpenCodeAdapter{DBPath: filepath.Join(root, ".opencode", "opencode.db")}
+}
+
 func (a OpenCodeAdapter) SessionDir() string {
 	if a.DBPath != "" {
 		return filepath.Dir(a.DBPath)

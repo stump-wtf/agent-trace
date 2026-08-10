@@ -30,6 +30,15 @@ func (a ClaudeCodeAdapter) SessionDir() string {
 	return filepath.Join(home, ".claude", "projects")
 }
 
+// WithRoot returns a copy of the adapter with Dir set to
+// root/.claude/projects. Pass an empty string to restore the default.
+func (a ClaudeCodeAdapter) WithRoot(root string) Adapter {
+	if root == "" {
+		return ClaudeCodeAdapter{}
+	}
+	return ClaudeCodeAdapter{Dir: filepath.Join(root, ".claude", "projects")}
+}
+
 // ListSessions walks the session directory and returns metadata for each
 // recognized Claude Code session file, sorted newest-first.
 func (a ClaudeCodeAdapter) ListSessions() ([]SessionMeta, error) {

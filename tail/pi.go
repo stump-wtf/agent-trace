@@ -31,6 +31,15 @@ func (a PiAdapter) SessionDir() string {
 	return filepath.Join(home, ".pi", "agent", "sessions")
 }
 
+// WithRoot returns a copy of the adapter with Dir set to
+// root/.pi/agent/sessions. Pass an empty string to restore the default.
+func (a PiAdapter) WithRoot(root string) Adapter {
+	if root == "" {
+		return PiAdapter{}
+	}
+	return PiAdapter{Dir: filepath.Join(root, ".pi", "agent", "sessions")}
+}
+
 // ListSessions walks the session directory and returns metadata for each
 // recognized Pi session file, sorted newest-first.
 func (a PiAdapter) ListSessions() ([]SessionMeta, error) {
