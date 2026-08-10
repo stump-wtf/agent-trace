@@ -10,6 +10,25 @@ import (
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
 )
 
+// parseSessionTimeOk parses an RFC 3339 / RFC 3339Nano timestamp and returns
+// the parsed time plus true on success, or zero plus false when the string is
+// empty or unparseable. It is the bool-returning counterpart to
+// parseSessionTime, used by SessionMeta.Started and .Ended so callers can
+// distinguish a missing timestamp from a genuine zero-time value.
+func parseSessionTimeOk(ts string) (time.Time, bool) {
+	if ts == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, ts)
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+	return t, true
+}
+
 // Harness identifies which agent CLI produced a session log.
 type Harness string
 
@@ -46,6 +65,20 @@ type SessionMeta struct {
 	// Auxiliary marks a session ListSessions omits from its results: a Claude
 	// Code sidechain, or each other adapter's own equivalent. Not serialized.
 	Auxiliary bool `json:"-"`
+}
+
+// Started parses StartedAt into a time.Time. The boolean is false when the
+// field is missing or unparseable, so callers can distinguish "unknown" from
+// the zero time and avoid treating a missing timestamp as "1 January year 1".
+func (m SessionMeta) Started() (time.Time, bool) {
+	return parseSessionTimeOk(m.StartedAt)
+}
+
+// Ended parses EndedAt into a time.Time. The boolean is false when the field
+// is missing or unparseable, so callers can distinguish "unknown" from the
+// zero time.
+func (m SessionMeta) Ended() (time.Time, bool) {
+	return parseSessionTimeOk(m.EndedAt)
 }
 
 // Event pairs a classified tool interaction with its source session metadata.
