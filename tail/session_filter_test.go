@@ -18,8 +18,8 @@ type staticAdapter struct {
 	err      error
 }
 
-func (s staticAdapter) Harness() Harness { return "static" }
-func (s staticAdapter) SessionDir() string { return "/fake" }
+func (s staticAdapter) Harness() Harness        { return "static" }
+func (s staticAdapter) SessionDir() string      { return "/fake" }
 func (s staticAdapter) WithRoot(string) Adapter { return s }
 func (s staticAdapter) ListSessions() ([]SessionMeta, error) {
 	return s.sessions, s.err
@@ -351,6 +351,40 @@ func TestCwdMatches(t *testing.T) {
 			got := cwdMatches(tt.sessionCwd, tt.filterCwd)
 			if got != tt.want {
 				t.Errorf("cwdMatches(%q, %q) = %v, want %v", tt.sessionCwd, tt.filterCwd, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCwdMatchesNormalizesPaths guards the two ways the component comparison
+// broke before cleaning: a trailing separator on the filter made every
+// comparison fail, and the separator was hardcoded to '/'. Both matter because
+// SessionFilter.Cwd is documented as exact rather than best-effort — a caller
+// using it as a scoping boundary would have silently received zero sessions
+// from a path that merely ended in a slash.
+func TestCwdMatchesNormalizesPaths(t *testing.T) {
+	sep := string(filepath.Separator)
+	base := filepath.Join(sep+"home", "joe")
+	tests := []struct {
+		name    string
+		session string
+		filter  string
+		want    bool
+	}{
+		{"exact", base, base, true},
+		{"subdirectory", filepath.Join(base, "proj"), base, true},
+		{"trailing separator on filter", filepath.Join(base, "proj"), base + sep, true},
+		{"trailing separator, exact", base, base + sep, true},
+		{"redundant dot element", filepath.Join(base, "proj"), filepath.Join(base, "."), true},
+		{"sibling with shared prefix", filepath.Join(sep+"home", "joey", "proj"), base, false},
+		{"parent is not a match", filepath.Join(sep + "home"), base, false},
+		{"unrelated", filepath.Join(sep+"srv", "proj"), base, false},
+		{"empty filter never matches", base, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cwdMatches(tt.session, tt.filter); got != tt.want {
+				t.Errorf("cwdMatches(%q, %q) = %v, want %v", tt.session, tt.filter, got, tt.want)
 			}
 		})
 	}

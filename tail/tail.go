@@ -5,6 +5,7 @@
 package tail
 
 import (
+	"path/filepath"
 	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
@@ -193,16 +194,25 @@ func filterSessions(sessions []SessionMeta, f SessionFilter) []SessionMeta {
 // cwdMatches reports whether sessionCwd equals or is a subdirectory of
 // filterCwd. It compares path components, not raw string prefixes, so
 // "/home/joe" does not match sessions in "/home/joey".
+//
+// Both paths are cleaned first, so a trailing separator, a redundant "//", or
+// a "." element does not change the answer. That matters more than it looks:
+// callers routinely pass paths straight from configuration or from
+// filepath.Dir, and before cleaning, a single trailing slash made every
+// comparison fail — which for a filter used as a scoping boundary means
+// silently returning nothing rather than reporting a malformed input.
 func cwdMatches(sessionCwd, filterCwd string) bool {
 	if filterCwd == "" {
 		return false
 	}
+	sessionCwd = filepath.Clean(sessionCwd)
+	filterCwd = filepath.Clean(filterCwd)
 	if sessionCwd == filterCwd {
 		return true
 	}
 	if len(sessionCwd) <= len(filterCwd) {
 		return false
 	}
-	return sessionCwd[len(filterCwd)] == '/' &&
+	return sessionCwd[len(filterCwd)] == filepath.Separator &&
 		sessionCwd[:len(filterCwd)] == filterCwd
 }
