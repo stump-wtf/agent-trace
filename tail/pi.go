@@ -31,13 +31,17 @@ func (a PiAdapter) SessionDir() string {
 	return filepath.Join(home, ".pi", "agent", "sessions")
 }
 
-// WithRoot returns a copy of the adapter with Dir set to
-// root/.pi/agent/sessions. Pass an empty string to restore the default.
+// WithRoot returns a copy of the adapter that discovers sessions under root,
+// which is treated as a HOME-like base: the adapter appends its own layout
+// (.pi/agent/sessions). Sibling fields are preserved; only the root-derived
+// path changes. Pass an empty string to restore the default.
 func (a PiAdapter) WithRoot(root string) Adapter {
 	if root == "" {
-		return PiAdapter{}
+		a.Dir = ""
+		return a
 	}
-	return PiAdapter{Dir: filepath.Join(root, ".pi", "agent", "sessions")}
+	a.Dir = filepath.Join(root, ".pi", "agent", "sessions")
+	return a
 }
 
 // ListSessions walks the session directory and returns metadata for each

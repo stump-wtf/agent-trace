@@ -32,16 +32,18 @@ type CrushAdapter struct {
 
 func (a CrushAdapter) Harness() Harness { return HarnessCrush }
 
-// WithRoot returns a copy of the adapter with ProjectsPath set to
-// root/.local/share/crush/projects.json. Pass an empty string to restore
-// the default.
+// WithRoot returns a copy of the adapter that discovers sessions under root,
+// which is treated as a HOME-like base: the adapter appends its own layout
+// (.local/share/crush/projects.json). Sibling fields — DBPath and Cwd, which a
+// caller may have set for a single-project scan — are preserved; only the
+// root-derived path changes. Pass an empty string to restore the default.
 func (a CrushAdapter) WithRoot(root string) Adapter {
 	if root == "" {
-		return CrushAdapter{}
+		a.ProjectsPath = ""
+		return a
 	}
-	return CrushAdapter{
-		ProjectsPath: filepath.Join(root, ".local", "share", "crush", "projects.json"),
-	}
+	a.ProjectsPath = filepath.Join(root, ".local", "share", "crush", "projects.json")
+	return a
 }
 
 func (a CrushAdapter) projectsPath() string {

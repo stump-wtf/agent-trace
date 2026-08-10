@@ -34,18 +34,20 @@ func (a CodexAdapter) SessionDir() string {
 	return filepath.Join(home, ".codex", "sessions")
 }
 
-// WithRoot returns a copy of the adapter with Dir and IndexPath set to
-// their respective locations under root/.codex/sessions. Pass an empty
-// string to restore the default.
+// WithRoot returns a copy of the adapter that discovers sessions under root,
+// which is treated as a HOME-like base: the adapter appends its own layout
+// (.codex/sessions), including the session_index.jsonl used for title
+// resolution. Sibling fields are preserved; only the root-derived paths
+// change. Pass an empty string to restore the default locations.
 func (a CodexAdapter) WithRoot(root string) Adapter {
 	if root == "" {
-		return CodexAdapter{}
+		a.Dir, a.IndexPath = "", ""
+		return a
 	}
 	sessionsDir := filepath.Join(root, ".codex", "sessions")
-	return CodexAdapter{
-		Dir:       sessionsDir,
-		IndexPath: filepath.Join(sessionsDir, "session_index.jsonl"),
-	}
+	a.Dir = sessionsDir
+	a.IndexPath = filepath.Join(sessionsDir, "session_index.jsonl")
+	return a
 }
 
 // ListSessions walks the session directory and returns metadata for each

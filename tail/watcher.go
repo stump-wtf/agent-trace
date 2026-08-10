@@ -48,13 +48,20 @@ func DefaultAdapters() []Adapter {
 	}
 }
 
-// DefaultAdaptersIn returns adapters for all supported agent harnesses,
-// each configured to discover sessions under root. It is shorthand for
-// calling WithRoot on every adapter returned by DefaultAdapters. Passing
-// an empty string is equivalent to DefaultAdapters.
+// DefaultAdaptersIn returns adapters for all supported agent harnesses, each
+// configured to discover sessions under root. root is a HOME-like base, not a
+// session directory: every adapter appends its own layout beneath it, so
+// DefaultAdaptersIn("/tmp/fake-home") reads /tmp/fake-home/.claude/projects and
+// friends. That is what makes it usable both for hermetic tests and for a
+// relocated $HOME. Passing an empty string is equivalent to DefaultAdapters.
+//
+// Note this covers the same set as DefaultAdapters, which does not currently
+// include the Crush or OpenCode adapters even though both implement Adapter;
+// construct those directly if you need them.
 func DefaultAdaptersIn(root string) []Adapter {
-	out := make([]Adapter, 0, 4)
-	for _, a := range DefaultAdapters() {
+	defaults := DefaultAdapters()
+	out := make([]Adapter, 0, len(defaults))
+	for _, a := range defaults {
 		out = append(out, a.WithRoot(root))
 	}
 	return out
