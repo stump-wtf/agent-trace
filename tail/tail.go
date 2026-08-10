@@ -195,6 +195,25 @@ func filterSessions(sessions []SessionMeta, f SessionFilter) []SessionMeta {
 	return out
 }
 
+// sinceLowerBoundMs converts a filter's Since into an inclusive epoch-
+// millisecond lower bound an adapter can hand to its storage layer, plus a
+// flag reporting whether there is a bound at all.
+//
+// The bound is deliberately COARSE. UnixMilli truncates downward, so the
+// returned value is at or before Since, and a `stored_ms >= bound` predicate
+// can therefore over-select but can never drop a session the exact filter
+// would have kept. That is the whole contract for a pushdown: narrow cheaply
+// in storage, then let filterSessions make the real decision. An adapter that
+// tried to be exact in SQL would have to replicate sub-millisecond comparison
+// and cwd path-component semantics, and any divergence would silently violate
+// the "identical to in-memory filtering" guarantee FilteredLister promises.
+func sinceLowerBoundMs(f SessionFilter) (int64, bool) {
+	if f.Since.IsZero() {
+		return 0, false
+	}
+	return f.Since.UnixMilli(), true
+}
+
 // cwdMatches reports whether sessionCwd equals or is a subdirectory of
 // filterCwd. It compares path components, not raw string prefixes, so
 // "/home/joe" does not match sessions in "/home/joey".

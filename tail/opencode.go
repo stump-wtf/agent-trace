@@ -71,10 +71,51 @@ func (a OpenCodeAdapter) ListSessions() ([]SessionMeta, error) {
 	return metas, nil
 }
 
+// ListSessionsFiltered implements FilteredLister, pushing the time bound into
+// the SQL query and leaving the exact decision to filterSessions. A missing or
+// unreadable database stays an empty result rather than an error, matching
+// ListSessions.
+func (a OpenCodeAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, error) {
+	dbPath := a.dbPath()
+	if dbPath == "" {
+		return nil, nil
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return nil, nil
+	}
+	sinceMs, hasSince := sinceLowerBoundMs(f)
+	metas, err := a.listSessionsSince(db, dbPath, sinceMs, hasSince)
+	if err != nil {
+		return nil, nil
+	}
+	return filterSessions(metas, f), nil
+}
+
 func (a OpenCodeAdapter) listSessions(db *sql.DB, dbPath string) ([]SessionMeta, error) {
-	rows, err := db.QueryContext(context.Background(),
-		`SELECT id, title, directory, parent_id, model, time_created, time_updated
-		 FROM session ORDER BY time_updated DESC`)
+	return a.listSessionsSince(db, dbPath, 0, false)
+}
+
+// listSessionsSince is listSessions with an optional epoch-millisecond lower
+// bound pushed into the query. The bound is a coarse prefilter (see
+// sinceLowerBoundMs): time_created is the same column msToRFC3339 turns into
+// StartedAt, so a row below the bound cannot satisfy the exact filter.
+//
+// Only the time bound pushes down. directory holds the session cwd, but the
+// filter's cwd rule is path-component matching over cleaned paths, and
+// approximating that with SQL LIKE would risk disagreeing with cwdMatches on
+// trailing separators or "." elements — the cheap win is not worth a pushdown
+// that can diverge from the exact predicate.
+func (a OpenCodeAdapter) listSessionsSince(db *sql.DB, dbPath string, sinceMs int64, hasSince bool) ([]SessionMeta, error) {
+	query := `SELECT id, title, directory, parent_id, model, time_created, time_updated
+		 FROM session ORDER BY time_updated DESC`
+	args := []any{}
+	if hasSince {
+		query = `SELECT id, title, directory, parent_id, model, time_created, time_updated
+		 FROM session WHERE time_created >= ? ORDER BY time_updated DESC`
+		args = append(args, sinceMs)
+	}
+	rows, err := db.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return nil, err
 	}

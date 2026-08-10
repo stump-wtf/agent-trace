@@ -121,13 +121,56 @@ func (a CrushAdapter) ListSessions() ([]SessionMeta, error) {
 	return metas, nil
 }
 
+// ListSessionsFiltered implements FilteredLister. Crush stores one database
+// per project and the working directory is a property of that project, not of
+// individual rows — so a project whose cwd cannot match is skipped without
+// opening its database at all, which is the largest win available here. The
+// time bound rides along as a coarse WHERE on created_at.
+//
+// filterSessions still runs over the result: the pushdown only narrows what is
+// read, and the exact predicate is applied in exactly one place, so this can
+// never disagree with ListSessions followed by in-memory filtering.
+func (a CrushAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, error) {
+	sinceMs, hasSince := sinceLowerBoundMs(f)
+	var metas []SessionMeta
+	for _, db := range a.dbPaths() {
+		if f.Cwd != "" && !cwdMatches(db.cwd, f.Cwd) {
+			continue
+		}
+		sessions, err := a.listDBSessionsSince(db.dbPath, db.cwd, sinceMs, hasSince)
+		if err != nil {
+			continue
+		}
+		metas = append(metas, sessions...)
+	}
+	sort.Slice(metas, func(i, j int) bool {
+		return metas[i].EndedAt > metas[j].EndedAt
+	})
+	return filterSessions(metas, f), nil
+}
+
 func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) {
+func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) {
+	return a.listDBSessionsSince(dbPath, cwd, 0, false)
+}
+
+// listDBSessionsSince is listDBSessions with an optional epoch-millisecond
+// lower bound pushed into the query. The bound is a coarse prefilter (see
+// sinceLowerBoundMs): created_at is the same column msToRFC3339 turns into
+// StartedAt, so a row below the bound cannot satisfy the exact filter, while
+// rows above it still face the in-memory pass.
+func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, hasSince bool) ([]SessionMeta, error) {
 	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(context.Background(),
-		`SELECT id, title, parent_session_id, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
+	query := `SELECT id, title, parent_session_id, created_at, updated_at FROM sessions ORDER BY updated_at DESC`
+	args := []any{}
+	if hasSince {
+		query = `SELECT id, title, parent_session_id, created_at, updated_at FROM sessions WHERE created_at >= ? ORDER BY updated_at DESC`
+		args = append(args, sinceMs)
+	}
+	rows, err := db.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return nil, err
 	}
