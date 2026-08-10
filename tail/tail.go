@@ -21,17 +21,19 @@ const (
 
 // SessionMeta is lightweight metadata for a discovered session file.
 type SessionMeta struct {
-	Key       string  `json:"key"`
-	ID        string  `json:"id"`
-	Harness   Harness `json:"harness"`
-	Path      string  `json:"path"`
-	Cwd       string  `json:"cwd,omitempty"`
-	Model     string  `json:"model,omitempty"`
-	Title     string  `json:"title,omitempty"`
-	GitBranch string  `json:"gitBranch,omitempty"`
-	StartedAt string  `json:"startedAt,omitempty"`
-	EndedAt   string  `json:"endedAt,omitempty"`
-	Auxiliary bool    `json:"-"`
+	Key         string  `json:"key"`
+	ID          string  `json:"id"`
+	Harness     Harness `json:"harness"`
+	Path        string  `json:"path"`
+	Cwd         string  `json:"cwd,omitempty"`
+	Model       string  `json:"model,omitempty"`
+	Title       string  `json:"title,omitempty"`
+	GitBranch   string  `json:"gitBranch,omitempty"`
+	StartedAt   string  `json:"startedAt,omitempty"`
+	EndedAt     string  `json:"endedAt,omitempty"`
+	AgentID     string  `json:"agentId,omitempty"`
+	IsSidechain bool    `json:"isSidechain,omitempty"`
+	Auxiliary   bool    `json:"-"`
 }
 
 // Event pairs a classified tool interaction with its source session metadata.
