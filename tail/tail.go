@@ -31,7 +31,21 @@ type SessionMeta struct {
 	GitBranch string  `json:"gitBranch,omitempty"`
 	StartedAt string  `json:"startedAt,omitempty"`
 	EndedAt   string  `json:"endedAt,omitempty"`
-	Auxiliary bool    `json:"-"`
+	// AgentID is the sub-session agent identifier the transcript records, when
+	// it has one. Claude Code only; other adapters leave it empty.
+	AgentID string `json:"agentId,omitempty"`
+	// IsSidechain reports that this session is a subagent branch of another
+	// session rather than a top-level session. Claude Code only.
+	//
+	// NOTE: a sidechain session also sets Auxiliary, and ListSessions skips
+	// auxiliary sessions — so IsSidechain is effectively always false on
+	// metadata obtained from ListSessions. It is observable through Parse and
+	// Summarize against a specific path. Enumerating sidechains would need a
+	// listing that opts into auxiliary sessions, which does not exist yet.
+	IsSidechain bool `json:"isSidechain,omitempty"`
+	// Auxiliary marks a session ListSessions omits from its results: a Claude
+	// Code sidechain, or each other adapter's own equivalent. Not serialized.
+	Auxiliary bool `json:"-"`
 }
 
 // Event pairs a classified tool interaction with its source session metadata.

@@ -107,7 +107,11 @@ func (a ClaudeCodeAdapter) Summarize(path string) (SessionMeta, error) {
 			meta.GitBranch = line.GitBranch
 		}
 		if line.IsSidechain {
+			meta.IsSidechain = true
 			meta.Auxiliary = true
+		}
+		if line.AgentID != "" && meta.AgentID == "" {
+			meta.AgentID = line.AgentID
 		}
 		if len(line.Message) > 0 {
 			var msg ccMessage
@@ -170,7 +174,11 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 			meta.GitBranch = line.GitBranch
 		}
 		if line.IsSidechain {
+			meta.IsSidechain = true
 			meta.Auxiliary = true
+		}
+		if line.AgentID != "" && meta.AgentID == "" {
+			meta.AgentID = line.AgentID
 		}
 		if line.Timestamp != "" {
 			if meta.StartedAt == "" {
