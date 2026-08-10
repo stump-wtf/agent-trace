@@ -181,8 +181,12 @@ func filterSessions(sessions []SessionMeta, f SessionFilter) []SessionMeta {
 			continue
 		}
 		if !f.Since.IsZero() {
-			started := parseSessionTime(s.StartedAt)
-			if started.IsZero() || started.Before(f.Since) {
+			// Started's ok flag is what distinguishes "no timestamp" from a
+			// genuine zero time; both are excluded here, but only because the
+			// filter is documented to exclude unknowns — not because the two
+			// are indistinguishable.
+			started, ok := s.Started()
+			if !ok || started.Before(f.Since) {
 				continue
 			}
 		}
