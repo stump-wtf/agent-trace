@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -132,4 +133,49 @@ func TestClaudeCodeAgentIDFirstOccurrenceWins(t *testing.T) {
 			t.Errorf("AgentID = %q, want %q (first occurrence)", meta.AgentID, "first-agent")
 		}
 	})
+}
+
+// TestClaudeCodeSidechainNotListed pins the interaction between the new
+// IsSidechain field and the existing Auxiliary filter: a sidechain sets
+// Auxiliary, and ListSessions omits auxiliary sessions, so IsSidechain is
+// never true on metadata that came from ListSessions. It is reachable only
+// through Parse/Summarize on a specific path.
+//
+// This is documented behaviour rather than a defect, but it is surprising
+// enough that a consumer reaching for IsSidechain on a listing deserves a
+// failing test rather than a silently empty result.
+func TestClaudeCodeSidechainNotListed(t *testing.T) {
+	dir := t.TempDir()
+	sidechain := filepath.Join(dir, "sidechain.jsonl")
+	top := filepath.Join(dir, "toplevel.jsonl")
+	if err := os.WriteFile(sidechain,
+		[]byte(`{"type":"user","timestamp":"2026-01-01T10:00:00Z","sessionId":"side","agentId":"agent-1","isSidechain":true,"cwd":"/p","message":{"role":"user","content":"x"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(top,
+		[]byte(`{"type":"user","timestamp":"2026-01-01T11:00:00Z","sessionId":"top","cwd":"/p","message":{"role":"user","content":"y"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := ClaudeCodeAdapter{Dir: dir}.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions failed: %v", err)
+	}
+	for _, s := range sessions {
+		if s.IsSidechain {
+			t.Errorf("ListSessions returned a sidechain session %q; auxiliary sessions must be omitted", s.ID)
+		}
+	}
+	if len(sessions) != 1 || sessions[0].ID != "top" {
+		t.Fatalf("sessions = %+v, want only the top-level session", sessions)
+	}
+
+	// The field is still reachable directly, which is the supported path.
+	meta, err := ClaudeCodeAdapter{}.Summarize(sidechain)
+	if err != nil {
+		t.Fatalf("Summarize failed: %v", err)
+	}
+	if !meta.IsSidechain || !meta.Auxiliary {
+		t.Errorf("Summarize: IsSidechain=%v Auxiliary=%v, want both true", meta.IsSidechain, meta.Auxiliary)
+	}
 }
