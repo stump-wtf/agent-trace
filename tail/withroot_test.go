@@ -115,8 +115,8 @@ func TestOpenCodeWithRoot(t *testing.T) {
 func TestDefaultAdaptersIn(t *testing.T) {
 	t.Run("returns correct count", func(t *testing.T) {
 		adapters := DefaultAdaptersIn("/tmp/home")
-		if len(adapters) != 3 {
-			t.Fatalf("expected 3 adapters, got %d", len(adapters))
+		if len(adapters) != len(DefaultAdapters()) {
+			t.Fatalf("DefaultAdaptersIn returned %d adapters, DefaultAdapters has %d", len(adapters), len(DefaultAdapters()))
 		}
 	})
 
@@ -140,6 +140,8 @@ func TestDefaultAdaptersIn(t *testing.T) {
 		wantHarnesses := map[Harness]bool{
 			HarnessClaudeCode: false,
 			HarnessCodex:      false,
+			HarnessCrush:      false,
+			HarnessOpenCode:   false,
 			HarnessPi:         false,
 		}
 		for _, a := range adapters {
@@ -158,8 +160,10 @@ func TestDefaultAdaptersIn(t *testing.T) {
 
 	t.Run("empty root equivalent to DefaultAdapters", func(t *testing.T) {
 		adapters := DefaultAdaptersIn("")
-		if len(adapters) != 3 {
-			t.Fatalf("expected 3 adapters, got %d", len(adapters))
+		// Derived, not hardcoded: this assertion is about the two functions
+		// agreeing, not about how many adapters the package happens to ship.
+		if len(adapters) != len(DefaultAdapters()) {
+			t.Fatalf("DefaultAdaptersIn returned %d adapters, DefaultAdapters has %d", len(adapters), len(DefaultAdapters()))
 		}
 		// Each adapter should have empty override fields (same as default).
 		for _, a := range adapters {
@@ -284,6 +288,54 @@ func TestDefaultAdaptersInCoversEveryDefaultAdapter(t *testing.T) {
 		}
 		if !strings.HasPrefix(dir, "/fake-home") {
 			t.Errorf("%s SessionDir() = %q, want it under the supplied root", a.Harness(), dir)
+		}
+	}
+}
+
+// TestDefaultAdaptersCoversEveryShippedHarness fails when an adapter is added
+// to the package but not to DefaultAdapters — the omission that left Crush and
+// OpenCode invisible to every consumer calling DefaultAdapters or
+// DefaultAdaptersIn, while the README advertised them as supported.
+//
+// It is deliberately written against the Harness identifiers rather than a
+// count, so adding an adapter without listing it here is a compile-visible
+// decision rather than an off-by-one.
+func TestDefaultAdaptersCoversEveryShippedHarness(t *testing.T) {
+	shipped := []Harness{
+		HarnessClaudeCode,
+		HarnessCodex,
+		HarnessCrush,
+		HarnessOpenCode,
+		HarnessPi,
+	}
+	got := make(map[Harness]bool, len(shipped))
+	for _, a := range DefaultAdapters() {
+		got[a.Harness()] = true
+	}
+	for _, h := range shipped {
+		if !got[h] {
+			t.Errorf("DefaultAdapters omits the %q adapter", h)
+		}
+	}
+	if len(got) != len(shipped) {
+		t.Errorf("DefaultAdapters returned %d distinct harnesses, want %d", len(got), len(shipped))
+	}
+}
+
+// TestDefaultAdaptersToleratesMissingBackingStores is the safety argument for
+// including the SQLite-backed adapters by default: on a machine without Crush
+// or OpenCode installed, listing must be an empty result rather than an error
+// or a panic, or adding them to the default set would break every consumer
+// that does not have those tools.
+func TestDefaultAdaptersToleratesMissingBackingStores(t *testing.T) {
+	empty := t.TempDir() // a "home" containing nothing at all
+	for _, a := range DefaultAdaptersIn(empty) {
+		sessions, err := a.ListSessions()
+		if err != nil {
+			t.Errorf("%s ListSessions on an empty home returned error: %v", a.Harness(), err)
+		}
+		if len(sessions) != 0 {
+			t.Errorf("%s returned %d sessions from an empty home", a.Harness(), len(sessions))
 		}
 	}
 }

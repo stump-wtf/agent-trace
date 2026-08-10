@@ -32,7 +32,7 @@ event := classify.BuildEventWith(opts, seq, cwd, call, result)
 
 ### `tail`
 
-Live session log discovery and per-agent JSONL parsing. Watches agent session directories, tails growing files, and emits classified `Event`s. Supports Claude Code, Codex, and Pi via the `Adapter` interface.
+Live session log discovery and per-agent JSONL parsing. Watches agent session directories, tails growing files, and emits classified `Event`s. Supports Claude Code, Codex, Crush, OpenCode, and Pi via the `Adapter` interface — `DefaultAdapters()` returns all five.
 
 ```go
 import "gitea.stump.rocks/stump.wtf/agent-trace/tail"

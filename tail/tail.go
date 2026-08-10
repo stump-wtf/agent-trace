@@ -1,7 +1,7 @@
 // Package tail discovers and tails live agent session logs, emitting
 // normalized ToolCall/ToolResult pairs for classification. It supports
-// multiple agent harnesses (Claude Code, Codex, Pi) via per-adapter parsers
-// and provides idle detection based on event activity.
+// multiple agent harnesses (Claude Code, Codex, Crush, OpenCode, Pi) via
+// per-adapter parsers and provides idle detection based on event activity.
 package tail
 
 import (
@@ -38,6 +38,10 @@ func parseSessionTimeOk(ts string) (time.Time, bool) {
 // Harness identifies which agent CLI produced a session log.
 type Harness string
 
+// The Harness identifiers for every adapter this package ships. HarnessCrush
+// and HarnessOpenCode are declared beside their adapters in crush.go and
+// opencode.go respectively, for historical reasons; all five are equally
+// supported and all five appear in DefaultAdapters.
 const (
 	HarnessClaudeCode Harness = "claude-code"
 	HarnessCodex      Harness = "codex"

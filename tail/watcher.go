@@ -39,10 +39,17 @@ type Adapter interface {
 }
 
 // DefaultAdapters returns adapters for all supported agent harnesses.
+//
+// This is every adapter the package ships. The SQLite-backed pair (Crush,
+// OpenCode) is included: both treat a missing or unreadable database as an
+// empty result rather than an error, so a machine without those tools
+// installed simply contributes no sessions.
 func DefaultAdapters() []Adapter {
 	return []Adapter{
 		ClaudeCodeAdapter{},
 		CodexAdapter{},
+		CrushAdapter{},
+		OpenCodeAdapter{},
 		PiAdapter{},
 	}
 }
@@ -53,10 +60,6 @@ func DefaultAdapters() []Adapter {
 // DefaultAdaptersIn("/tmp/fake-home") reads /tmp/fake-home/.claude/projects and
 // friends. That is what makes it usable both for hermetic tests and for a
 // relocated $HOME. Passing an empty string is equivalent to DefaultAdapters.
-//
-// Note this covers the same set as DefaultAdapters, which does not currently
-// include the Crush or OpenCode adapters even though both implement Adapter;
-// construct those directly if you need them.
 func DefaultAdaptersIn(root string) []Adapter {
 	defaults := DefaultAdapters()
 	out := make([]Adapter, 0, len(defaults))
