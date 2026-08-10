@@ -31,6 +31,12 @@ type Adapter interface {
 	SessionDir() string
 	ListSessions() ([]SessionMeta, error)
 	Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error)
+	// WithRoot returns a copy of the adapter configured to discover sessions
+	// under the given root directory instead of the compiled-in default.
+	// This lets a consumer holding []Adapter from DefaultAdapters retarget
+	// them without type-switching over every concrete type. Passing an
+	// empty string restores the default behaviour.
+	WithRoot(dir string) Adapter
 }
 
 // DefaultAdapters returns adapters for all supported agent harnesses.
@@ -40,6 +46,25 @@ func DefaultAdapters() []Adapter {
 		CodexAdapter{},
 		PiAdapter{},
 	}
+}
+
+// DefaultAdaptersIn returns adapters for all supported agent harnesses, each
+// configured to discover sessions under root. root is a HOME-like base, not a
+// session directory: every adapter appends its own layout beneath it, so
+// DefaultAdaptersIn("/tmp/fake-home") reads /tmp/fake-home/.claude/projects and
+// friends. That is what makes it usable both for hermetic tests and for a
+// relocated $HOME. Passing an empty string is equivalent to DefaultAdapters.
+//
+// Note this covers the same set as DefaultAdapters, which does not currently
+// include the Crush or OpenCode adapters even though both implement Adapter;
+// construct those directly if you need them.
+func DefaultAdaptersIn(root string) []Adapter {
+	defaults := DefaultAdapters()
+	out := make([]Adapter, 0, len(defaults))
+	for _, a := range defaults {
+		out = append(out, a.WithRoot(root))
+	}
+	return out
 }
 
 // NewWatcher creates a watcher with the given config and adapters.

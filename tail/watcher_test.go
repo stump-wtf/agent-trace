@@ -17,6 +17,9 @@ type mockAdapter struct {
 
 func (m mockAdapter) Harness() Harness   { return "mock" }
 func (m mockAdapter) SessionDir() string { return m.dir }
+func (m mockAdapter) WithRoot(dir string) Adapter {
+	return mockAdapter{dir: dir}
+}
 func (m mockAdapter) ListSessions() ([]SessionMeta, error) {
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
