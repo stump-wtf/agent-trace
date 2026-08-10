@@ -222,16 +222,12 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 	w.mu.Unlock()
 }
 
+// parseSessionTime parses a session timestamp, returning the zero time when it
+// is missing or unparseable. It delegates to parseSessionTimeOk and discards
+// the ok flag: the watcher's own uses guard on IsZero anyway. Two independent
+// copies of this parse is exactly the drift the SessionMeta accessors exist to
+// prevent, so there is only one.
 func parseSessionTime(ts string) time.Time {
-	if ts == "" {
-		return time.Time{}
-	}
-	t, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		t, err = time.Parse(time.RFC3339, ts)
-		if err != nil {
-			return time.Time{}
-		}
-	}
+	t, _ := parseSessionTimeOk(ts)
 	return t
 }
