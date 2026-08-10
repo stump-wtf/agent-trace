@@ -121,3 +121,88 @@ func DefaultWatchConfig() WatchConfig {
 		PollInterval: 2 * time.Second,
 	}
 }
+
+// SessionFilter narrows the sessions returned by ListSessionsFiltered.
+// The zero value matches every session — existing callers (including the
+// watcher) are unaffected.
+//
+// Filtering is exact, not a hint: every session that does not satisfy all
+// non-zero fields is excluded from the result. An adapter that implements
+// FilteredLister may push the predicate down to its storage layer for
+// efficiency, but the observable result is identical to in-memory filtering.
+type SessionFilter struct {
+	// Cwd filters sessions whose working directory matches. When non-empty,
+	// a session passes if its Cwd equals this value exactly or starts with
+	// this value followed by a path separator (prefix match on path
+	// components, not a raw string prefix).
+	Cwd string
+	// Since filters sessions started at or after this instant. A session
+	// with a missing or unparseable StartedAt timestamp does not pass this
+	// criterion — the caller asked for a time bound and "unknown" is not
+	// within it.
+	Since time.Time
+}
+
+// FilteredLister is an optional interface an adapter may implement to push
+// a SessionFilter into its storage layer instead of accepting in-memory
+// filtering. The result must be identical to what ListSessions followed by
+// in-memory filtering would produce.
+type FilteredLister interface {
+	ListSessionsFiltered(SessionFilter) ([]SessionMeta, error)
+}
+
+// ListSessionsFiltered returns sessions from the adapter that satisfy the
+// given filter. If the adapter implements FilteredLister, that method is
+// used directly; otherwise the result of ListSessions is filtered in memory.
+//
+// The zero-value filter matches every session, making this equivalent to
+// ListSessions. Filtering is exact — see the SessionFilter docs.
+func ListSessionsFiltered(a Adapter, f SessionFilter) ([]SessionMeta, error) {
+	if fl, ok := a.(FilteredLister); ok {
+		return fl.ListSessionsFiltered(f)
+	}
+	sessions, err := a.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	return filterSessions(sessions, f), nil
+}
+
+// filterSessions applies f to sessions in memory. See SessionFilter for the
+// matching rules.
+func filterSessions(sessions []SessionMeta, f SessionFilter) []SessionMeta {
+	if f == (SessionFilter{}) {
+		return sessions
+	}
+	out := make([]SessionMeta, 0, len(sessions))
+	for _, s := range sessions {
+		if f.Cwd != "" && !cwdMatches(s.Cwd, f.Cwd) {
+			continue
+		}
+		if !f.Since.IsZero() {
+			started := parseSessionTime(s.StartedAt)
+			if started.IsZero() || started.Before(f.Since) {
+				continue
+			}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// cwdMatches reports whether sessionCwd equals or is a subdirectory of
+// filterCwd. It compares path components, not raw string prefixes, so
+// "/home/joe" does not match sessions in "/home/joey".
+func cwdMatches(sessionCwd, filterCwd string) bool {
+	if filterCwd == "" {
+		return false
+	}
+	if sessionCwd == filterCwd {
+		return true
+	}
+	if len(sessionCwd) <= len(filterCwd) {
+		return false
+	}
+	return sessionCwd[len(filterCwd)] == '/' &&
+		sessionCwd[:len(filterCwd)] == filterCwd
+}
