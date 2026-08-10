@@ -12,9 +12,13 @@ import (
 
 // parseSessionTimeOk parses an RFC 3339 / RFC 3339Nano timestamp and returns
 // the parsed time plus true on success, or zero plus false when the string is
-// empty or unparseable. It is the bool-returning counterpart to
-// parseSessionTime, used by SessionMeta.Started and .Ended so callers can
-// distinguish a missing timestamp from a genuine zero-time value.
+// empty or unparseable. It is the single timestamp parser in this package —
+// SessionMeta.Started/.Ended surface the ok flag so callers can distinguish a
+// missing timestamp from a genuine zero-time value, and parseSessionTime wraps
+// it for the watcher, which guards on IsZero instead.
+//
+// Every adapter normalizes to RFC 3339 before the value reaches SessionMeta
+// (the SQLite-backed ones via msToRFC3339), so one parser covers all of them.
 func parseSessionTimeOk(ts string) (time.Time, bool) {
 	if ts == "" {
 		return time.Time{}, false

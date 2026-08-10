@@ -160,3 +160,34 @@ func TestSessionMetaStartedMissingDoesNotEqualZeroTime(t *testing.T) {
 	// and used the zero time directly, they'd wrongly conclude the session
 	// started at 0001-01-01. The bool prevents that.
 }
+
+// TestParseSessionTimeDelegates guards the deduplication: the watcher's
+// parseSessionTime and SessionMeta.Started must never disagree about what a
+// timestamp means. They were two independent copies of the same parse, which
+// is precisely the drift these accessors exist to prevent — if someone
+// reintroduces a second parser, this fails.
+func TestParseSessionTimeDelegates(t *testing.T) {
+	inputs := []string{
+		"",
+		"2026-01-01T10:00:00Z",
+		"2026-01-01T10:00:00.123456789Z",
+		"2026-01-01T10:00:00+05:30",
+		"not-a-timestamp",
+		"1735725600", // epoch seconds: not RFC 3339, must not parse
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			got := parseSessionTime(in)
+			want, ok := SessionMeta{StartedAt: in}.Started()
+			if !got.Equal(want) {
+				t.Errorf("parseSessionTime(%q) = %v, Started() = %v — the two parsers disagree", in, got, want)
+			}
+			// The bool is the only thing that distinguishes them: a failed
+			// parse and a zero time are the same time.Time but not the same
+			// answer, which is the whole point of the accessor.
+			if ok && got.IsZero() {
+				t.Errorf("Started() reported ok for %q but the time is zero", in)
+			}
+		})
+	}
+}
