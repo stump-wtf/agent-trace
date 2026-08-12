@@ -40,11 +40,11 @@ Discovers and parses live agent session logs from per-harness directories, emitt
 
 **Adapter pattern** (`watcher.go`): `Adapter` interface with `Harness()`, `SessionDir()`, `ListSessions()`, `Parse()`. Three implementations:
 
-| Adapter | Directory | Format |
-|---|---|---|
-| `ClaudeCodeAdapter` | `~/.claude/projects/` | One JSONL per session, `tool_use`/`tool_result` content items |
-| `CodexAdapter` | `~/.codex/sessions/` | `response_item` lines with `function_call`/`function_call_output` |
-| `PiAdapter` | `~/.pi/agent/sessions/` | Append-only tree linearized via `parentId` chain |
+| Adapter             | Directory               | Format                                                            |
+| ------------------- | ----------------------- | ----------------------------------------------------------------- |
+| `ClaudeCodeAdapter` | `~/.claude/projects/`   | One JSONL per session, `tool_use`/`tool_result` content items     |
+| `CodexAdapter`      | `~/.codex/sessions/`    | `response_item` lines with `function_call`/`function_call_output` |
+| `PiAdapter`         | `~/.pi/agent/sessions/` | Append-only tree linearized via `parentId` chain                  |
 
 `DefaultAdapters()` returns all three. `NewWatcher` + `ScanOnce` for batch processing. Each adapter has a `Dir` field to override the default session directory (useful for testing).
 
