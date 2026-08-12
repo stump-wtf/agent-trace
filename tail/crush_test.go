@@ -145,7 +145,7 @@ func TestCrushAdapterListSessions(t *testing.T) {
 	defer db.Close()
 
 	now := time.Now().UnixMilli()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, err = db.Exec(`INSERT INTO sessions (id, title, parent_session_id, created_at, updated_at) VALUES (?, ?, '', ?, ?)`,
 			fmt.Sprintf("sess-%d", i), fmt.Sprintf("Session %d", i), now+int64(i*1000), now+int64(i*1000+500))
 		if err != nil {
