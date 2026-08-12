@@ -2,6 +2,7 @@ package tail
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,16 +54,51 @@ func injectedUserMessage(text string) bool {
 	return strings.HasPrefix(text, "<") && strings.HasSuffix(text, ">")
 }
 
-// truncateRunes truncates s to max runes, appending suffix if truncated.
-func truncateRunes(s string, max int, suffix string) string {
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
+// homeDir returns filepath.Join(home, paths...) or "" if the home directory
+// cannot be determined.
+func homeDir(paths ...string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
 	}
-	suffixRunes := []rune(suffix)
-	cut := max - len(suffixRunes)
-	if cut < 0 {
-		cut = 0
-	}
-	return string(runes[:cut]) + suffix
+	return filepath.Join(append([]string{home}, paths...)...)
 }
+
+// openJSONLSession opens a JSONL session file and returns a base SessionMeta
+// with the harness, key, and file-derived ID pre-populated. The caller is
+// responsible for closing the returned file.
+func openJSONLSession(harness Harness, path string) (*os.File, SessionMeta, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, SessionMeta{}, err
+	}
+	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	return f, SessionMeta{
+		Key:     sessionKey(string(harness), path),
+		ID:      id,
+		Harness: harness,
+		Path:    path,
+	}, nil
+}
+
+// unmarshalContentList parses a JSON content list that may be a string,
+// null, or an array of items. makeTextItem converts a bare string into
+// a single-element slice with the harness's content item type.
+func unmarshalContentList[T any](data []byte, makeTextItem func(string) T) ([]T, error) {
+	if len(data) == 0 || string(data) == "null" {
+		return nil, nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return nil, err
+		}
+		return []T{makeTextItem(s)}, nil
+	}
+	var items []T
+	if err := json.Unmarshal(data, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+

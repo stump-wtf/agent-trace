@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
 )
 
 const toolSummaryVerbLimit = 96
@@ -17,7 +19,7 @@ func SummarizeTool(tool string, input map[string]any, targets []Target, outside 
 		verb = desc
 	}
 	if command := firstString(input, "command", "cmd"); command != "" {
-		verb = truncateRunes(command, toolSummaryVerbLimit, "...")
+		verb = strutil.TruncateRunes(command, toolSummaryVerbLimit, "...")
 	} else if tool == "exec" {
 		if summary := summarizeExecWrapper(input); summary != "" {
 			verb = summary
@@ -250,7 +252,7 @@ func summarizeExecWrapper(input map[string]any) string {
 		suffix = fmt.Sprintf(" (+%d more tool calls)", additionalCalls)
 	}
 	commandLimit := toolSummaryVerbLimit - len([]rune(suffix))
-	return truncateRunes(primary, commandLimit, "...") + suffix
+	return strutil.TruncateRunes(primary, commandLimit, "...") + suffix
 }
 
 func matchingJSParen(source string, open int) (int, bool) {
@@ -317,15 +319,4 @@ func isJSIdentifierByte(b byte) bool {
 	return b == '_' || b == '$' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
-func truncateRunes(s string, max int, suffix string) string {
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	suffixRunes := []rune(suffix)
-	cut := max - len(suffixRunes)
-	if cut < 0 {
-		cut = 0
-	}
-	return string(runes[:cut]) + suffix
-}
+

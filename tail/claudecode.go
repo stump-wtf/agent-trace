@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
 )
 
 // ClaudeCodeAdapter discovers and parses Claude Code session logs from
@@ -23,11 +24,7 @@ func (a ClaudeCodeAdapter) SessionDir() string {
 	if a.Dir != "" {
 		return a.Dir
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".claude", "projects")
+	return homeDir(".claude", "projects")
 }
 
 // WithRoot returns a copy of the adapter that discovers sessions under root,
@@ -79,19 +76,12 @@ func (a ClaudeCodeAdapter) ListSessions() ([]SessionMeta, error) {
 // Summarize reads just enough of a session file to extract metadata without
 // parsing every event.
 func (a ClaudeCodeAdapter) Summarize(path string) (SessionMeta, error) {
-	f, err := os.Open(path)
+	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
 		return SessionMeta{}, err
 	}
 	defer f.Close()
 
-	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	meta := SessionMeta{
-		Key:     sessionKey(string(a.Harness()), path),
-		ID:      id,
-		Harness: a.Harness(),
-		Path:    path,
-	}
 	recognized := false
 	err = ReadJSONLines(f, func(data []byte) {
 		var line ccRawLine
@@ -147,19 +137,11 @@ func (a ClaudeCodeAdapter) Summarize(path string) (SessionMeta, error) {
 // Parse reads a complete session file and returns all tool call/result pairs
 // as classified events, plus timeline marks.
 func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
-	f, err := os.Open(path)
+	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
 		return nil, nil, SessionMeta{}, err
 	}
 	defer f.Close()
-
-	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	meta := SessionMeta{
-		Key:     sessionKey(string(a.Harness()), path),
-		ID:      id,
-		Harness: a.Harness(),
-		Path:    path,
-	}
 
 	recognized := false
 	opts := osClassifyOptions()
@@ -219,7 +201,7 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 				marks = append(marks, classify.Mark{
 					Seq:  seq,
 					Type: "user-message",
-					Note: truncateRunes(text, 2000, "…"),
+					Note: strutil.TruncateRunes(text, 2000, "…"),
 				})
 			}
 		}
@@ -299,19 +281,10 @@ type ccContentList struct {
 }
 
 func (c *ccContentList) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 || string(data) == "null" {
-		return nil
-	}
-	if data[0] == '"' {
-		var s string
-		if err := json.Unmarshal(data, &s); err != nil {
-			return err
-		}
-		c.Items = []ccContentItem{{Type: "text", Text: s}}
-		return nil
-	}
-	var items []ccContentItem
-	if err := json.Unmarshal(data, &items); err != nil {
+	items, err := unmarshalContentList(data, func(s string) ccContentItem {
+		return ccContentItem{Type: "text", Text: s}
+	})
+	if err != nil {
 		return err
 	}
 	c.Items = items

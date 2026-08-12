@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
 )
 
 // CodexAdapter discovers and parses OpenAI Codex session logs from
@@ -27,11 +28,7 @@ func (a CodexAdapter) SessionDir() string {
 	if a.Dir != "" {
 		return a.Dir
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".codex", "sessions")
+	return homeDir(".codex", "sessions")
 }
 
 // WithRoot returns a copy of the adapter that discovers sessions under root,
@@ -82,19 +79,12 @@ func (a CodexAdapter) ListSessions() ([]SessionMeta, error) {
 
 // Summarize extracts metadata from a Codex session file without full parsing.
 func (a CodexAdapter) Summarize(path string) (SessionMeta, error) {
-	f, err := os.Open(path)
+	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
 		return SessionMeta{}, err
 	}
 	defer f.Close()
 
-	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	meta := SessionMeta{
-		Key:     sessionKey(string(a.Harness()), path),
-		ID:      id,
-		Harness: a.Harness(),
-		Path:    path,
-	}
 	recognized := false
 	err = ReadJSONLines(f, func(data []byte) {
 		var line codexRawLine
@@ -162,19 +152,11 @@ func (a CodexAdapter) Summarize(path string) (SessionMeta, error) {
 
 // Parse reads a complete Codex session file and returns classified events.
 func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
-	f, err := os.Open(path)
+	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
 		return nil, nil, SessionMeta{}, err
 	}
 	defer f.Close()
-
-	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	meta := SessionMeta{
-		Key:     sessionKey(string(a.Harness()), path),
-		ID:      id,
-		Harness: a.Harness(),
-		Path:    path,
-	}
 
 	recognized := false
 	opts := osClassifyOptions()
@@ -270,7 +252,7 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 						Seq:       len(callOrder),
 						Timestamp: line.Timestamp,
 						Type:      "user-message",
-						Note:      truncateRunes(text, 2000, "…"),
+						Note:      strutil.TruncateRunes(text, 2000, "…"),
 					})
 				}
 			}
@@ -286,7 +268,7 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 						Seq:       len(callOrder),
 						Timestamp: line.Timestamp,
 						Type:      "user-message",
-						Note:      truncateRunes(text, 2000, "…"),
+						Note:      strutil.TruncateRunes(text, 2000, "…"),
 					})
 				}
 			}
@@ -413,19 +395,10 @@ type codexContentList struct {
 }
 
 func (c *codexContentList) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 || string(data) == "null" {
-		return nil
-	}
-	if data[0] == '"' {
-		var s string
-		if err := json.Unmarshal(data, &s); err != nil {
-			return err
-		}
-		c.Items = []codexContentItem{{Type: "text", Text: s}}
-		return nil
-	}
-	var items []codexContentItem
-	if err := json.Unmarshal(data, &items); err != nil {
+	items, err := unmarshalContentList(data, func(s string) codexContentItem {
+		return codexContentItem{Type: "text", Text: s}
+	})
+	if err != nil {
 		return err
 	}
 	c.Items = items
@@ -634,11 +607,7 @@ func (a CodexAdapter) indexPath() string {
 	if a.Dir != "" {
 		return filepath.Join(filepath.Dir(a.Dir), "session_index.jsonl")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".codex", "session_index.jsonl")
+	return homeDir(".codex", "session_index.jsonl")
 }
 
 func (a CodexAdapter) titleFor(id string) string {
