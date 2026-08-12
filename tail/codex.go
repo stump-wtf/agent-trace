@@ -3,6 +3,7 @@ package tail
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -579,7 +580,7 @@ func commandOutputFailed(output string) bool {
 			header = header[:index]
 		}
 	}
-	for _, line := range strings.Split(header, "\n") {
+	for line := range strings.SplitSeq(header, "\n") {
 		if strings.EqualFold(strings.TrimSpace(line), "aborted by user") {
 			return true
 		}
@@ -595,9 +596,7 @@ func applyPatchChanges(input map[string]any, changes map[string]struct {
 		return input
 	}
 	merged := make(map[string]any, len(input)+1)
-	for key, value := range input {
-		merged[key] = value
-	}
+	maps.Copy(merged, input)
 	patch := ""
 	for _, key := range []string{"patch", "input", "_raw"} {
 		if value, ok := input[key].(string); ok {

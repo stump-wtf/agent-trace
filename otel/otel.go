@@ -281,7 +281,7 @@ func deriveTraceID(sessionKey string) string {
 
 // deriveSpanID produces a deterministic 16-char hex span ID from trace ID + sequence.
 func deriveSpanID(traceID string, seq int) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("span:%s:%d", traceID, seq)))
+	sum := sha256.Sum256(fmt.Appendf(nil, "span:%s:%d", traceID, seq))
 	return hex.EncodeToString(sum[:8])
 }
 

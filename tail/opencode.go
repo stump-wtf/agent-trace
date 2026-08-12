@@ -372,12 +372,5 @@ type opencodeToolState struct {
 	Error  string          `json:"error"`
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // Ensure time is imported for potential future use.
 var _ = time.Time{}
