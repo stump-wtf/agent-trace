@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -50,11 +51,7 @@ func (a CrushAdapter) projectsPath() string {
 	if a.ProjectsPath != "" {
 		return a.ProjectsPath
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".local", "share", "crush", "projects.json")
+	return homeDir(".local", "share", "crush", "projects.json")
 }
 
 // SessionDir returns the directory containing project databases. For Crush
@@ -261,7 +258,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 							Seq:       seq,
 							Timestamp: ts,
 							Type:      "user-message",
-							Note:      truncateRunes(part.Data.Text, 2000, "…"),
+							Note:      strutil.TruncateRunes(part.Data.Text, 2000, "…"),
 						})
 					}
 				}
