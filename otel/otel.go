@@ -148,7 +148,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					},
 					Status: StatusOK,
 				}
-				if parentIdx >= 0 {
+				if parentIdx >= 0 && parentIdx < len(spans) {
 					span.ParentSpanID = spans[parentIdx].SpanID
 				}
 				spanCounter++
@@ -168,7 +168,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					},
 					Status: StatusOK,
 				}
-				if parentIdx >= 0 {
+				if parentIdx >= 0 && parentIdx < len(spans) {
 					span.ParentSpanID = spans[parentIdx].SpanID
 				}
 				spanCounter++
@@ -204,7 +204,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 		}
 
 		parentID := ""
-		if parentIdx >= 0 {
+		if parentIdx >= 0 && parentIdx < len(spans) {
 			parentID = spans[parentIdx].SpanID
 		}
 
@@ -239,6 +239,9 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 
 // computeEndTime determines the end time for span at index spanIdx.
 func computeEndTime(spans []Span, timeline []timelineEntry, spanIdx int, sessionStart time.Time) time.Time {
+	if spanIdx < 0 || spanIdx >= len(spans) {
+		return sessionStart
+	}
 	span := spans[spanIdx]
 
 	// For turn parent spans, span from first child's start to last child's end.
