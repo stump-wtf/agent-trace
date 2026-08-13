@@ -60,11 +60,10 @@ func (a OpenCodeAdapter) ListSessions() ([]SessionMeta, error) {
 	if dbPath == "" {
 		return nil, nil
 	}
-	db, err := openCrushDB(dbPath)
+	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, nil // missing/unreadable DB is not an error
 	}
-	defer db.Close()
 	metas, err := a.listSessions(db, dbPath)
 	if err != nil {
 		return nil, nil // unreadable/missing DB is not an error
@@ -126,15 +125,14 @@ func (a OpenCodeAdapter) listSessions(db *sql.DB, dbPath string) ([]SessionMeta,
 
 // Summarize extracts metadata for a single OpenCode session.
 func (a OpenCodeAdapter) Summarize(path string) (SessionMeta, error) {
-	dbPath, sessionID := splitCrushPath(path)
+	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return SessionMeta{}, fmt.Errorf("not an OpenCode session: %s", path)
 	}
-	db, err := openCrushDB(dbPath)
+	db, err := openSQLite(dbPath)
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	defer db.Close()
 	metas, err := a.listSessions(db, dbPath)
 	if err != nil {
 		return SessionMeta{}, err
@@ -149,15 +147,14 @@ func (a OpenCodeAdapter) Summarize(path string) (SessionMeta, error) {
 
 // Parse reads a complete OpenCode session and returns classified events.
 func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
-	dbPath, sessionID := splitCrushPath(path)
+	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return nil, nil, SessionMeta{}, fmt.Errorf("not an OpenCode session: %s", path)
 	}
-	db, err := openCrushDB(dbPath)
+	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, nil, SessionMeta{}, err
 	}
-	defer db.Close()
 
 	// Get session metadata.
 	var title, directory string

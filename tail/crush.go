@@ -2,7 +2,6 @@ package tail
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,7 +12,6 @@ import (
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
 	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
-	_ "modernc.org/sqlite"
 )
 
 // HarnessCrush is the harness identifier for Crush sessions.
@@ -124,11 +122,10 @@ func (a CrushAdapter) ListSessions() ([]SessionMeta, error) {
 }
 
 func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) {
-	db, err := openCrushDB(dbPath)
+	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
 	rows, err := db.QueryContext(context.Background(),
 		`SELECT id, title, parent_session_id, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
 	if err != nil {
@@ -166,7 +163,7 @@ func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) 
 // Summarize extracts metadata from a single Crush session.
 func (a CrushAdapter) Summarize(path string) (SessionMeta, error) {
 	// path is "dbPath/sessionID" from ListSessions
-	dbPath, sessionID := splitCrushPath(path)
+	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return SessionMeta{}, fmt.Errorf("not a Crush session: %s", path)
 	}
@@ -184,15 +181,14 @@ func (a CrushAdapter) Summarize(path string) (SessionMeta, error) {
 
 // Parse reads a complete Crush session and returns classified events.
 func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
-	dbPath, sessionID := splitCrushPath(path)
+	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return nil, nil, SessionMeta{}, fmt.Errorf("not a Crush session: %s", path)
 	}
-	db, err := openCrushDB(dbPath)
+	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, nil, SessionMeta{}, err
 	}
-	defer db.Close()
 
 	// Get session metadata.
 	var title, parentID string
@@ -330,29 +326,10 @@ type crushPartData struct {
 	Text       string `json:"text"`
 }
 
-func openCrushDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?mode=ro")
-	if err != nil {
-		return nil, err
-	}
-	// Set a busy timeout so SQLITE_BUSY retries instead of failing immediately.
-	db.SetMaxOpenConns(1)
-	return db, nil
-}
-
 func msToRFC3339(ms int64) string {
 	if ms <= 0 {
 		return ""
 	}
 	t := time.UnixMilli(ms).UTC()
 	return t.Format(time.RFC3339Nano)
-}
-
-func splitCrushPath(path string) (dbPath, sessionID string) {
-	// path is "dbPath/sessionID" where sessionID is a UUID
-	idx := strings.LastIndex(path, "/")
-	if idx < 0 {
-		return "", ""
-	}
-	return path[:idx], path[idx+1:]
 }
