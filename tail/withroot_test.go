@@ -1,6 +1,8 @@
 package tail
 
 import (
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,6 +168,11 @@ func TestDefaultAdaptersIn(t *testing.T) {
 			t.Fatalf("DefaultAdaptersIn returned %d adapters, DefaultAdapters has %d", len(adapters), len(DefaultAdapters()))
 		}
 		// Each adapter should have empty override fields (same as default).
+		// The default branch matters: this switch is the only thing enforcing
+		// the invariant, so an adapter with no case here passes vacuously —
+		// which is how Crush and OpenCode went unchecked while this test read
+		// as covering "each adapter".
+		seen := 0
 		for _, a := range adapters {
 			switch v := a.(type) {
 			case ClaudeCodeAdapter:
@@ -176,11 +183,26 @@ func TestDefaultAdaptersIn(t *testing.T) {
 				if v.Dir != "" || v.IndexPath != "" {
 					t.Errorf("CodexAdapter has non-empty fields: Dir=%q IndexPath=%q", v.Dir, v.IndexPath)
 				}
+			case CrushAdapter:
+				if v.ProjectsPath != "" || v.DBPath != "" || v.Cwd != "" {
+					t.Errorf("CrushAdapter has non-empty fields: ProjectsPath=%q DBPath=%q Cwd=%q",
+						v.ProjectsPath, v.DBPath, v.Cwd)
+				}
+			case OpenCodeAdapter:
+				if v.DBPath != "" {
+					t.Errorf("OpenCodeAdapter.DBPath = %q, want empty", v.DBPath)
+				}
 			case PiAdapter:
 				if v.Dir != "" {
 					t.Errorf("PiAdapter.Dir = %q, want empty", v.Dir)
 				}
+			default:
+				t.Errorf("no case for %T — add one, or this adapter is checked by nothing", a)
 			}
+			seen++
+		}
+		if seen != len(adapters) {
+			t.Errorf("checked %d of %d adapters", seen, len(adapters))
 		}
 	})
 }
@@ -327,15 +349,51 @@ func TestDefaultAdaptersCoversEveryShippedHarness(t *testing.T) {
 // or OpenCode installed, listing must be an empty result rather than an error
 // or a panic, or adding them to the default set would break every consumer
 // that does not have those tools.
+// It runs against two shapes of "not installed", because only the second one
+// exercises the interesting failure. With nothing in the home at all, SQLite
+// cannot create a database (the parent directory is missing) and the adapters
+// look well behaved for the wrong reason. When the tool's config directory
+// exists but its database does not — an uninstall, a partial setup, a dotfiles
+// checkout — sql.Open is lazy and the first query CREATES the file. Listing
+// sessions must not write to the user's home, and once these adapters are in
+// DefaultAdapters that write would happen on every watcher poll.
 func TestDefaultAdaptersToleratesMissingBackingStores(t *testing.T) {
-	empty := t.TempDir() // a "home" containing nothing at all
-	for _, a := range DefaultAdaptersIn(empty) {
-		sessions, err := a.ListSessions()
-		if err != nil {
-			t.Errorf("%s ListSessions on an empty home returned error: %v", a.Harness(), err)
-		}
-		if len(sessions) != 0 {
-			t.Errorf("%s returned %d sessions from an empty home", a.Harness(), len(sessions))
-		}
+	for _, tc := range []struct {
+		name string
+		dirs []string
+	}{
+		{"home containing nothing at all", nil},
+		{"tool config directories exist but the databases do not",
+			[]string{".opencode", filepath.Join(".local", "share", "crush")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			for _, d := range tc.dirs {
+				if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, a := range DefaultAdaptersIn(home) {
+				sessions, err := a.ListSessions()
+				if err != nil {
+					t.Errorf("%s ListSessions returned error: %v", a.Harness(), err)
+				}
+				if len(sessions) != 0 {
+					t.Errorf("%s returned %d sessions", a.Harness(), len(sessions))
+				}
+			}
+			var created []string
+			if err := filepath.WalkDir(home, func(p string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					created = append(created, p[len(home):])
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(created) != 0 {
+				t.Errorf("listing sessions created files in the user's home: %v", created)
+			}
+		})
 	}
 }

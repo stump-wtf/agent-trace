@@ -2,6 +2,7 @@ package tail
 
 import (
 	"database/sql"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,14 @@ var dbCache sync.Map
 func openSQLite(path string) (*sql.DB, error) {
 	if cached, ok := dbCache.Load(path); ok {
 		return cached.(*sql.DB), nil
+	}
+	// Existence check is load-bearing: sql.Open is lazy, so a missing file is
+	// not reported here. The first query would CREATE an empty database rather
+	// than failing. Since these adapters are in DefaultAdapters, a watcher poll
+	// on a machine where the tool is not installed would create 0-byte files
+	// in the user's home directory without this guard.
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
 	}
 	dsn := "file:" + path + "?mode=ro&_busy_timeout=5000"
 	db, err := sql.Open("sqlite", dsn)

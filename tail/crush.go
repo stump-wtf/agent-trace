@@ -2,6 +2,7 @@ package tail
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,9 +12,7 @@ import (
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
 	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
-)
-
-// HarnessCrush is the harness identifier for Crush sessions.
+) // HarnessCrush is the harness identifier for Crush sessions.
 const HarnessCrush Harness = "crush"
 
 // CrushAdapter discovers and parses Crush session data from SQLite databases.
@@ -174,7 +173,13 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 	defer func() { _ = rows.Close() }()
 	var metas []SessionMeta
 	for rows.Next() {
-		var id, title, parentID string
+		var id, title string
+		// parent_session_id is nullable — the schema says so, and Crush writes
+		// NULL for every top-level session. Scanning it into a string fails on
+		// those rows, and the `continue` below turns that into a silent drop:
+		// listing returned only subagent sessions, never a real one. The
+		// OpenCode adapter already scans its equivalent as a NullString.
+		var parentID sql.NullString
 		var createdAt, updatedAt int64
 		if err := rows.Scan(&id, &title, &parentID, &createdAt, &updatedAt); err != nil {
 			continue
@@ -189,7 +194,7 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 			StartedAt: msToRFC3339(createdAt),
 			EndedAt:   msToRFC3339(updatedAt),
 		}
-		if parentID != "" {
+		if parentID.Valid && parentID.String != "" {
 			meta.Auxiliary = true
 		}
 		if meta.Auxiliary {
@@ -206,6 +211,26 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 	return metas, nil
 }
 
+// cwdForDB resolves the working directory that owns a database.
+//
+// ListSessions takes each session's Cwd from the projects.json entry, but
+// Summarize and Parse used a.Cwd, which is only set in the single-database
+// testing mode — so under the discovery path DefaultAdapters uses, they
+// disagreed with the listing and reported an empty cwd. That empty cwd then
+// reaches classify.BuildEventWith as the base for resolving every relative
+// path in the session.
+func (a CrushAdapter) cwdForDB(dbPath string) string {
+	if a.Cwd != "" {
+		return a.Cwd
+	}
+	for _, db := range a.dbPaths() {
+		if db.dbPath == dbPath {
+			return db.cwd
+		}
+	}
+	return ""
+}
+
 // Summarize extracts metadata from a single Crush session.
 func (a CrushAdapter) Summarize(path string) (SessionMeta, error) {
 	// path is "dbPath/sessionID" from ListSessions
@@ -213,7 +238,7 @@ func (a CrushAdapter) Summarize(path string) (SessionMeta, error) {
 	if dbPath == "" {
 		return SessionMeta{}, fmt.Errorf("not a Crush session: %s", path)
 	}
-	metas, err := a.listDBSessions(dbPath, a.Cwd)
+	metas, err := a.listDBSessions(dbPath, a.cwdForDB(dbPath))
 	if err != nil {
 		return SessionMeta{}, err
 	}
@@ -236,8 +261,11 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 		return nil, nil, SessionMeta{}, err
 	}
 
-	// Get session metadata.
-	var title, parentID string
+	// Get session metadata. parent_session_id is NULL for top-level sessions;
+	// scanning it into a string made Parse report "session not found" for every
+	// session that was not a subagent branch.
+	var title string
+	var parentID sql.NullString
 	var createdAt, updatedAt int64
 	err = db.QueryRowContext(context.Background(),
 		`SELECT title, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?`, sessionID).
@@ -246,7 +274,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 		return nil, nil, SessionMeta{}, fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	cwd := a.Cwd
+	cwd := a.cwdForDB(dbPath)
 	meta := SessionMeta{
 		Key:       sessionKey(string(a.Harness()), dbPath+"/"+sessionID),
 		ID:        sessionID,
@@ -257,7 +285,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 		StartedAt: msToRFC3339(createdAt),
 		EndedAt:   msToRFC3339(updatedAt),
 	}
-	if parentID != "" {
+	if parentID.Valid && parentID.String != "" {
 		meta.Auxiliary = true
 	}
 
@@ -276,14 +304,19 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	pendingCalls := map[string]classify.ToolCall{}
 
 	for rows.Next() {
-		var msgID, role, partsJSON, model string
+		var msgID, role, partsJSON string
+		// messages.model is nullable, and Crush leaves it NULL on user
+		// messages. Scanning it into a string failed on exactly those rows and
+		// the `continue` dropped them, so every user message vanished from the
+		// marks a session produced.
+		var model sql.NullString
 		var msgCreatedAt int64
 		if err := rows.Scan(&msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
 			continue
 		}
 		ts := msToRFC3339(msgCreatedAt)
-		if model != "" && meta.Model == "" {
-			meta.Model = model
+		if model.Valid && model.String != "" && meta.Model == "" {
+			meta.Model = model.String
 		}
 
 		var parts []crushPart
