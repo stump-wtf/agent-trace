@@ -5,13 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
 )
 
 // HarnessOpenCode is the harness identifier for OpenCode sessions.
@@ -44,22 +44,14 @@ func (a OpenCodeAdapter) SessionDir() string {
 	if a.DBPath != "" {
 		return filepath.Dir(a.DBPath)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".opencode")
+	return homeDir(".opencode")
 }
 
 func (a OpenCodeAdapter) dbPath() string {
 	if a.DBPath != "" {
 		return a.DBPath
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".opencode", "opencode.db")
+	return homeDir(".opencode", "opencode.db")
 }
 
 // ListSessions discovers OpenCode sessions from the database.
@@ -326,7 +318,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 					Seq:       seq,
 					Timestamp: ts,
 					Type:      "user-message",
-					Note:      truncateRunes(text, 2000, "…"),
+					Note:      strutil.TruncateRunes(text, 2000, "…"),
 				})
 			}
 		}
