@@ -12,7 +12,9 @@ package otel
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -43,24 +45,24 @@ const (
 // information for any OTel exporter to serialize without depending on the
 // go.opentelemetry.io/otel SDK at compile time.
 type Span struct {
-	TraceID      string            `json:"traceId"`
-	SpanID       string            `json:"spanId"`
-	ParentSpanID string            `json:"parentSpanId,omitempty"`
-	Name         string            `json:"name"`
-	Kind         SpanKind          `json:"kind"`
-	StartTime    time.Time         `json:"startTime"`
-	EndTime      time.Time         `json:"endTime"`
-	Attributes   map[string]string `json:"attributes,omitempty"`
-	Status       StatusCode        `json:"status"`
-	StatusMsg    string            `json:"statusMsg,omitempty"`
-	Events       []SpanEvent       `json:"events,omitempty"`
+	TraceID      string         `json:"traceId"`
+	SpanID       string         `json:"spanId"`
+	ParentSpanID string         `json:"parentSpanId,omitempty"`
+	Name         string         `json:"name"`
+	Kind         SpanKind       `json:"kind"`
+	StartTime    time.Time      `json:"startTime"`
+	EndTime      time.Time      `json:"endTime"`
+	Attributes   map[string]any `json:"attributes,omitempty"`
+	Status       StatusCode     `json:"status"`
+	StatusMsg    string         `json:"statusMsg,omitempty"`
+	Events       []SpanEvent    `json:"events,omitempty"`
 }
 
 // SpanEvent is a timestamped annotation within a span.
 type SpanEvent struct {
-	Name       string            `json:"name"`
-	Timestamp  time.Time         `json:"timestamp"`
-	Attributes map[string]string `json:"attributes,omitempty"`
+	Name       string         `json:"name"`
+	Timestamp  time.Time      `json:"timestamp"`
+	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 // Trace is a collection of spans forming one agent session's trace.
@@ -124,7 +126,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					Name:      truncate(entry.mark.Note, 128),
 					Kind:      SpanKindInternal,
 					StartTime: entry.startTime,
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"agent.session.id":      session.ID,
 						"agent.session.harness": string(session.Harness),
 						"agent.turn.type":       "user-message",
@@ -142,7 +144,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					Name:      "context-compaction",
 					Kind:      SpanKindInternal,
 					StartTime: entry.startTime,
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"agent.session.id": session.ID,
 						"agent.event.type": "compaction",
 					},
@@ -161,7 +163,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 					Name:      fmt.Sprintf("subagent:%s", entry.mark.Note),
 					Kind:      SpanKindClient,
 					StartTime: entry.startTime,
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"agent.session.id":    session.ID,
 						"agent.event.type":    "subagent",
 						"agent.subagent.name": entry.mark.Note,
@@ -179,11 +181,11 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 
 		// Tool call event → child span.
 		ev := entry.event
-		attrs := map[string]string{
+		attrs := map[string]any{
 			"agent.session.id":   session.ID,
 			"agent.tool.name":    ev.Tool,
 			"agent.tool.action":  ev.Action,
-			"agent.result.bytes": fmt.Sprintf("%d", ev.ResultBytes),
+			"agent.result.bytes": int64(ev.ResultBytes),
 		}
 		if len(ev.Targets) > 0 {
 			paths := make([]string, 0, len(ev.Targets))
@@ -193,7 +195,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 			attrs["agent.targets"] = strings.Join(paths, ",")
 		}
 		if len(ev.Outside) > 0 {
-			attrs["agent.outside_count"] = fmt.Sprintf("%d", len(ev.Outside))
+			attrs["agent.outside_count"] = int64(len(ev.Outside))
 		}
 
 		status := StatusOK
@@ -344,4 +346,16 @@ type timelineEntry struct {
 	mark      classify.Mark
 	event     classify.Event
 	startTime time.Time
+}
+
+// WriteJSON serializes a Trace as OTLP-compatible JSON to the given writer.
+// The output is a JSON object with traceId, session, and spans fields suitable
+// for direct submission to an OTel collector's HTTP JSON endpoint or inspection.
+func WriteJSON(trace Trace, w io.Writer) error {
+	data, err := json.Marshal(trace)
+	if err != nil {
+		return fmt.Errorf("marshal trace: %w", err)
+	}
+	_, err = w.Write(data)
+	return err
 }
