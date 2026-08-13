@@ -78,18 +78,33 @@ func ReadCommand(command string) bool {
 	return true
 }
 
+// defaultVerifyPatterns are the built-in test/build verification patterns.
+var defaultVerifyPatterns = []string{
+	"go test", "go vet", "npm test", "npm run build",
+	"pnpm test", "pnpm build", "pytest", "make test",
+	"cargo test", "swift test",
+}
+
 // VerifyCommand reports whether a shell command runs a test/build verification
 // step (go test, npm test, pytest, make test, cargo test, etc.).
 func VerifyCommand(command string) bool {
+	return VerifyCommandWith(nil, command)
+}
+
+// VerifyCommandWith is the Options-aware variant. When opts.VerifyPatterns is
+// non-empty, those patterns are checked in addition to the defaults.
+func VerifyCommandWith(opts *Options, command string) bool {
 	c := strings.ToLower(command)
-	patterns := []string{
-		"go test", "go vet", "npm test", "npm run build",
-		"pnpm test", "pnpm build", "pytest", "make test",
-		"cargo test", "swift test",
-	}
-	for _, pattern := range patterns {
+	for _, pattern := range defaultVerifyPatterns {
 		if strings.Contains(c, pattern) {
 			return true
+		}
+	}
+	if opts != nil {
+		for _, pattern := range opts.VerifyPatterns {
+			if strings.Contains(c, strings.ToLower(pattern)) {
+				return true
+			}
 		}
 	}
 	return false

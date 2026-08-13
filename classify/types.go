@@ -80,6 +80,11 @@ type Options struct {
 	// TmpDir overrides the temp directory for outside-scope classification.
 	// Empty falls back to "/tmp".
 	TmpDir string
+	// VerifyPatterns extends the built-in verify command patterns (go test,
+	// npm test, etc.). Patterns are matched case-insensitively as substrings.
+	// A project using "just test" or "bun test" can add those here so they
+	// classify as ActionVerify instead of ActionExec.
+	VerifyPatterns []string
 }
 
 // Touch constants used in Target.Touch. Ranked by RankTouch: edit > read > hit.
