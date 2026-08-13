@@ -10,8 +10,9 @@ lint:
 	@if command -v golangci-lint >/dev/null 2>&1; then \
 		golangci-lint run ./...; \
 	else \
-		echo "WARNING: golangci-lint not installed — skipping locally, but CI still runs it."; \
-		echo "         install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2"; \
+		echo "ERROR: golangci-lint not installed — required for lint."; \
+		echo "       install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2"; \
+		exit 1; \
 	fi
 
 check: lint test
