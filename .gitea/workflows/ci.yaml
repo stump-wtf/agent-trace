@@ -28,7 +28,7 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: golangci-lint
-        uses: https://gitea.stump.rocks/stumpcloud/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v6
         with:
           version: v1.62
 
