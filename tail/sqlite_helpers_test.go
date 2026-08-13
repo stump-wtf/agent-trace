@@ -1,15 +1,30 @@
 package tail
 
 import (
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"testing"
 )
 
+// resetDBCache closes and drops every cached DB handle. Test-only: callers
+// must not hold a handle returned by openSQLite across a reset, since the
+// underlying *sql.DB is closed here.
+func resetDBCache() {
+	dbCache.Range(func(key, value any) bool {
+		if db, ok := value.(*sql.DB); ok {
+			db.Close()
+		}
+		dbCache.Delete(key)
+		return true
+	})
+}
+
 // TestOpenSQLiteCaches verifies that repeated calls to openSQLite return the
 // same *sql.DB handle for a given path (issue #10: DB connection pooling).
 func TestOpenSQLiteCaches(t *testing.T) {
 	resetDBCache()
+	t.Cleanup(resetDBCache)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -38,19 +53,18 @@ func TestOpenSQLiteCaches(t *testing.T) {
 	if db1 == db3 {
 		t.Fatal("expected different *sql.DB handle for different path")
 	}
-
-	resetDBCache()
 }
 
 // TestOpenSQLiteConcurrent verifies the cache is safe under concurrent access.
 func TestOpenSQLiteConcurrent(t *testing.T) {
 	resetDBCache()
+	t.Cleanup(resetDBCache)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "concurrent.db")
 	createTestCrushDB(t, dbPath)
 
 	var wg sync.WaitGroup
-	handles := make([]*sqliteHandle, 20)
+	handles := make([]*sql.DB, 20)
 	for i := range handles {
 		wg.Add(1)
 		go func(idx int) {
@@ -60,7 +74,7 @@ func TestOpenSQLiteConcurrent(t *testing.T) {
 				t.Errorf("goroutine %d: %v", idx, err)
 				return
 			}
-			handles[idx] = &sqliteHandle{db: db}
+			handles[idx] = db
 		}(i)
 	}
 	wg.Wait()
@@ -69,11 +83,17 @@ func TestOpenSQLiteConcurrent(t *testing.T) {
 		if handles[i] == nil || handles[0] == nil {
 			t.Fatalf("goroutine %d got nil handle", i)
 		}
-		if handles[i].db != handles[0].db {
+		if handles[i] != handles[0] {
 			t.Fatalf("goroutine %d got different handle", i)
 		}
 	}
-	resetDBCache()
+
+	// The losers of the LoadOrStore race must be closed, not leaked: every
+	// sql.Open starts a connectionOpener goroutine that lives until Close.
+	// Only the cached handle should still be usable.
+	if err := handles[0].Ping(); err != nil {
+		t.Fatalf("cached handle should still be open: %v", err)
+	}
 }
 
 // TestSplitDBSessionPath verifies path splitting for SQLite-backed adapters
@@ -117,9 +137,4 @@ func TestSplitDBSessionPath(t *testing.T) {
 			}
 		})
 	}
-}
-
-// sqliteHandle is a test helper to capture *sql.DB pointers.
-type sqliteHandle struct {
-	db any
 }

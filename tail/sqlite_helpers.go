@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"strings"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -24,7 +25,19 @@ func openSQLite(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	actual, _ := dbCache.LoadOrStore(path, db)
+	// Retire idle connections periodically. Without this the pooled connection
+	// lives forever and keeps reading the inode it first opened, so a database
+	// that is deleted and recreated (a project reset) would serve stale rows
+	// until the process restarts. The window is long enough that the 2s poll
+	// still reuses a warm connection.
+	db.SetConnMaxIdleTime(30 * time.Second)
+	actual, loaded := dbCache.LoadOrStore(path, db)
+	if loaded {
+		// Another goroutine won the race; close ours rather than leaking it.
+		// sql.Open starts a connectionOpener goroutine per handle, so an
+		// unclosed loser leaks a goroutine and any pooled file descriptor.
+		db.Close()
+	}
 	return actual.(*sql.DB), nil
 }
 
@@ -37,16 +50,4 @@ func splitDBSessionPath(path string) (dbPath, sessionID string) {
 		return "", ""
 	}
 	return path[:idx], path[idx+1:]
-}
-
-// resetDBCache clears all cached DB handles. Test-only — callers must close
-// handles themselves if they need a fresh connection.
-func resetDBCache() {
-	dbCache.Range(func(key, value any) bool {
-		if db, ok := value.(*sql.DB); ok {
-			db.Close()
-		}
-		dbCache.Delete(key)
-		return true
-	})
 }
