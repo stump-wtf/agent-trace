@@ -27,6 +27,12 @@ func (a ClaudeCodeAdapter) Harness() Harness { return HarnessClaudeCode }
 // SetOptions injects classify.Options for verify-pattern customization.
 func (a *ClaudeCodeAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
+// Diagnostics checks whether the Claude Code session directory exists and is readable.
+func (a ClaudeCodeAdapter) Diagnostics() []DiagnosticCheck {
+	dir := a.SessionDir()
+	return dirDiagnostics(dir)
+}
+
 func (a ClaudeCodeAdapter) SessionDir() string {
 	if a.Dir != "" {
 		return a.Dir

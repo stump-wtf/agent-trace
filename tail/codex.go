@@ -30,6 +30,11 @@ func (a CodexAdapter) Harness() Harness { return HarnessCodex }
 // SetOptions injects classify.Options for verify-pattern customization.
 func (a *CodexAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
+// Diagnostics checks whether the Codex session directory exists and is readable.
+func (a CodexAdapter) Diagnostics() []DiagnosticCheck {
+	return dirDiagnostics(a.SessionDir())
+}
+
 func (a CodexAdapter) SessionDir() string {
 	if a.Dir != "" {
 		return a.Dir

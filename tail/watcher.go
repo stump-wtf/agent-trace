@@ -52,6 +52,25 @@ type OptionsSetter interface {
 	SetOptions(opts *classify.Options)
 }
 
+// DiagnosticCheck is a single health-check result from an adapter's backing
+// store. Consumers use these to distinguish "no sessions" (healthy but empty)
+// from "directory missing", "database corrupt", or "schema drifted".
+type DiagnosticCheck struct {
+	Name   string // human-readable check name (e.g. "session-dir", "database")
+	Status string // "ok", "warn", "error"
+	Detail string // additional context
+}
+
+// DiagnosticsSource is an optional interface adapters implement to expose
+// health-check information about their backing store. Consumers discover it
+// via type assertion: `if d, ok := a.(DiagnosticsSource); ok { ... }`.
+//
+// When an adapter returns zero sessions, these checks help distinguish a
+// healthy-but-empty directory from a corrupt database or missing config file.
+type DiagnosticsSource interface {
+	Diagnostics() []DiagnosticCheck
+}
+
 // IncrementalParser is an optional interface adapters implement to avoid
 // re-reading and re-parsing the entire session on every poll. The watcher
 // tracks a per-session watermark (byte offset for JSONL, epoch-ms for SQLite)

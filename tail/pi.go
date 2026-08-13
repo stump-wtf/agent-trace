@@ -26,6 +26,11 @@ func (a PiAdapter) Harness() Harness { return HarnessPi }
 // SetOptions injects classify.Options for verify-pattern customization.
 func (a *PiAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
+// Diagnostics checks whether the Pi session directory exists and is readable.
+func (a PiAdapter) Diagnostics() []DiagnosticCheck {
+	return dirDiagnostics(a.SessionDir())
+}
+
 func (a PiAdapter) SessionDir() string {
 	if a.Dir != "" {
 		return a.Dir

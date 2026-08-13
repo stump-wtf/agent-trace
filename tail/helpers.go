@@ -11,6 +11,27 @@ import (
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
 )
 
+// dirDiagnostics checks whether a directory exists and is readable. Shared by
+// JSONL-backed adapters (Claude Code, Codex, Pi) that all watch a filesystem
+// directory.
+func dirDiagnostics(dir string) []DiagnosticCheck {
+	if dir == "" {
+		return []DiagnosticCheck{{Name: "session-dir", Status: "error", Detail: "session directory is empty"}}
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return []DiagnosticCheck{{Name: "session-dir", Status: "warn", Detail: "directory does not exist: " + dir}}
+	}
+	if !info.IsDir() {
+		return []DiagnosticCheck{{Name: "session-dir", Status: "error", Detail: "path is not a directory: " + dir}}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []DiagnosticCheck{{Name: "session-dir", Status: "error", Detail: "directory not readable: " + err.Error()}}
+	}
+	return []DiagnosticCheck{{Name: "session-dir", Status: "ok", Detail: fmt.Sprintf("%d entries in %s", len(entries), dir)}}
+}
+
 // osClassifyOptions returns Options backed by the real filesystem — an
 // os.Stat-based FileExists and real home/tmp dirs. Adapters pass this to
 // classify.BuildEventWith so weak-target filtering and outside-scope

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -30,6 +31,18 @@ func (a OpenCodeAdapter) Harness() Harness { return HarnessOpenCode }
 
 // SetOptions injects classify.Options for verify-pattern customization.
 func (a *OpenCodeAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
+
+// Diagnostics checks whether the OpenCode database exists.
+func (a OpenCodeAdapter) Diagnostics() []DiagnosticCheck {
+	dbPath := a.dbPath()
+	if dbPath == "" {
+		return []DiagnosticCheck{{Name: "database", Status: "warn", Detail: "database path is empty"}}
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return []DiagnosticCheck{{Name: "database", Status: "warn", Detail: "database not found: " + dbPath}}
+	}
+	return []DiagnosticCheck{{Name: "database", Status: "ok", Detail: dbPath}}
+}
 
 // WithRoot returns a copy of the adapter that discovers sessions under root,
 // which is treated as a HOME-like base: the adapter appends its own layout

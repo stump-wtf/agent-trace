@@ -34,6 +34,27 @@ func (a CrushAdapter) Harness() Harness { return HarnessCrush }
 // SetOptions injects classify.Options for verify-pattern customization.
 func (a *CrushAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
+// Diagnostics checks the Crush backing store: projects.json existence and
+// database readability.
+func (a CrushAdapter) Diagnostics() []DiagnosticCheck {
+	var checks []DiagnosticCheck
+	if a.DBPath != "" {
+		if _, err := os.Stat(a.DBPath); err != nil {
+			checks = append(checks, DiagnosticCheck{Name: "database", Status: "warn", Detail: "DBPath does not exist: " + a.DBPath})
+		} else {
+			checks = append(checks, DiagnosticCheck{Name: "database", Status: "ok", Detail: a.DBPath})
+		}
+	} else {
+		pp := a.projectsPath()
+		if _, err := os.Stat(pp); err != nil {
+			checks = append(checks, DiagnosticCheck{Name: "projects-json", Status: "warn", Detail: "projects.json not found: " + pp})
+		} else {
+			checks = append(checks, DiagnosticCheck{Name: "projects-json", Status: "ok", Detail: pp})
+		}
+	}
+	return checks
+}
+
 // WithRoot returns a copy of the adapter that discovers sessions under root,
 // which is treated as a HOME-like base: the adapter appends its own layout
 // (.local/share/crush/projects.json). Sibling fields — DBPath and Cwd, which a
