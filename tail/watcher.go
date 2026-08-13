@@ -37,6 +37,11 @@ type Adapter interface {
 	// This lets a consumer holding []Adapter from DefaultAdapters retarget
 	// them without type-switching over every concrete type. Passing an
 	// empty string restores the default behaviour.
+	//
+	// Implementations must return a pointer to the copy. The optional
+	// interfaces in this package — OptionsSetter above all — are satisfied
+	// with pointer receivers, so an Adapter carrying a value silently fails
+	// every one of those type assertions and loses the behaviour they carry.
 	WithRoot(dir string) Adapter
 }
 
@@ -110,15 +115,22 @@ type AgentGraphBuilder interface {
 // with seq numbers continuing from startSeq. The returned newWatermark is
 // stored for the next poll. Returning newWatermark=0 resets to full-parse
 // on the next cycle (used when the file shrinks or rotates).
+//
+// A watermark always names a point at which no tool call was left
+// outstanding, so an implementation withholds events past the last such
+// point rather than advancing over a call whose result has not been written
+// yet. That is what keeps the stream both complete and duplicate-free.
 type IncrementalParser interface {
 	// ParseSince reads only content discovered after the watermark and returns
 	// events/marks with seq continuing from startSeq. The returned
 	// newWatermark is stored for the next poll.
 	ParseSince(path string, watermark int64, startSeq int) (events []classify.Event, marks []classify.Mark, meta SessionMeta, newWatermark int64, err error)
 	// Watermark returns the current high-water mark for the session at path.
-	// For JSONL adapters this is the file size; for SQLite adapters this is
-	// the latest message timestamp in epoch milliseconds. Called after a full
-	// Parse to establish the initial watermark.
+	// For JSONL adapters this is the offset past the last complete line — not
+	// the file size, which can land inside a record a harness is still
+	// writing. For SQLite adapters it is the latest message timestamp in
+	// epoch milliseconds. Called after a full Parse to establish the initial
+	// watermark.
 	Watermark(path string) int64
 }
 
@@ -164,6 +176,10 @@ func DefaultAdapters() []Adapter {
 // DefaultAdaptersIn("/tmp/fake-home") reads /tmp/fake-home/.claude/projects and
 // friends. That is what makes it usable both for hermetic tests and for a
 // relocated $HOME. Passing an empty string is equivalent to DefaultAdapters.
+//
+// The adapters it returns support the same optional interfaces as
+// DefaultAdapters — see the WithRoot note on Adapter for why that is worth
+// stating rather than assuming.
 func DefaultAdaptersIn(root string) []Adapter {
 	defaults := DefaultAdapters()
 	out := make([]Adapter, 0, len(defaults))

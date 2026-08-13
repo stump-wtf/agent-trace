@@ -49,10 +49,10 @@ func (a PiAdapter) SessionDir() string {
 func (a PiAdapter) WithRoot(root string) Adapter {
 	if root == "" {
 		a.Dir = ""
-		return a
+		return &a
 	}
 	a.Dir = filepath.Join(root, ".pi", "agent", "sessions")
-	return a
+	return &a
 }
 
 // ListSessions walks the session directory and returns metadata for each

@@ -47,10 +47,10 @@ func (a ClaudeCodeAdapter) SessionDir() string {
 func (a ClaudeCodeAdapter) WithRoot(root string) Adapter {
 	if root == "" {
 		a.Dir = ""
-		return a
+		return &a
 	}
 	a.Dir = filepath.Join(root, ".claude", "projects")
-	return a
+	return &a
 }
 
 // ListSessions walks the session directory and returns metadata for each

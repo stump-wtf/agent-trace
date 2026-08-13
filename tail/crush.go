@@ -117,10 +117,10 @@ func (a CrushAdapter) graphNodes(dbPath string) ([]AgentNode, error) {
 func (a CrushAdapter) WithRoot(root string) Adapter {
 	if root == "" {
 		a.ProjectsPath = ""
-		return a
+		return &a
 	}
 	a.ProjectsPath = filepath.Join(root, ".local", "share", "crush", "projects.json")
-	return a
+	return &a
 }
 
 func (a CrushAdapter) projectsPath() string {

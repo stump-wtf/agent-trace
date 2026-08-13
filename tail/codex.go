@@ -50,12 +50,12 @@ func (a CodexAdapter) SessionDir() string {
 func (a CodexAdapter) WithRoot(root string) Adapter {
 	if root == "" {
 		a.Dir, a.IndexPath = "", ""
-		return a
+		return &a
 	}
 	sessionsDir := filepath.Join(root, ".codex", "sessions")
 	a.Dir = sessionsDir
 	a.IndexPath = filepath.Join(sessionsDir, "session_index.jsonl")
-	return a
+	return &a
 }
 
 // ListSessions walks the session directory and returns metadata for each

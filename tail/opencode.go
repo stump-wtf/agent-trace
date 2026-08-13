@@ -95,10 +95,10 @@ func (a OpenCodeAdapter) AgentGraph() (*AgentGraph, error) {
 func (a OpenCodeAdapter) WithRoot(root string) Adapter {
 	if root == "" {
 		a.DBPath = ""
-		return a
+		return &a
 	}
 	a.DBPath = filepath.Join(root, ".opencode", "opencode.db")
-	return a
+	return &a
 }
 
 func (a OpenCodeAdapter) SessionDir() string {

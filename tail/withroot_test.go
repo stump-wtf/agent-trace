@@ -22,7 +22,7 @@ func TestClaudeCodeWithRoot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := ClaudeCodeAdapter{}.WithRoot(tt.root)
-			cc, ok := a.(ClaudeCodeAdapter)
+			cc, ok := a.(*ClaudeCodeAdapter)
 			if !ok {
 				t.Fatalf("WithRoot did not return ClaudeCodeAdapter, got %T", a)
 			}
@@ -46,7 +46,7 @@ func TestClaudeCodeWithRoot(t *testing.T) {
 func TestCodexWithRoot(t *testing.T) {
 	t.Run("non-empty root sets Dir and IndexPath", func(t *testing.T) {
 		a := CodexAdapter{}.WithRoot("/tmp/home")
-		cd, ok := a.(CodexAdapter)
+		cd, ok := a.(*CodexAdapter)
 		if !ok {
 			t.Fatalf("got %T", a)
 		}
@@ -62,7 +62,7 @@ func TestCodexWithRoot(t *testing.T) {
 
 	t.Run("empty root restores default", func(t *testing.T) {
 		a := CodexAdapter{}.WithRoot("")
-		cd, ok := a.(CodexAdapter)
+		cd, ok := a.(*CodexAdapter)
 		if !ok {
 			t.Fatalf("got %T", a)
 		}
@@ -77,7 +77,7 @@ func TestCodexWithRoot(t *testing.T) {
 
 func TestPiWithRoot(t *testing.T) {
 	a := PiAdapter{}.WithRoot("/tmp/home")
-	pa, ok := a.(PiAdapter)
+	pa, ok := a.(*PiAdapter)
 	if !ok {
 		t.Fatalf("got %T", a)
 	}
@@ -92,7 +92,7 @@ func TestPiWithRoot(t *testing.T) {
 
 func TestCrushWithRoot(t *testing.T) {
 	a := CrushAdapter{}.WithRoot("/tmp/home")
-	ca, ok := a.(CrushAdapter)
+	ca, ok := a.(*CrushAdapter)
 	if !ok {
 		t.Fatalf("got %T", a)
 	}
@@ -104,7 +104,7 @@ func TestCrushWithRoot(t *testing.T) {
 
 func TestOpenCodeWithRoot(t *testing.T) {
 	a := OpenCodeAdapter{}.WithRoot("/tmp/home")
-	oa, ok := a.(OpenCodeAdapter)
+	oa, ok := a.(*OpenCodeAdapter)
 	if !ok {
 		t.Fatalf("got %T", a)
 	}
@@ -175,24 +175,24 @@ func TestDefaultAdaptersIn(t *testing.T) {
 		seen := 0
 		for _, a := range adapters {
 			switch v := a.(type) {
-			case ClaudeCodeAdapter:
+			case *ClaudeCodeAdapter:
 				if v.Dir != "" {
 					t.Errorf("ClaudeCodeAdapter.Dir = %q, want empty for empty root", v.Dir)
 				}
-			case CodexAdapter:
+			case *CodexAdapter:
 				if v.Dir != "" || v.IndexPath != "" {
 					t.Errorf("CodexAdapter has non-empty fields: Dir=%q IndexPath=%q", v.Dir, v.IndexPath)
 				}
-			case CrushAdapter:
+			case *CrushAdapter:
 				if v.ProjectsPath != "" || v.DBPath != "" || v.Cwd != "" {
 					t.Errorf("CrushAdapter has non-empty fields: ProjectsPath=%q DBPath=%q Cwd=%q",
 						v.ProjectsPath, v.DBPath, v.Cwd)
 				}
-			case OpenCodeAdapter:
+			case *OpenCodeAdapter:
 				if v.DBPath != "" {
 					t.Errorf("OpenCodeAdapter.DBPath = %q, want empty", v.DBPath)
 				}
-			case PiAdapter:
+			case *PiAdapter:
 				if v.Dir != "" {
 					t.Errorf("PiAdapter.Dir = %q, want empty", v.Dir)
 				}
@@ -233,7 +233,7 @@ func TestWithRootDoesNotMutateOriginal(t *testing.T) {
 		t.Errorf("original was mutated: Dir = %q", oc.Dir)
 	}
 
-	rc, ok := retargeted.(ClaudeCodeAdapter)
+	rc, ok := retargeted.(*ClaudeCodeAdapter)
 	if !ok {
 		t.Fatalf("got %T", retargeted)
 	}
@@ -251,7 +251,7 @@ func TestWithRootDoesNotMutateOriginal(t *testing.T) {
 func TestWithRootPreservesSiblingFields(t *testing.T) {
 	t.Run("crush keeps DBPath and Cwd", func(t *testing.T) {
 		a := CrushAdapter{ProjectsPath: "/old/projects.json", DBPath: "/db/crush.db", Cwd: "/work"}
-		got := a.WithRoot("/fake-home").(CrushAdapter)
+		got := a.WithRoot("/fake-home").(*CrushAdapter)
 		if got.DBPath != "/db/crush.db" || got.Cwd != "/work" {
 			t.Errorf("sibling fields dropped: DBPath=%q Cwd=%q", got.DBPath, got.Cwd)
 		}
@@ -262,7 +262,7 @@ func TestWithRootPreservesSiblingFields(t *testing.T) {
 	})
 
 	t.Run("codex retargets both paths together", func(t *testing.T) {
-		got := CodexAdapter{}.WithRoot("/fake-home").(CodexAdapter)
+		got := CodexAdapter{}.WithRoot("/fake-home").(*CodexAdapter)
 		wantDir := filepath.Join("/fake-home", ".codex", "sessions")
 		if got.Dir != wantDir {
 			t.Errorf("Dir = %q, want %q", got.Dir, wantDir)
@@ -276,7 +276,7 @@ func TestWithRootPreservesSiblingFields(t *testing.T) {
 
 	t.Run("empty root clears only the root-derived path", func(t *testing.T) {
 		a := CrushAdapter{ProjectsPath: "/x/projects.json", DBPath: "/db/crush.db", Cwd: "/work"}
-		got := a.WithRoot("").(CrushAdapter)
+		got := a.WithRoot("").(*CrushAdapter)
 		if got.ProjectsPath != "" {
 			t.Errorf("ProjectsPath = %q, want cleared back to the default", got.ProjectsPath)
 		}
