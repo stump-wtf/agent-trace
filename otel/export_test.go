@@ -26,11 +26,12 @@ func TestSpanAttributeTypes(t *testing.T) {
 				t.Fatal("missing agent.result.bytes attribute")
 			}
 			// Should be int64, not string.
-			if _, isInt := v.(int64); !isInt {
-				t.Errorf("agent.result.bytes should be int64, got %T (%v)", v, v)
+			n, isInt := v.(int64)
+			if !isInt {
+				t.Fatalf("agent.result.bytes should be int64, got %T (%v)", v, v)
 			}
-			if v.(int64) != 4096 {
-				t.Errorf("agent.result.bytes = %d, want 4096", v.(int64))
+			if n != 4096 {
+				t.Errorf("agent.result.bytes = %d, want 4096", n)
 			}
 			return
 		}
@@ -55,8 +56,12 @@ func TestSpanOutsideCountIsInt(t *testing.T) {
 			if !ok {
 				t.Fatal("missing agent.outside_count attribute")
 			}
-			if _, isInt := v.(int64); !isInt {
-				t.Errorf("agent.outside_count should be int64, got %T (%v)", v, v)
+			n, isInt := v.(int64)
+			if !isInt {
+				t.Fatalf("agent.outside_count should be int64, got %T (%v)", v, v)
+			}
+			if n != 1 {
+				t.Errorf("agent.outside_count = %d, want 1", n)
 			}
 			return
 		}
@@ -131,7 +136,7 @@ func TestWriteJSON(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	if err := WriteJSON(trace, &sb); err != nil {
+	if err := WriteJSON(&sb, trace); err != nil {
 		t.Fatalf("WriteJSON: %v", err)
 	}
 
@@ -150,9 +155,10 @@ func TestWriteJSON(t *testing.T) {
 	}
 }
 
-// TestTraceMarshalJSON verifies that Trace.MarshalJSON produces
-// OTLP-compatible JSON structure.
-func TestTraceMarshalJSON(t *testing.T) {
+// TestTraceJSONShape verifies that a Trace marshals to the package's own
+// JSON shape: a top-level traceId plus a spans array. This is not OTLP —
+// see WriteJSON.
+func TestTraceJSONShape(t *testing.T) {
 	trace := Trace{
 		TraceID: "abc123",
 		Spans: []Span{

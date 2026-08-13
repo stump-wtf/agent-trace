@@ -66,7 +66,13 @@ import "gitea.stump.rocks/stump.wtf/agent-trace/otel"
 
 trace := otel.BuildTrace(session, events, marks)
 // trace.Spans[0].Name, .StartTime, .EndTime, .ParentSpanID
+
+err := otel.WriteJSON(os.Stdout, trace)
 ```
+
+`Span.Attributes` is `map[string]any` so numeric attributes stay numeric — `agent.result.bytes` and `agent.outside_count` serialize as JSON numbers, not quoted strings. Values must be one of the types OTel permits: string, bool, int64, float64, or a slice of those.
+
+`WriteJSON` emits this package's own `{traceId, session, spans}` shape, not the OTLP/HTTP wire format — a collector-bound exporter has to translate it first.
 
 No `time.Now()` — missing timestamps fall back to the nearest event, then `SessionMeta.StartedAt`, then zero. Building the same trace twice produces identical timings.
 
