@@ -44,6 +44,50 @@ func (a OpenCodeAdapter) Diagnostics() []DiagnosticCheck {
 	return []DiagnosticCheck{{Name: "database", Status: "ok", Detail: dbPath}}
 }
 
+// AgentGraph builds a parent-child tree of all sessions (including subagent
+// sessions excluded from ListSessions). Queries parent_id from the session
+// table and links children to their parents.
+func (a OpenCodeAdapter) AgentGraph() (*AgentGraph, error) {
+	dbPath := a.dbPath()
+	if dbPath == "" {
+		return &AgentGraph{Children: map[string][]AgentNode{}}, nil
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return &AgentGraph{Children: map[string][]AgentNode{}}, nil
+	}
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT id, parent_id, title, time_created FROM session ORDER BY time_created`)
+	if err != nil {
+		return &AgentGraph{Children: map[string][]AgentNode{}}, nil
+	}
+	defer func() { _ = rows.Close() }()
+	graph := &AgentGraph{Children: map[string][]AgentNode{}}
+	for rows.Next() {
+		var id, title string
+		var parentID sql.NullString
+		var timeCreated int64
+		if err := rows.Scan(&id, &parentID, &title, &timeCreated); err != nil {
+			continue
+		}
+		node := AgentNode{
+			SessionID: id,
+			Harness:   a.Harness(),
+			StartedAt: msToRFC3339(timeCreated),
+			Title:     title,
+		}
+		if parentID.Valid && parentID.String != "" {
+			node.ParentID = parentID.String
+		}
+		if node.ParentID == "" {
+			graph.Roots = append(graph.Roots, node)
+		} else {
+			graph.Children[node.ParentID] = append(graph.Children[node.ParentID], node)
+		}
+	}
+	return graph, nil
+}
+
 // WithRoot returns a copy of the adapter that discovers sessions under root,
 // which is treated as a HOME-like base: the adapter appends its own layout
 // (.opencode/opencode.db). Sibling fields are preserved; only the root-derived

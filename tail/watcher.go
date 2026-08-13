@@ -71,6 +71,36 @@ type DiagnosticsSource interface {
 	Diagnostics() []DiagnosticCheck
 }
 
+// AgentNode is a session in an agent graph tree. It carries enough metadata
+// to identify and order the session without parsing its full content.
+type AgentNode struct {
+	SessionID string
+	ParentID  string // empty for root sessions
+	Harness   Harness
+	StartedAt string
+	Title     string
+}
+
+// AgentGraph is a tree of parent-child session relationships. Roots are
+// top-level sessions (no parent). Children maps parent session IDs to their
+// subagent children.
+type AgentGraph struct {
+	Roots    []AgentNode
+	Children map[string][]AgentNode // parent session ID → children
+}
+
+// AgentGraphBuilder is an optional interface for adapters that track
+// parent-child session relationships (subagent correlation). Consumers use it
+// to build a cross-session tree, linking a subagent's trace as a child of
+// the parent session's trace.
+//
+// Only SQLite-backed adapters (Crush, OpenCode) implement this — they store
+// parent_session_id / parent_id in their schema. JSONL adapters don't carry
+// cross-session relationship data.
+type AgentGraphBuilder interface {
+	AgentGraph() (*AgentGraph, error)
+}
+
 // IncrementalParser is an optional interface adapters implement to avoid
 // re-reading and re-parsing the entire session on every poll. The watcher
 // tracks a per-session watermark (byte offset for JSONL, epoch-ms for SQLite)

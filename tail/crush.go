@@ -55,6 +55,60 @@ func (a CrushAdapter) Diagnostics() []DiagnosticCheck {
 	return checks
 }
 
+// AgentGraph builds a parent-child tree of all sessions (including subagent
+// sessions excluded from ListSessions). Queries parent_session_id from every
+// project database and links children to their parents.
+func (a CrushAdapter) AgentGraph() (*AgentGraph, error) {
+	graph := &AgentGraph{Children: map[string][]AgentNode{}}
+	for _, db := range a.dbPaths() {
+		nodes, err := a.graphNodes(db.dbPath)
+		if err != nil {
+			continue
+		}
+		for _, node := range nodes {
+			if node.ParentID == "" {
+				graph.Roots = append(graph.Roots, node)
+			} else {
+				graph.Children[node.ParentID] = append(graph.Children[node.ParentID], node)
+			}
+		}
+	}
+	return graph, nil
+}
+
+func (a CrushAdapter) graphNodes(dbPath string) ([]AgentNode, error) {
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT id, parent_session_id, title, created_at FROM sessions ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var nodes []AgentNode
+	for rows.Next() {
+		var id, title string
+		var parentID sql.NullString
+		var createdAt int64
+		if err := rows.Scan(&id, &parentID, &title, &createdAt); err != nil {
+			continue
+		}
+		node := AgentNode{
+			SessionID: id,
+			Harness:   a.Harness(),
+			StartedAt: msToRFC3339(createdAt),
+			Title:     title,
+		}
+		if parentID.Valid {
+			node.ParentID = parentID.String
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, nil
+}
+
 // WithRoot returns a copy of the adapter that discovers sessions under root,
 // which is treated as a HOME-like base: the adapter appends its own layout
 // (.local/share/crush/projects.json). Sibling fields — DBPath and Cwd, which a
