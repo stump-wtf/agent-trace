@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -106,19 +105,15 @@ func (a CrushAdapter) dbPaths() []struct {
 }
 
 // ListSessions discovers Crush sessions from all project databases.
+//
+// It delegates to ListSessionsFiltered with the zero filter, which is
+// documented to match every session: the pushdown skips no project, adds no
+// WHERE clause, and filterSessions returns its input untouched. Keeping one
+// body rather than two makes FilteredLister's "identical to ListSessions
+// followed by in-memory filtering" contract true by construction instead of by
+// two hand-synchronized copies of the same loop, sort, and error policy.
 func (a CrushAdapter) ListSessions() ([]SessionMeta, error) {
-	var metas []SessionMeta
-	for _, db := range a.dbPaths() {
-		sessions, err := a.listDBSessions(db.dbPath, db.cwd)
-		if err != nil {
-			continue
-		}
-		metas = append(metas, sessions...)
-	}
-	sort.Slice(metas, func(i, j int) bool {
-		return metas[i].EndedAt > metas[j].EndedAt
-	})
-	return metas, nil
+	return a.ListSessionsFiltered(SessionFilter{})
 }
 
 // ListSessionsFiltered implements FilteredLister. Crush stores one database
@@ -143,13 +138,10 @@ func (a CrushAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, erro
 		}
 		metas = append(metas, sessions...)
 	}
-	sort.Slice(metas, func(i, j int) bool {
-		return metas[i].EndedAt > metas[j].EndedAt
-	})
+	sortSessionsByRecency(metas)
 	return filterSessions(metas, f), nil
 }
 
-func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) {
 func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) {
 	return a.listDBSessionsSince(dbPath, cwd, 0, false)
 }
@@ -164,12 +156,17 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 	if err != nil {
 		return nil, err
 	}
-	query := `SELECT id, title, parent_session_id, created_at, updated_at FROM sessions ORDER BY updated_at DESC`
-	args := []any{}
+	// Composed rather than written out twice: the column list and the ORDER BY
+	// exist once, so a schema change cannot update the bounded query and leave
+	// the unbounded one behind (rows.Scan would then fail below and the
+	// per-row `continue` would silently return zero sessions).
+	query := `SELECT id, title, parent_session_id, created_at, updated_at FROM sessions`
+	var args []any
 	if hasSince {
-		query = `SELECT id, title, parent_session_id, created_at, updated_at FROM sessions WHERE created_at >= ? ORDER BY updated_at DESC`
+		query += ` WHERE created_at >= ?`
 		args = append(args, sinceMs)
 	}
+	query += ` ORDER BY updated_at DESC`
 	rows, err := db.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return nil, err
@@ -196,7 +193,10 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 			meta.Auxiliary = true
 		}
 		if meta.Title == "" || meta.Title == "Untitled Session" {
-			meta.Title = filepath.Base(cwd) + " — " + id[:8]
+			// Bounded like the OpenCode twin: a row whose id is shorter than 8
+			// bytes would otherwise panic the whole listing, and this listing
+			// now runs from ListSessions, ListSessionsFiltered and Summarize.
+			meta.Title = filepath.Base(cwd) + " — " + id[:min(8, len(id))]
 		}
 		metas = append(metas, meta)
 	}
@@ -348,7 +348,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	}
 
 	if meta.Title == "" || meta.Title == "Untitled Session" {
-		meta.Title = filepath.Base(cwd) + " — " + sessionID[:8]
+		meta.Title = filepath.Base(cwd) + " — " + sessionID[:min(8, len(sessionID))]
 	}
 
 	return events, marks, meta, nil

@@ -55,39 +55,36 @@ func (a OpenCodeAdapter) dbPath() string {
 }
 
 // ListSessions discovers OpenCode sessions from the database.
+//
+// It delegates to ListSessionsFiltered with the zero filter, which matches
+// every session and pushes nothing down, so the two entry points cannot drift
+// on ordering, on the "a missing database is an empty result, not an error"
+// policy, or on anything else — see the CrushAdapter.ListSessions note.
 func (a OpenCodeAdapter) ListSessions() ([]SessionMeta, error) {
-	dbPath := a.dbPath()
-	if dbPath == "" {
-		return nil, nil
-	}
-	db, err := openSQLite(dbPath)
-	if err != nil {
-		return nil, nil // missing/unreadable DB is not an error
-	}
-	metas, err := a.listSessions(db, dbPath)
-	if err != nil {
-		return nil, nil // unreadable/missing DB is not an error
-	}
-	return metas, nil
+	return a.ListSessionsFiltered(SessionFilter{})
 }
 
 // ListSessionsFiltered implements FilteredLister, pushing the time bound into
 // the SQL query and leaving the exact decision to filterSessions. A missing or
-// unreadable database stays an empty result rather than an error, matching
-// ListSessions.
+// unreadable database stays an empty result rather than an error.
+//
+// The empty results run through filterSessions rather than returning a bare
+// nil so that they match the generic path in ListSessionsFiltered byte for
+// byte: filterSessions yields a non-nil empty slice under a non-zero filter,
+// which marshals as [] where nil marshals as null.
 func (a OpenCodeAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, error) {
 	dbPath := a.dbPath()
 	if dbPath == "" {
-		return nil, nil
+		return filterSessions(nil, f), nil
 	}
 	db, err := openSQLite(dbPath)
 	if err != nil {
-		return nil, nil
+		return filterSessions(nil, f), nil
 	}
 	sinceMs, hasSince := sinceLowerBoundMs(f)
 	metas, err := a.listSessionsSince(db, dbPath, sinceMs, hasSince)
 	if err != nil {
-		return nil, nil
+		return filterSessions(nil, f), nil
 	}
 	return filterSessions(metas, f), nil
 }
@@ -107,14 +104,25 @@ func (a OpenCodeAdapter) listSessions(db *sql.DB, dbPath string) ([]SessionMeta,
 // trailing separators or "." elements — the cheap win is not worth a pushdown
 // that can diverge from the exact predicate.
 func (a OpenCodeAdapter) listSessionsSince(db *sql.DB, dbPath string, sinceMs int64, hasSince bool) ([]SessionMeta, error) {
+	// Composed rather than written out twice, so the column list exists once
+	// and a schema change cannot update one copy and leave the other to fail
+	// in rows.Scan (where the per-row `continue` would swallow it).
+	//
+	// The `, id DESC` tiebreak is what makes the pushdown safe. SQL leaves the
+	// relative order of rows tied on time_updated unspecified, and adding a
+	// WHERE clause can change the plan — an index scan on time_created walks
+	// tied rows in a different order than a table scan. There is no Go-side
+	// re-sort here, so that order reaches the caller directly and the filtered
+	// listing could disagree with the unfiltered one on ties. A total order in
+	// both queries removes the possibility.
 	query := `SELECT id, title, directory, parent_id, model, time_created, time_updated
-		 FROM session ORDER BY time_updated DESC`
-	args := []any{}
+		 FROM session`
+	var args []any
 	if hasSince {
-		query = `SELECT id, title, directory, parent_id, model, time_created, time_updated
-		 FROM session WHERE time_created >= ? ORDER BY time_updated DESC`
+		query += ` WHERE time_created >= ?`
 		args = append(args, sinceMs)
 	}
+	query += ` ORDER BY time_updated DESC, id DESC`
 	rows, err := db.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return nil, err

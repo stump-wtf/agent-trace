@@ -6,6 +6,7 @@ package tail
 
 import (
 	"path/filepath"
+	"sort"
 	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
@@ -212,6 +213,32 @@ func sinceLowerBoundMs(f SessionFilter) (int64, bool) {
 		return 0, false
 	}
 	return f.Since.UnixMilli(), true
+}
+
+// sortSessionsByRecency orders sessions newest-ended first, and is the single
+// ordering rule for every adapter that sorts in Go. Two properties matter, and
+// both were broken by comparing EndedAt as a raw string:
+//
+// It compares parsed instants, not RFC 3339 text. msToRFC3339 emits
+// RFC3339Nano, which drops trailing fractional zeros, so "…:01Z" and
+// "…:01.5Z" sort by the byte values of 'Z' (0x5A) and '.' (0x2E) — putting the
+// whole second *after* the later fractional one. Sessions unknown to the clock
+// (empty or unparseable EndedAt) parse to the zero time and land last, which is
+// where lexical comparison put them too.
+//
+// It is a total order: ties on the instant fall back to Key, which is unique
+// per session. Without that, sorting a filtered subset with an unstable sort
+// can place tied sessions differently than sorting the full list and filtering
+// afterwards — exactly the divergence FilteredLister promises cannot happen.
+func sortSessionsByRecency(metas []SessionMeta) {
+	sort.Slice(metas, func(i, j int) bool {
+		ti, _ := metas[i].Ended()
+		tj, _ := metas[j].Ended()
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return metas[i].Key < metas[j].Key
+	})
 }
 
 // cwdMatches reports whether sessionCwd equals or is a subdirectory of

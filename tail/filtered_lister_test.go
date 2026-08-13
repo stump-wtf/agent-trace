@@ -137,12 +137,18 @@ func TestOpenCodeFilteredListerMatchesInMemory(t *testing.T) {
 	assertFilteredMatchesInMemory(t, a, filterMatrix(base, cwd))
 }
 
-// TestCrushFilteredListerSkipsNonMatchingProjects pins the actual optimization
-// rather than only its correctness: Crush stores one database per project and
-// the cwd belongs to the project, so a filter that excludes a project must skip
-// its database entirely. Pointing a project at a database that does not exist
-// proves it is never opened — if the adapter tried, it would still succeed
-// here, but the session from the real project would be joined by nothing.
+// TestCrushFilteredListerSkipsNonMatchingProjects covers the multi-project
+// path: Crush stores one database per project and the cwd belongs to the
+// project, so a cwd filter must narrow across databases and not merely within
+// one.
+//
+// It pins the observable result, not the optimization. Deleting the per-project
+// skip from ListSessionsFiltered leaves this test green, because the trailing
+// filterSessions pass drops the out-of-scope sessions either way — the skip is
+// only visible as I/O not performed, and every failure to open a database is
+// swallowed by the same `continue` that makes a missing database a non-error.
+// Pinning it would take an injectable opener; until then, treat the skip as an
+// optimization this suite does not defend.
 func TestCrushFilteredListerSkipsNonMatchingProjects(t *testing.T) {
 	dir := t.TempDir()
 	wanted := filepath.Join(dir, "wanted")
@@ -190,6 +196,170 @@ func TestCrushFilteredListerSkipsNonMatchingProjects(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("unfiltered listing returned %v, want both sessions", ids(all))
+	}
+}
+
+// TestCrushFilteredListerMatchesInMemoryOnTies is the case the single-project,
+// strictly-increasing-timestamp fixtures above cannot reach, and the one the
+// ordering half of the contract actually turns on.
+//
+// Two things have to be true at once for the pushdown to diverge: the slice fed
+// to the sort must differ between the two paths (multiple projects, some of
+// them skipped by the cwd pushdown or thinned by the SQL bound), and sessions
+// must tie on the sort key. Ties are not exotic — updated_at is milliseconds,
+// so a migration or a burst of activity produces them, and every row with
+// updated_at <= 0 ties at "" because msToRFC3339 maps them all to the empty
+// string.
+//
+// Before sortSessionsByRecency imposed a total order, this failed with roughly
+// two thirds of the positions mismatched.
+func TestCrushFilteredListerMatchesInMemoryOnTies(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	group := filepath.Join(dir, "group")
+	cwds := []string{
+		filepath.Join(group, "a"),
+		filepath.Join(group, "b"),
+		filepath.Join(group, "c"),
+		filepath.Join(dir, "elsewhere"),
+	}
+	cwdToDataDir := map[string]string{}
+	for p, cwd := range cwds {
+		dbPath := filepath.Join(dir, fmt.Sprintf("data%d", p), "crush.db")
+		createTestCrushDB(t, dbPath)
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range 8 {
+			// updated_at (the sort key) draws from a handful of values so rows
+			// tie heavily; created_at (the Since key) spreads out so the bound
+			// prunes a different subset than the cwd skip does.
+			updated := base.Add(time.Duration(i%3) * time.Hour).UnixMilli()
+			created := base.Add(time.Duration(i*17) * time.Minute).UnixMilli()
+			if _, err := db.ExecContext(context.Background(),
+				`INSERT INTO sessions (id, parent_session_id, title, created_at, updated_at) VALUES (?, '', 'x', ?, ?)`,
+				fmt.Sprintf("p%d-s%d", p, i), created, updated); err != nil {
+				t.Fatal(err)
+			}
+		}
+		db.Close()
+		cwdToDataDir[cwd] = filepath.Dir(dbPath)
+	}
+	projects := filepath.Join(dir, "projects.json")
+	writeProjectsJSON(t, projects, cwdToDataDir)
+
+	a := CrushAdapter{ProjectsPath: projects}
+	assertFilteredMatchesInMemory(t, a, []SessionFilter{
+		{},
+		{Cwd: group},
+		{Cwd: cwds[0]},
+		{Since: base.Add(30 * time.Minute)},
+		{Since: base.Add(90 * time.Minute)},
+		{Cwd: group, Since: base.Add(30 * time.Minute)},
+		{Cwd: group, Since: base.Add(500 * time.Microsecond)},
+	})
+}
+
+// TestSortSessionsByRecencyOrdersByInstant pins the half of the ordering rule
+// that a tie test cannot see: RFC3339Nano drops trailing fractional zeros, so
+// comparing EndedAt as text ranks a whole second above a later fractional one
+// in the same second ('Z' > '.'). The listing claims to be newest-first, and
+// SQLite already returned these rows in the right order — a text comparison in
+// Go put them back out of order.
+func TestSortSessionsByRecencyOrdersByInstant(t *testing.T) {
+	whole := msToRFC3339(1767268800000) // 2026-01-01T12:00:00Z
+	frac := msToRFC3339(1767268800500)  // 2026-01-01T12:00:00.5Z — 500ms later
+	if !(whole > frac) {
+		t.Fatalf("fixture no longer exercises the trap: %q vs %q", whole, frac)
+	}
+	metas := []SessionMeta{
+		{ID: "whole", Key: "k-whole", EndedAt: whole},
+		{ID: "frac", Key: "k-frac", EndedAt: frac},
+		{ID: "unknown", Key: "k-unknown"},
+	}
+	sortSessionsByRecency(metas)
+	if got := ids(metas); got[0] != "frac" || got[1] != "whole" || got[2] != "unknown" {
+		t.Errorf("got %v, want [frac whole unknown] (newest instant first, unknown last)", got)
+	}
+}
+
+// TestSortSessionsByRecencyIsTotal pins the tiebreak itself: equal instants
+// must resolve deterministically, or sorting a subset can order them
+// differently than sorting the whole list.
+func TestSortSessionsByRecencyIsTotal(t *testing.T) {
+	ended := msToRFC3339(1767268800000)
+	full := []SessionMeta{
+		{ID: "c", Key: "k-c", EndedAt: ended},
+		{ID: "a", Key: "k-a", EndedAt: ended},
+		{ID: "d", Key: "k-d", EndedAt: ended},
+		{ID: "b", Key: "k-b", EndedAt: ended},
+	}
+	sortSessionsByRecency(full)
+	if got := ids(full); got[0] != "a" || got[3] != "d" {
+		t.Fatalf("ties did not resolve by Key: %v", got)
+	}
+	subset := []SessionMeta{full[3], full[1]} // reversed relative order
+	sortSessionsByRecency(subset)
+	if ids(subset)[0] != full[1].ID {
+		t.Errorf("subset order %v disagrees with the full order %v", ids(subset), ids(full))
+	}
+}
+
+// TestCrushShortSessionIDTitleFallback covers a sessions row whose id is
+// shorter than the 8 bytes the untitled-session fallback slices off. The
+// listing runs from ListSessions, ListSessionsFiltered and Summarize, so an
+// unguarded slice panicked all three — and, once Crush is in DefaultAdapters,
+// the watcher's poll loop with them.
+func TestCrushShortSessionIDTitleFallback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "data", "crush.db")
+	createTestCrushDB(t, dbPath)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO sessions (id, parent_session_id, title, created_at, updated_at) VALUES ('abc', '', '', ?, ?)`,
+		ts, ts); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	a := CrushAdapter{DBPath: dbPath, Cwd: filepath.Join(dir, "project")}
+	metas, err := a.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(metas))
+	}
+	if metas[0].Title != "project — abc" {
+		t.Errorf("title = %q, want %q", metas[0].Title, "project — abc")
+	}
+	if _, err := a.ListSessionsFiltered(SessionFilter{Cwd: filepath.Join(dir, "project")}); err != nil {
+		t.Errorf("ListSessionsFiltered: %v", err)
+	}
+}
+
+// TestOpenCodeFilteredListerEmptyResultShape pins the shape of an empty
+// result, not just its length: the generic path in ListSessionsFiltered runs
+// filterSessions, which returns a non-nil empty slice under a non-zero filter,
+// and a pushdown that short-circuits to a bare nil would marshal as null where
+// the generic path marshals as [].
+func TestOpenCodeFilteredListerEmptyResultShape(t *testing.T) {
+	a := OpenCodeAdapter{DBPath: filepath.Join(t.TempDir(), "absent.db")}
+	got, err := a.ListSessionsFiltered(SessionFilter{Cwd: "/nowhere"})
+	if err != nil {
+		t.Fatalf("ListSessionsFiltered: %v", err)
+	}
+	if got == nil {
+		t.Error("pushdown returned a nil slice where in-memory filtering returns an empty one")
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d sessions from an absent database", len(got))
 	}
 }
 
