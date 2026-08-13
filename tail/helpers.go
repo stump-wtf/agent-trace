@@ -15,9 +15,12 @@ import (
 // os.Stat-based FileExists and real home/tmp dirs. Adapters pass this to
 // classify.BuildEventWith so weak-target filtering and outside-scope
 // detection work correctly end-to-end.
-func osClassifyOptions() *classify.Options {
+//
+// verifyPatterns, when non-empty, is copied into Options.VerifyPatterns so
+// custom verify commands (e.g. "just test") are classified correctly.
+func osClassifyOptions(verifyPatterns []string) *classify.Options {
 	home, _ := os.UserHomeDir()
-	return &classify.Options{
+	opts := &classify.Options{
 		FileExists: func(cwd, rel string) bool {
 			if cwd == "" || rel == "" {
 				return false
@@ -29,6 +32,10 @@ func osClassifyOptions() *classify.Options {
 		HomeDir: home,
 		TmpDir:  os.TempDir(),
 	}
+	if len(verifyPatterns) > 0 {
+		opts.VerifyPatterns = verifyPatterns
+	}
+	return opts
 }
 
 // sessionKey produces a stable identifier for a session file, independent of

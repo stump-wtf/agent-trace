@@ -17,9 +17,14 @@ import (
 // linearized before parsing.
 type PiAdapter struct {
 	Dir string // override default session directory
+	// opts carries classify.Options from the watcher (verify patterns, etc).
+	opts *classify.Options
 }
 
 func (a PiAdapter) Harness() Harness { return HarnessPi }
+
+// SetOptions injects classify.Options for verify-pattern customization.
+func (a *PiAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 func (a PiAdapter) SessionDir() string {
 	if a.Dir != "" {
@@ -125,7 +130,10 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 	}
 	meta := a.piBaseMeta(path, header)
 
-	opts := osClassifyOptions()
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
 	pending := map[string]classify.ToolCall{}
 	pendingOrder := []string{}
 	var events []classify.Event

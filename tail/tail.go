@@ -118,6 +118,11 @@ type WatchConfig struct {
 	// PollInterval is how often to re-scan session directories.
 	// Default is 2 seconds.
 	PollInterval time.Duration
+	// VerifyPatterns adds custom command patterns for verify-action
+	// classification (e.g. "just test", "bun test"). When non-empty,
+	// these are merged with the defaults in classify.defaultVerifyPatterns.
+	// Threaded through to adapters via the OptionsSetter interface.
+	VerifyPatterns []string
 }
 
 // DefaultWatchConfig returns sensible defaults for live watching.

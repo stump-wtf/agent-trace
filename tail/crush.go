@@ -25,9 +25,14 @@ type CrushAdapter struct {
 	DBPath string
 	// Cwd overrides the working directory (testing).
 	Cwd string
+	// opts carries classify.Options from the watcher (verify patterns, etc).
+	opts *classify.Options
 }
 
 func (a CrushAdapter) Harness() Harness { return HarnessCrush }
+
+// SetOptions injects classify.Options for verify-pattern customization.
+func (a *CrushAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 // WithRoot returns a copy of the adapter that discovers sessions under root,
 // which is treated as a HOME-like base: the adapter appends its own layout
@@ -297,7 +302,10 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	}
 	defer func() { _ = rows.Close() }()
 
-	opts := osClassifyOptions()
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := 0

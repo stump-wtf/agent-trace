@@ -21,9 +21,14 @@ import (
 type CodexAdapter struct {
 	Dir       string // override default session directory
 	IndexPath string // override session_index.jsonl location for title resolution
+	// opts carries classify.Options from the watcher (verify patterns, etc).
+	opts *classify.Options
 }
 
 func (a CodexAdapter) Harness() Harness { return HarnessCodex }
+
+// SetOptions injects classify.Options for verify-pattern customization.
+func (a *CodexAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 func (a CodexAdapter) SessionDir() string {
 	if a.Dir != "" {
@@ -160,7 +165,10 @@ func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	defer func() { _ = f.Close() }()
 
 	recognized := false
-	opts := osClassifyOptions()
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
 	calls := map[string]classify.ToolCall{}
 	results := map[string]classify.ToolResult{}
 	callOrder := []string{}

@@ -38,6 +38,18 @@ type Adapter interface {
 	WithRoot(dir string) Adapter
 }
 
+// OptionsSetter is an optional interface adapters implement to accept
+// classify.Options from the watcher. When WatchConfig.VerifyPatterns is
+// non-empty, the watcher calls SetOptions on each adapter that implements
+// this interface before scanning, so custom verify patterns reach
+// BuildEventWith inside the adapter's Parse method.
+//
+// Adapters must implement this with a pointer receiver so the watcher's
+// type assertion succeeds on &adapter.
+type OptionsSetter interface {
+	SetOptions(opts *classify.Options)
+}
+
 // DefaultAdapters returns adapters for all supported agent harnesses.
 //
 // This is every adapter the package ships. The SQLite-backed pair (Crush,
@@ -46,11 +58,11 @@ type Adapter interface {
 // installed simply contributes no sessions.
 func DefaultAdapters() []Adapter {
 	return []Adapter{
-		ClaudeCodeAdapter{},
-		CodexAdapter{},
-		CrushAdapter{},
-		OpenCodeAdapter{},
-		PiAdapter{},
+		&ClaudeCodeAdapter{},
+		&CodexAdapter{},
+		&CrushAdapter{},
+		&OpenCodeAdapter{},
+		&PiAdapter{},
 	}
 }
 
@@ -77,9 +89,20 @@ func NewWatcher(cfg IdleConfig, adapters []Adapter) *Watcher {
 }
 
 // NewWatcherWithConfig creates a watcher with full WatchConfig control.
+// If cfg.VerifyPatterns is non-empty, the watcher injects them into each
+// adapter that implements OptionsSetter before the first scan.
 func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 2 * time.Second
+	}
+	if len(cfg.VerifyPatterns) > 0 {
+		for _, a := range adapters {
+			if os, ok := a.(OptionsSetter); ok {
+				os.SetOptions(&classify.Options{
+					VerifyPatterns: cfg.VerifyPatterns,
+				})
+			}
+		}
 	}
 	return &Watcher{
 		cfg:          cfg,

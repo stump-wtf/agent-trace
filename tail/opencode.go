@@ -22,9 +22,14 @@ const HarnessOpenCode Harness = "opencode"
 type OpenCodeAdapter struct {
 	// DBPath overrides the database path (default: ~/.opencode/opencode.db).
 	DBPath string
+	// opts carries classify.Options from the watcher (verify patterns, etc).
+	opts *classify.Options
 }
 
 func (a OpenCodeAdapter) Harness() Harness { return HarnessOpenCode }
+
+// SetOptions injects classify.Options for verify-pattern customization.
+func (a *OpenCodeAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 // WithRoot returns a copy of the adapter that discovers sessions under root,
 // which is treated as a HOME-like base: the adapter appends its own layout
@@ -259,7 +264,10 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 	}
 	defer func() { _ = rows.Close() }()
 
-	opts := osClassifyOptions()
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := 0

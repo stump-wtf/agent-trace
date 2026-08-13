@@ -16,9 +16,15 @@ import (
 // ~/.claude/projects/. Each project subdirectory contains .jsonl session files.
 type ClaudeCodeAdapter struct {
 	Dir string // override default session directory
+	// opts carries classify.Options from the watcher (verify patterns, etc).
+	// When nil, Parse falls back to osClassifyOptions.
+	opts *classify.Options
 }
 
 func (a ClaudeCodeAdapter) Harness() Harness { return HarnessClaudeCode }
+
+// SetOptions injects classify.Options for verify-pattern customization.
+func (a *ClaudeCodeAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 func (a ClaudeCodeAdapter) SessionDir() string {
 	if a.Dir != "" {
@@ -144,7 +150,10 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 	defer func() { _ = f.Close() }()
 
 	recognized := false
-	opts := osClassifyOptions()
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
 	pending := map[string]classify.ToolCall{}
 	pendingOrder := []string{}
 	var events []classify.Event
