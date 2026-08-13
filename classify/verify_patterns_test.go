@@ -56,6 +56,32 @@ func TestVerifyCommandWithCustomPatterns(t *testing.T) {
 	}
 }
 
+// TestVerifyCommandIgnoresBlankPatterns guards against a blank entry in
+// VerifyPatterns (a trailing comma or empty config line) matching every
+// command as a substring and classifying the whole trace as verify.
+func TestVerifyCommandIgnoresBlankPatterns(t *testing.T) {
+	opts := &Options{
+		VerifyPatterns: []string{"", "   ", "just test"},
+	}
+
+	tests := []struct {
+		cmd  string
+		want bool
+	}{
+		{"echo hello", false},
+		{"git status", false},
+		{"rm -rf build", false},
+		{"just test", true},
+		{"go test ./...", true},
+	}
+
+	for _, tt := range tests {
+		if got := VerifyCommandWith(opts, tt.cmd); got != tt.want {
+			t.Errorf("VerifyCommandWith(%q) = %v, want %v (blank patterns ignored)", tt.cmd, got, tt.want)
+		}
+	}
+}
+
 // TestActionForWithCustomVerifyPatterns verifies that ActionForWith threads
 // VerifyPatterns through to VerifyCommand (issue #14).
 func TestActionForWithCustomVerifyPatterns(t *testing.T) {

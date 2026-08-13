@@ -102,7 +102,14 @@ func VerifyCommandWith(opts *Options, command string) bool {
 	}
 	if opts != nil {
 		for _, pattern := range opts.VerifyPatterns {
-			if strings.Contains(c, strings.ToLower(pattern)) {
+			// An empty or whitespace-only pattern is a substring of every
+			// command; skip it rather than classifying the whole trace as
+			// verify.
+			pattern = strings.ToLower(strings.TrimSpace(pattern))
+			if pattern == "" {
+				continue
+			}
+			if strings.Contains(c, pattern) {
 				return true
 			}
 		}

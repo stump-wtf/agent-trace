@@ -10,7 +10,7 @@ This module covers mindwalk's trace parsing, classification, and event/mark emis
 
 ### `classify`
 
-Pure classification of agent tool calls into semantic actions (`search`, `read`, `edit`, `exec`, `verify`) and file targets. No I/O — the `Options` struct lets callers inject a `FileExists` func and home/tmp dirs for weak-target filtering and outside-scope detection. Pass nil Options to keep all weak targets.
+Pure classification of agent tool calls into semantic actions (`search`, `read`, `edit`, `exec`, `verify`) and file targets. No I/O — the `Options` struct lets callers inject a `FileExists` func and home/tmp dirs for weak-target filtering and outside-scope detection, plus `VerifyPatterns` to extend the built-in verify command list (`just test`, `bun test`, …). Pass nil Options to keep all weak targets and the default verify patterns.
 
 ```go
 import "gitea.stump.rocks/stump.wtf/agent-trace/classify"

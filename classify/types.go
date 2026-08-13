@@ -83,7 +83,8 @@ type Options struct {
 	// VerifyPatterns extends the built-in verify command patterns (go test,
 	// npm test, etc.). Patterns are matched case-insensitively as substrings.
 	// A project using "just test" or "bun test" can add those here so they
-	// classify as ActionVerify instead of ActionExec.
+	// classify as ActionVerify instead of ActionExec. Empty or whitespace-only
+	// entries are ignored — they would match every command.
 	VerifyPatterns []string
 }
 
