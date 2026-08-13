@@ -90,7 +90,9 @@ func splitLines(s string) []string {
 func TestWatcherScanOnce(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.jsonl")
-	os.WriteFile(path, []byte("event1\nevent2\n"), 0644)
+	if err := os.WriteFile(path, []byte("event1\nevent2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	w := NewWatcherWithConfig(WatchConfig{
 		IdleConfig:   IdleConfig{IdleAfter: 1 * time.Second},
@@ -126,9 +128,7 @@ func TestWatcherStopClosesChannel(t *testing.T) {
 	// After Stop, the channel should eventually close.
 	select {
 	case _, ok := <-w.Events():
-		if ok {
-			// Might need a moment for the close to propagate.
-		}
+		_ = ok
 	case <-time.After(1 * time.Second):
 		// Channel might still be open if Start hasn't exited yet.
 	}
@@ -143,7 +143,9 @@ func TestWatcherStopIdempotent(t *testing.T) {
 func TestWatcherIdleFromSessionData(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "old.jsonl")
-	os.WriteFile(path, []byte("old\n"), 0644)
+	if err := os.WriteFile(path, []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	w := NewWatcherWithConfig(WatchConfig{
 		IdleConfig:   IdleConfig{IdleAfter: 1 * time.Millisecond},

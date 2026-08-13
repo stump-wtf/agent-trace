@@ -19,7 +19,7 @@ func createTestOpenCodeDB(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 	for _, s := range []string{
 		`CREATE TABLE session (
@@ -76,7 +76,7 @@ func TestOpenCodeParseBasic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	sessionID := "oc-session-001"
 	modelJSON := `{"id":"claude-sonnet-4-20250514","providerID":"anthropic"}`
@@ -117,7 +117,7 @@ func TestOpenCodeParseBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db.Close()
+	_ = db.Close()
 
 	adapter := OpenCodeAdapter{DBPath: dbPath}
 	path := dbPath + "/" + sessionID
@@ -175,7 +175,7 @@ func TestOpenCodeListSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	for i := range 3 {
 		_, err = db.Exec(`INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -184,7 +184,7 @@ func TestOpenCodeListSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	db.Close()
+	_ = db.Close()
 
 	adapter := OpenCodeAdapter{DBPath: dbPath}
 	metas, err := adapter.ListSessions()
@@ -205,14 +205,14 @@ func TestOpenCodeSubagent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	_, err = db.Exec(`INSERT INTO session (id, project_id, slug, directory, title, version, parent_id, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		"sub-1", "proj-1", "sub-slug", "/test", "Sub", "1.0", "parent-1", 1784148215000, 1784148215000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	adapter := OpenCodeAdapter{DBPath: dbPath}
 	metas, err := adapter.ListSessions()
@@ -236,7 +236,7 @@ func TestOpenCodeCompactionMark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	sessionID := "oc-compact"
 	_, err = db.Exec(`INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -257,7 +257,7 @@ func TestOpenCodeCompactionMark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	adapter := OpenCodeAdapter{DBPath: dbPath}
 	_, marks, _, err := adapter.Parse(dbPath + "/" + sessionID)

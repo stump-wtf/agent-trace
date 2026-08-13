@@ -80,7 +80,7 @@ func (a ClaudeCodeAdapter) Summarize(path string) (SessionMeta, error) {
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	recognized := false
 	err = ReadJSONLines(f, func(data []byte) {
@@ -141,7 +141,7 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 	if err != nil {
 		return nil, nil, SessionMeta{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	recognized := false
 	opts := osClassifyOptions()

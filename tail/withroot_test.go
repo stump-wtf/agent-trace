@@ -129,7 +129,7 @@ func TestDefaultAdaptersIn(t *testing.T) {
 			}
 			// None of the adapters should return the real home directory.
 			// They should all point under /tmp/home.
-			if dir != "" && !filepath.HasPrefix(dir, "/tmp/home") {
+			if dir != "" && !strings.HasPrefix(dir, "/tmp/home") {
 				t.Errorf("%s SessionDir() = %q, expected under /tmp/home", a.Harness(), dir)
 			}
 		}

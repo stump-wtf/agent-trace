@@ -298,7 +298,7 @@ func readPiSession(path string) (header piRawEntry, entries []piRawEntry, recogn
 	if err != nil {
 		return piRawEntry{}, nil, false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sawEntry := false
 	err = ReadJSONLines(f, func(data []byte) {
 		var entry piRawEntry

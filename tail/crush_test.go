@@ -21,7 +21,7 @@ func createTestCrushDB(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 	schema := []string{
 		`CREATE TABLE sessions (
@@ -62,7 +62,7 @@ func TestCrushAdapterParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	now := time.Now().UnixMilli()
 	sessionID := "test-session-001"
@@ -87,7 +87,7 @@ func TestCrushAdapterParse(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	db.Close()
+	_ = db.Close()
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test/project"}
 	path := dbPath + "/" + sessionID
@@ -142,7 +142,7 @@ func TestCrushAdapterListSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	now := time.Now().UnixMilli()
 	for i := range 3 {
@@ -152,7 +152,7 @@ func TestCrushAdapterListSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	db.Close()
+	_ = db.Close()
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
 	metas, err := adapter.ListSessions()
@@ -179,7 +179,7 @@ func TestCrushAdapterSubagent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	now := time.Now().UnixMilli()
 	_, err = db.Exec(`INSERT INTO sessions (id, title, parent_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
@@ -187,7 +187,7 @@ func TestCrushAdapterSubagent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
 	metas, err := adapter.ListSessions()

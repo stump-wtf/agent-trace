@@ -77,7 +77,7 @@ func parsePathHits(text string) []pathHit {
 	byPath := map[string][][2]int{}
 	for _, m := range pathLineRe.FindAllStringSubmatch(text, -1) {
 		line := 0
-		fmt.Sscanf(m[2], "%d", &line)
+		_, _ = fmt.Sscanf(m[2], "%d", &line)
 		if line > 0 {
 			if path, ok := cleanExtractedPath(m[1], true); ok {
 				byPath[path] = append(byPath[path], [2]int{line, line})

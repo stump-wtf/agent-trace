@@ -127,7 +127,7 @@ func (a OpenCodeAdapter) listSessionsSince(db *sql.DB, dbPath string, sinceMs in
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var metas []SessionMeta
 	for rows.Next() {
 		var id, title, directory string
@@ -255,7 +255,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 	if err != nil {
 		return nil, nil, meta, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	opts := osClassifyOptions()
 	var events []classify.Event
@@ -277,11 +277,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 
 		switch part.Type {
 		case "text":
-			if strings.TrimSpace(part.Text) != "" {
-				// Determine role from parent message — for now treat all text
-				// as potential user messages; the message table has the role.
-				// We check the message role separately below.
-			}
+			_ = strings.TrimSpace(part.Text)
 
 		case "tool":
 			if part.Tool == "" || part.CallID == "" {
@@ -368,7 +364,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 				})
 			}
 		}
-		msgRows.Close()
+		_ = msgRows.Close()
 	}
 
 	// Sort marks by timestamp for consistent ordering.

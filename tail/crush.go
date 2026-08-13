@@ -171,7 +171,7 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var metas []SessionMeta
 	for rows.Next() {
 		var id, title, parentID string
@@ -264,7 +264,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	if err != nil {
 		return nil, nil, meta, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	opts := osClassifyOptions()
 	var events []classify.Event
