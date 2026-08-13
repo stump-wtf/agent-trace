@@ -149,7 +149,7 @@ func (a OpenCodeAdapter) listSessionsSince(db *sql.DB, dbPath string, sinceMs in
 			Key:       sessionKey(string(a.Harness()), dbPath+"/"+id),
 			ID:        id,
 			Harness:   a.Harness(),
-			Path:      dbPath,
+			Path:      dbPath + "/" + id,
 			Cwd:       directory,
 			Model:     modelStr,
 			Title:     title,
@@ -158,6 +158,9 @@ func (a OpenCodeAdapter) listSessionsSince(db *sql.DB, dbPath string, sinceMs in
 		}
 		if parentID.Valid && parentID.String != "" {
 			meta.Auxiliary = true
+		}
+		if meta.Auxiliary {
+			continue
 		}
 		if meta.Title == "" {
 			if directory != "" {
@@ -231,7 +234,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 		Key:       sessionKey(string(a.Harness()), dbPath+"/"+sessionID),
 		ID:        sessionID,
 		Harness:   a.Harness(),
-		Path:      dbPath,
+		Path:      dbPath + "/" + sessionID,
 		Cwd:       directory,
 		Model:     modelStr,
 		Title:     title,

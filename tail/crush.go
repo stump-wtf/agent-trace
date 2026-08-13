@@ -183,7 +183,7 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 			Key:       sessionKey(string(a.Harness()), dbPath+"/"+id),
 			ID:        id,
 			Harness:   a.Harness(),
-			Path:      dbPath,
+			Path:      dbPath + "/" + id,
 			Cwd:       cwd,
 			Title:     title,
 			StartedAt: msToRFC3339(createdAt),
@@ -191,6 +191,9 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 		}
 		if parentID != "" {
 			meta.Auxiliary = true
+		}
+		if meta.Auxiliary {
+			continue
 		}
 		if meta.Title == "" || meta.Title == "Untitled Session" {
 			// Bounded like the OpenCode twin: a row whose id is shorter than 8
@@ -248,7 +251,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 		Key:       sessionKey(string(a.Harness()), dbPath+"/"+sessionID),
 		ID:        sessionID,
 		Harness:   a.Harness(),
-		Path:      dbPath,
+		Path:      dbPath + "/" + sessionID,
 		Cwd:       cwd,
 		Title:     title,
 		StartedAt: msToRFC3339(createdAt),

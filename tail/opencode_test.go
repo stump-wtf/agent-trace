@@ -219,11 +219,8 @@ func TestOpenCodeSubagent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}
-	if len(metas) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(metas))
-	}
-	if !metas[0].Auxiliary {
-		t.Error("subagent session should be Auxiliary")
+	if len(metas) != 0 {
+		t.Fatalf("expected 0 sessions (subagents excluded from listing), got %d", len(metas))
 	}
 }
 

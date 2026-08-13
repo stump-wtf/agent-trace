@@ -2,7 +2,6 @@ package tail
 
 import (
 	"context"
-	"os"
 	"sync"
 	"time"
 
@@ -19,7 +18,7 @@ type Watcher struct {
 	events       chan Event
 	lastActivity map[string]time.Time // session key → last event time from session data
 	lastEmitted  map[string]int       // session key → highest event seq emitted
-	fileState    map[string]int64     // session path → last known file size
+	fileState    map[string]string    // session key → last known EndedAt (change detection)
 	mu           sync.Mutex
 	done         chan struct{}
 	stopOnce     sync.Once
@@ -85,7 +84,7 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 		events:       make(chan Event, 256),
 		lastActivity: make(map[string]time.Time),
 		lastEmitted:  make(map[string]int),
-		fileState:    make(map[string]int64),
+		fileState:    make(map[string]string),
 		done:         make(chan struct{}),
 	}
 }
@@ -182,21 +181,21 @@ func (w *Watcher) scanOnce(ctx context.Context) {
 }
 
 func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
-	// Check if file changed since last scan.
-	info, err := os.Stat(meta.Path)
-	if err != nil {
-		return
-	}
+	// Change detection uses the session's own EndedAt timestamp instead of
+	// os.Stat file size. This works for both JSONL and SQLite sessions:
+	// SQLite databases in WAL mode don't grow the main file on writes (the
+	// data lands in the -wal sidecar), so file-size stat misses updates.
+	// EndedAt changes whenever a new event arrives, regardless of storage.
 	w.mu.Lock()
-	lastSize := w.fileState[meta.Path]
-	w.fileState[meta.Path] = info.Size()
+	prevEndedAt := w.fileState[meta.Key]
+	w.fileState[meta.Key] = meta.EndedAt
 	lastSeq := w.lastEmitted[meta.Key]
-	if lastSeq == 0 && lastSize == 0 {
+	if lastSeq == 0 && prevEndedAt == "" {
 		lastSeq = -1 // first scan: emit everything including seq 0
 	}
 	w.mu.Unlock()
 
-	if info.Size() == lastSize && lastSize > 0 {
+	if meta.EndedAt == prevEndedAt && prevEndedAt != "" {
 		return // unchanged
 	}
 
