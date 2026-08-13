@@ -5,6 +5,12 @@ package classify
 // further classified by inspecting the command text (searchCommand,
 // readCommand, verifyCommand).
 func ActionFor(tool string, input map[string]any, result string) string {
+	return ActionForWith(nil, tool, input, result)
+}
+
+// ActionForWith is the Options-aware variant. Pass opts to enable custom
+// verify command patterns.
+func ActionForWith(opts *Options, tool string, input map[string]any, result string) string {
 	switch tool {
 	case "Read", "read", "view":
 		return ActionRead
@@ -14,7 +20,7 @@ func ActionFor(tool string, input map[string]any, result string) string {
 		return ActionSearch
 	case "Bash", "bash", "exec_command", "write_stdin", "js", "js_repl":
 		command := firstString(input, "command", "cmd", "code", "chars", "script", "_raw")
-		if VerifyCommand(command) {
+		if VerifyCommandWith(opts, command) {
 			return ActionVerify
 		}
 		if SearchCommand(command) {
@@ -34,7 +40,7 @@ func ActionFor(tool string, input map[string]any, result string) string {
 		}
 		allVerify, allSearch, allRead := true, true, true
 		for _, c := range commands {
-			if !VerifyCommand(c.command) {
+			if !VerifyCommandWith(opts, c.command) {
 				allVerify = false
 			}
 			if !SearchCommand(c.command) {
@@ -203,7 +209,7 @@ func BuildEvent(seq int, cwd string, call ToolCall, result ToolResult) Event {
 
 // BuildEventWith is the Options-aware variant.
 func BuildEventWith(opts *Options, seq int, cwd string, call ToolCall, result ToolResult) Event {
-	action := ActionFor(call.Name, call.Input, result.Content)
+	action := ActionForWith(opts, call.Name, call.Input, result.Content)
 	targets, outside := TargetsForWith(opts, cwd, call.Name, call.Input, result.Content)
 	if targets == nil {
 		targets = []Target{}
