@@ -125,12 +125,12 @@ func TestWatcherStopClosesChannel(t *testing.T) {
 	w := NewWatcher(DefaultIdleConfig(), nil)
 	go w.Start(context.Background())
 	w.Stop()
-	// After Stop, the channel should eventually close.
+	// After Stop, the channel should eventually close. Either outcome is
+	// acceptable — this test asserts only that Stop does not panic or wedge
+	// the reader; Start may not have exited yet when the deadline fires.
 	select {
-	case _, ok := <-w.Events():
-		_ = ok
+	case <-w.Events():
 	case <-time.After(1 * time.Second):
-		// Channel might still be open if Start hasn't exited yet.
 	}
 }
 

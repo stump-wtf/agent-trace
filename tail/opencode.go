@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
@@ -277,7 +276,10 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 
 		switch part.Type {
 		case "text":
-			_ = strings.TrimSpace(part.Text)
+			// Nothing to do here: a text part carries no role of its own, and
+			// the role that decides whether it becomes a user-message mark
+			// lives on the parent row. User messages are emitted from the
+			// message-table pass further below.
 
 		case "tool":
 			if part.Tool == "" || part.CallID == "" {

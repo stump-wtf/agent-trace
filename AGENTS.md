@@ -6,11 +6,11 @@ Go library for agent session trace parsing, classification, and OpenTelemetry ex
 
 ```sh
 make test    # go test ./...
-make lint    # gofmt + go vet
+make lint    # gofmt + go vet + golangci-lint
 make check   # lint + test
 ```
 
-Module path: `gitea.stump.rocks/stump.wtf/agent-trace`, Go 1.25. CI runs on Gitea Actions (`.gitea/workflows/ci.yaml`) with separate `lint` and `test` jobs.
+Module path: `gitea.stump.rocks/stump.wtf/agent-trace`, Go 1.26. CI runs on Gitea Actions (`.gitea/workflows/ci.yaml`) with separate `lint` and `test` jobs.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ Stateless core with one opt-in I/O surface: the `Options` struct supplies a `Fil
 
 **Shell command heuristics** (`shell.go`): `SearchCommand`, `ReadCommand`, `VerifyCommand` / `VerifyCommandWith` are conservative — any unrecognized program in a pipeline returns false, keeping it as `ActionExec`. The `exec` tool (Octotree's JS-based wrapper) requires a mini JS parser (`exec.go`: `execToolArguments`, `matchingJSParen`, `skipJSIgnored`) to extract nested `tools.exec_command()` and `tools.apply_patch()` calls from source code.
 
-**Path extraction** (`paths.go`): multiple regex-based extractors (`pathLineRe` for `file:line` hits, `pathOnlyRe` for bare paths, `commandPathRe` for command arguments, `patchFileRe` for apply_patch format). Paths are normalized relative to `cwd`, with out-of-repo files categorized as `home`, `tmp`, or `other`. `Weak` targets (inferred from command text rather than explicit tool input) are filtered through `repoPathExists` to avoid false positives.
+**Path extraction** (`paths.go`): multiple regex-based extractors (`pathLineRe` for `file:line` hits, `pathOnlyRe` for bare paths, `commandPathRe` for command arguments, `patchFileRe` for apply_patch format). Paths are normalized relative to `cwd`, with out-of-repo files categorized as `home`, `tmp`, or `other`. `Weak` targets (inferred from command text rather than explicit tool input) are filtered through `Options.FileExists` to avoid false positives.
 
 ### `tail` — session discovery and parsing
 
@@ -74,7 +74,7 @@ Converts classified events + marks into a `Trace` of deterministic `Span` struct
 
 ### `internal/strutil` — shared string utilities
 
-Contains `TruncateRunes(s, max, suffix)` used by classify, tail, and otel packages. Eliminates the former duplication of `truncateRunes`.
+Contains `TruncateRunes(s, max, suffix)` used by the classify and tail packages. Eliminates the former duplication of `truncateRunes`. (`otel` keeps its own unexported `truncate`.)
 
 ## Conventions
 
@@ -87,6 +87,6 @@ Contains `TruncateRunes(s, max, suffix)` used by classify, tail, and otel packag
 
 ## Gotchas
 
-- **`classify.repoPathExists` does filesystem I/O** despite the package doc claiming "no filesystem access." The `Weak` target filtering path calls `os.Stat`. This is a minor doc inconsistency. Use `Options{FileExists: nil}` to disable.
+- **`Weak` target filtering does filesystem I/O** despite the package doc's "no filesystem access" framing — it calls `Options.FileExists`, which `osClassifyOptions` backs with `os.Stat`. Pass `Options{FileExists: nil}` to disable.
 - **Pi adapter `linearizePi`** walks `parentId` from the last entry backward. If the file is truncated mid-write (live tailing), the leaf may be incomplete.
 - **Watcher re-parses entire files** on each poll cycle. For long-running sessions this means re-reading the full file every 2s. Byte-offset tailing is a future optimization.

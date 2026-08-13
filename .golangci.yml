@@ -7,10 +7,13 @@ linters:
     - staticcheck
     - ineffassign
     - unused
-
-linters-settings:
-  errcheck:
-    # Defer of Close is a common Go pattern; the error from Close on a
-    # read-only SQLite handle or file is not actionable.
-    exclude-functions:
-      - (io.Closer).Close
+  settings:
+    errcheck:
+      # Defer of Close is a common Go pattern; the error from Close on a
+      # read-only SQLite handle, rows cursor, or file is not actionable.
+      # errcheck matches on the receiver's concrete type, so an
+      # `(io.Closer).Close` entry would never fire for these call sites.
+      exclude-functions:
+        - (*os.File).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
