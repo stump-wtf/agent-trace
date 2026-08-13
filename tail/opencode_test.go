@@ -177,7 +177,7 @@ func TestOpenCodeListSessions(t *testing.T) {
 	}
 	defer db.Close()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, err = db.Exec(`INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			"sess-"+string(rune('0'+i)), "proj-1", "slug", "/test", "Session", "1.0", 1784148215000+int64(i*1000), 1784148215000+int64(i*1000+500))
 		if err != nil {
