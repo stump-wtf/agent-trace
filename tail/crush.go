@@ -398,6 +398,150 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	return events, marks, meta, nil
 }
 
+// Watermark returns the latest message timestamp (epoch-ms) for the session,
+// used as an incremental watermark for SQLite-backed adapters.
+func (a CrushAdapter) Watermark(path string) int64 {
+	dbPath, sessionID := splitDBSessionPath(path)
+	if dbPath == "" {
+		return 0
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return 0
+	}
+	var maxMs sql.NullInt64
+	err = db.QueryRowContext(context.Background(),
+		`SELECT MAX(created_at) FROM messages WHERE session_id = ?`, sessionID).Scan(&maxMs)
+	if err != nil || !maxMs.Valid {
+		return 0
+	}
+	return maxMs.Int64
+}
+
+// ParseSince reads only messages with created_at > watermark, returning events
+// and marks with seq continuing from startSeq. This avoids re-querying and
+// re-parsing the entire message history on every watcher poll.
+func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+	dbPath, sessionID := splitDBSessionPath(path)
+	if dbPath == "" {
+		return nil, nil, SessionMeta{}, 0, fmt.Errorf("not a Crush session: %s", path)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, err
+	}
+
+	var title, parentID string
+	var createdAt, updatedAt int64
+	err = db.QueryRowContext(context.Background(),
+		`SELECT title, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?`, sessionID).
+		Scan(&title, &parentID, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	cwd := a.cwdForDB(dbPath)
+	meta := SessionMeta{
+		Key:       sessionKey(string(a.Harness()), dbPath+"/"+sessionID),
+		ID:        sessionID,
+		Harness:   a.Harness(),
+		Path:      dbPath + "/" + sessionID,
+		Cwd:       cwd,
+		Title:     title,
+		StartedAt: msToRFC3339(createdAt),
+		EndedAt:   msToRFC3339(updatedAt),
+	}
+	if parentID != "" {
+		meta.Auxiliary = true
+	}
+	if meta.Title == "" || meta.Title == "Untitled Session" {
+		meta.Title = filepath.Base(cwd) + " — " + sessionID[:min(8, len(sessionID))]
+	}
+
+	query := `SELECT id, role, parts, model, created_at FROM messages WHERE session_id = ? AND created_at > ? ORDER BY created_at`
+	rows, err := db.QueryContext(context.Background(), query, sessionID, watermark)
+	if err != nil {
+		return nil, nil, meta, 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
+	var events []classify.Event
+	var marks []classify.Mark
+	seq := startSeq
+	pendingCalls := map[string]classify.ToolCall{}
+
+	for rows.Next() {
+		var msgID, role, partsJSON string
+		var model sql.NullString
+		var msgCreatedAt int64
+		if err := rows.Scan(&msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
+			continue
+		}
+		ts := msToRFC3339(msgCreatedAt)
+		if model.Valid && model.String != "" {
+			meta.Model = model.String
+		}
+		var parts []crushPart
+		if json.Unmarshal([]byte(partsJSON), &parts) != nil {
+			continue
+		}
+		for _, part := range parts {
+			switch part.Type {
+			case "text":
+				if role == "user" && strings.TrimSpace(part.Data.Text) != "" {
+					if !injectedUserMessage(part.Data.Text) {
+						marks = append(marks, classify.Mark{
+							Seq:       seq,
+							Timestamp: ts,
+							Type:      "user-message",
+							Note:      strutil.TruncateRunes(part.Data.Text, 2000, "…"),
+						})
+					}
+				}
+			case "tool_call":
+				callID := part.Data.ID
+				name := part.Data.Name
+				input := map[string]any{}
+				if part.Data.Input != "" {
+					var raw any
+					if json.Unmarshal([]byte(part.Data.Input), &raw) == nil {
+						if m, ok := raw.(map[string]any); ok {
+							input = m
+						} else {
+							input = map[string]any{"_raw": part.Data.Input}
+						}
+					} else {
+						input = map[string]any{"_raw": part.Data.Input}
+					}
+				}
+				call := classify.ToolCall{
+					ID:        callID,
+					Name:      name,
+					Input:     input,
+					Timestamp: ts,
+				}
+				pendingCalls[callID] = call
+			case "tool_result":
+				callID := part.Data.ToolCallID
+				call, ok := pendingCalls[callID]
+				if !ok {
+					continue
+				}
+				delete(pendingCalls, callID)
+				result := classify.ToolResult{Content: part.Data.Content}
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
+				seq++
+			}
+		}
+	}
+
+	return events, marks, meta, updatedAt, nil
+}
+
 type crushPart struct {
 	Type string        `json:"type"`
 	Data crushPartData `json:"data"`

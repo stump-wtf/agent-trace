@@ -2,6 +2,7 @@ package tail
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type Watcher struct {
 	lastActivity map[string]time.Time // session key → last event time from session data
 	lastEmitted  map[string]int       // session key → highest event seq emitted
 	fileState    map[string]string    // session key → last known EndedAt (change detection)
+	parseState   map[string]int64     // session key → incremental parse watermark (byte offset or epoch-ms)
 	mu           sync.Mutex
 	done         chan struct{}
 	stopOnce     sync.Once
@@ -48,6 +50,37 @@ type Adapter interface {
 // type assertion succeeds on &adapter.
 type OptionsSetter interface {
 	SetOptions(opts *classify.Options)
+}
+
+// IncrementalParser is an optional interface adapters implement to avoid
+// re-reading and re-parsing the entire session on every poll. The watcher
+// tracks a per-session watermark (byte offset for JSONL, epoch-ms for SQLite)
+// and passes it to ParseSince along with the seq to continue from.
+//
+// Implementations return only events/marks discovered after the watermark,
+// with seq numbers continuing from startSeq. The returned newWatermark is
+// stored for the next poll. Returning newWatermark=0 resets to full-parse
+// on the next cycle (used when the file shrinks or rotates).
+type IncrementalParser interface {
+	// ParseSince reads only content discovered after the watermark and returns
+	// events/marks with seq continuing from startSeq. The returned
+	// newWatermark is stored for the next poll.
+	ParseSince(path string, watermark int64, startSeq int) (events []classify.Event, marks []classify.Mark, meta SessionMeta, newWatermark int64, err error)
+	// Watermark returns the current high-water mark for the session at path.
+	// For JSONL adapters this is the file size; for SQLite adapters this is
+	// the latest message timestamp in epoch milliseconds. Called after a full
+	// Parse to establish the initial watermark.
+	Watermark(path string) int64
+}
+
+// jsonlFileSize returns the file size for use as a JSONL incremental watermark.
+// Returns 0 if the file cannot be stat'd (the watcher will do a full re-parse).
+func jsonlFileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 // DefaultAdapters returns adapters for all supported agent harnesses.
@@ -111,6 +144,7 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 		lastActivity: make(map[string]time.Time),
 		lastEmitted:  make(map[string]int),
 		fileState:    make(map[string]string),
+		parseState:   make(map[string]int64),
 		done:         make(chan struct{}),
 	}
 }
@@ -216,7 +250,9 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 	prevEndedAt := w.fileState[meta.Key]
 	w.fileState[meta.Key] = meta.EndedAt
 	lastSeq := w.lastEmitted[meta.Key]
-	if lastSeq == 0 && prevEndedAt == "" {
+	watermark := w.parseState[meta.Key]
+	firstScan := prevEndedAt == ""
+	if lastSeq == 0 && firstScan {
 		lastSeq = -1 // first scan: emit everything including seq 0
 	}
 	w.mu.Unlock()
@@ -225,11 +261,44 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 		return // unchanged
 	}
 
-	events, marks, _, err := a.Parse(meta.Path)
-	if err != nil {
-		return
+	// Use incremental parsing when the adapter supports it AND this isn't the
+	// first scan. On the first scan, a full Parse is required to establish the
+	// baseline. Subsequent scans only read new content since the watermark.
+	var events []classify.Event
+	var marks []classify.Mark
+	var newWatermark int64
+
+	if ip, ok := a.(IncrementalParser); ok && !firstScan {
+		var err error
+		events, marks, _, newWatermark, err = ip.ParseSince(meta.Path, watermark, lastSeq+1)
+		if err != nil {
+			return
+		}
+	} else {
+		var err error
+		events, marks, _, err = a.Parse(meta.Path)
+		if err != nil {
+			return
+		}
+		// After a full parse, record the watermark for the next incremental
+		// scan. JSONL adapters use file size; SQLite adapters use the latest
+		// message timestamp. ParseSince on the next poll will use this.
+		if ip, ok := a.(IncrementalParser); ok {
+			newWatermark = ip.Watermark(meta.Path)
+		}
 	}
 
+	w.mu.Lock()
+	w.parseState[meta.Key] = newWatermark
+	w.mu.Unlock()
+
+	w.emitEvents(events, marks, meta, lastSeq)
+}
+
+// emitEvents sends new events and marks through the watcher's event channel,
+// updating lastEmitted and lastActivity. Events with seq <= lastSeq are
+// skipped (dedup). The caller must not hold w.mu.
+func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, meta SessionMeta, lastSeq int) {
 	now := time.Now()
 	lastEventTime := parseSessionTime(meta.EndedAt)
 
@@ -255,14 +324,10 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 			return
 		}
 	}
-	// Emit marks that are new (seq > lastEmitted).
 	for _, m := range marks {
 		if m.Seq <= w.lastEmitted[meta.Key] {
 			continue
 		}
-		// Marks ride along as metadata; the Watcher emits them as part of
-		// a dedicated mark channel or the next event. For now they're
-		// available via the Event.Marks field when the adapter bundles them.
 		_ = m
 	}
 	w.lastEmitted[meta.Key] = lastSeq

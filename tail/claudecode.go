@@ -3,6 +3,7 @@ package tail
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -262,6 +263,107 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 		return nil, nil, SessionMeta{}, fmt.Errorf("not a Claude Code session: %s", path)
 	}
 	return events, marks, meta, err
+}
+
+// Watermark returns the current file size for use as an incremental watermark.
+func (a ClaudeCodeAdapter) Watermark(path string) int64 {
+	return jsonlFileSize(path)
+}
+
+// ParseSince reads only lines appended after the byte offset, returning events
+// and marks with seq continuing from startSeq. Used by the watcher to avoid
+// re-reading the entire file on every poll.
+func (a ClaudeCodeAdapter) ParseSince(path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, err
+	}
+	// If the file shrank (truncation/rotation), reset to full parse.
+	if info.Size() < offset {
+		return nil, nil, SessionMeta{}, 0, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, err
+	}
+	defer func() { _ = f.Close() }()
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return nil, nil, SessionMeta{}, 0, err
+		}
+	}
+
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
+	pending := map[string]classify.ToolCall{}
+	pendingOrder := []string{}
+	var events []classify.Event
+	var marks []classify.Mark
+	seq := startSeq
+	meta := SessionMeta{Harness: a.Harness(), Path: path}
+
+	err = ReadJSONLines(f, func(data []byte) {
+		var line ccRawLine
+		if json.Unmarshal(data, &line) != nil {
+			return
+		}
+		if line.Timestamp != "" {
+			meta.EndedAt = line.Timestamp
+		}
+		if isCCCompaction(line) {
+			marks = append(marks, classify.Mark{Seq: seq, Type: "compaction"})
+		}
+		if len(line.Message) == 0 {
+			return
+		}
+		var msg ccMessage
+		if json.Unmarshal(line.Message, &msg) != nil {
+			return
+		}
+		if line.Type == "user" && hasCCUserMessage(msg.Content) {
+			text := ccUserMessageText(msg.Content)
+			if !injectedUserMessage(text) {
+				marks = append(marks, classify.Mark{Seq: seq, Type: "user-message", Note: text, Timestamp: line.Timestamp})
+			}
+		}
+		if line.Type == "subagent" {
+			marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: line.Subtype})
+		}
+		for _, item := range msg.Content.Items {
+			switch item.Type {
+			case "tool_use":
+				call := classify.ToolCall{
+					ID:        item.ID,
+					Name:      item.Name,
+					Input:     item.Input,
+					Timestamp: line.Timestamp,
+				}
+				if call.Name == "Task" || call.Name == "Agent" {
+					marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: call.Name})
+				}
+				if _, exists := pending[item.ID]; !exists {
+					pendingOrder = append(pendingOrder, item.ID)
+				}
+				pending[item.ID] = call
+			case "tool_result":
+				call, ok := pending[item.ToolUseID]
+				if !ok {
+					continue
+				}
+				delete(pending, item.ToolUseID)
+				result := classify.ToolResult{
+					Content: classify.ContentToString(item.Content),
+					IsError: item.IsError,
+				}
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
+				seq++
+			}
+		}
+	})
+
+	return events, marks, meta, info.Size(), err
 }
 
 // Tail-specific types for Claude Code JSONL format.
