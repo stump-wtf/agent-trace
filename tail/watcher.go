@@ -122,14 +122,24 @@ type IncrementalParser interface {
 	Watermark(path string) int64
 }
 
-// jsonlFileSize returns the file size for use as a JSONL incremental watermark.
-// Returns 0 if the file cannot be stat'd (the watcher will do a full re-parse).
-func jsonlFileSize(path string) int64 {
-	info, err := os.Stat(path)
+// jsonlCompleteOffset returns the offset just past the last newline-terminated
+// line, for use as a JSONL incremental watermark. Returns 0 if the file cannot
+// be read (the watcher will do a full re-parse).
+//
+// The file size would be the obvious answer and is the wrong one: a harness
+// appending to its log can be caught mid-record, and a watermark inside a
+// record makes the next poll resume past a line it never parsed.
+func jsonlCompleteOffset(path string) int64 {
+	f, err := os.Open(path)
 	if err != nil {
 		return 0
 	}
-	return info.Size()
+	defer func() { _ = f.Close() }()
+	var end int64
+	if err := readCompleteJSONLines(f, 0, func(_ []byte, at int64) { end = at }); err != nil {
+		return 0
+	}
+	return end
 }
 
 // DefaultAdapters returns adapters for all supported agent harnesses.

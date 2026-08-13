@@ -271,14 +271,58 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 	return events, marks, meta, err
 }
 
-// Watermark returns the current file size for use as an incremental watermark.
+// Watermark returns the offset just past the last complete line, for use as an
+// incremental watermark. It is deliberately not the file size: see
+// readCompleteJSONLines for why a watermark must land on a record boundary.
 func (a ClaudeCodeAdapter) Watermark(path string) int64 {
-	return jsonlFileSize(path)
+	return jsonlCompleteOffset(path)
+}
+
+// sessionHeadCwd reads the first record of a JSONL session and returns the cwd
+// it declares.
+//
+// ParseSince starts mid-file, so it cannot see the session's opening record —
+// but cwd is the base every relative path in the session resolves against, and
+// classify.BuildEventWith silently classifies everything against "" without it.
+// The head record is one small bounded read and every harness writes cwd there,
+// so seeding from it keeps an incrementally-parsed event classified identically
+// to the same event from a full Parse.
+func sessionHeadCwd(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	cwd := ""
+	_ = readCompleteJSONLines(f, 0, func(data []byte, _ int64) {
+		if cwd != "" {
+			return
+		}
+		var line ccRawLine
+		if json.Unmarshal(data, &line) == nil {
+			cwd = line.Cwd
+		}
+	})
+	return cwd
 }
 
 // ParseSince reads only lines appended after the byte offset, returning events
 // and marks with seq continuing from startSeq. Used by the watcher to avoid
 // re-reading the entire file on every poll.
+//
+// The watermark it returns is not simply "where reading stopped". A tool_use
+// and its tool_result are separate records written seconds apart, so the poll
+// that sees the call routinely ends before the result exists. Advancing past
+// the call would drop it permanently: the next poll starts after it, finds a
+// tool_result with no matching call in its fresh pending map, and discards it —
+// so exactly the long-running commands worth watching produced no event at all.
+//
+// Instead the watermark advances only to the last record boundary at which no
+// call was outstanding, and events and marks past that point are withheld. The
+// unresolved tail is re-read next poll and emitted once the result lands, which
+// keeps the stream both complete and duplicate-free. A call that never gets a
+// result — a session killed mid-tool — parks the watermark on a short tail that
+// is cheap to re-read, rather than corrupting everything after it.
 func (a ClaudeCodeAdapter) ParseSince(path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -304,19 +348,54 @@ func (a ClaudeCodeAdapter) ParseSince(path string, offset int64, startSeq int) (
 		opts = osClassifyOptions(nil)
 	}
 	pending := map[string]classify.ToolCall{}
-	pendingOrder := []string{}
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := startSeq
-	meta := SessionMeta{Harness: a.Harness(), Path: path}
+	meta := SessionMeta{
+		Key:     sessionKey(string(a.Harness()), path),
+		ID:      strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+		Harness: a.Harness(),
+		Path:    path,
+		Cwd:     sessionHeadCwd(path),
+	}
 
-	err = ReadJSONLines(f, func(data []byte) {
+	// Watermark and result counts as of the last record that left no call
+	// outstanding — the point it is safe to resume from.
+	safeOffset, safeEvents, safeMarks := offset, 0, 0
+
+	err = readCompleteJSONLines(f, offset, func(data []byte, end int64) {
+		defer func() {
+			if len(pending) == 0 {
+				safeOffset, safeEvents, safeMarks = end, len(events), len(marks)
+			}
+		}()
+
 		var line ccRawLine
 		if json.Unmarshal(data, &line) != nil {
 			return
 		}
+		if line.SessionID != "" {
+			meta.ID = line.SessionID
+		}
+		if line.Cwd != "" && meta.Cwd == "" {
+			meta.Cwd = line.Cwd
+		}
+		if line.GitBranch != "" && meta.GitBranch == "" {
+			meta.GitBranch = line.GitBranch
+		}
+		if line.IsSidechain {
+			meta.IsSidechain = true
+			meta.Auxiliary = true
+		}
+		if line.AgentID != "" && meta.AgentID == "" {
+			meta.AgentID = line.AgentID
+		}
 		if line.Timestamp != "" {
 			meta.EndedAt = line.Timestamp
+		}
+		if line.Type == "ai-title" && line.AITitle != "" {
+			meta.Title = line.AITitle
+			return
 		}
 		if isCCCompaction(line) {
 			marks = append(marks, classify.Mark{Seq: seq, Type: "compaction"})
@@ -331,11 +410,16 @@ func (a ClaudeCodeAdapter) ParseSince(path string, offset int64, startSeq int) (
 		if line.Type == "user" && hasCCUserMessage(msg.Content) {
 			text := ccUserMessageText(msg.Content)
 			if !injectedUserMessage(text) {
-				marks = append(marks, classify.Mark{Seq: seq, Type: "user-message", Note: text, Timestamp: line.Timestamp})
+				marks = append(marks, classify.Mark{
+					Seq:       seq,
+					Timestamp: line.Timestamp,
+					Type:      "user-message",
+					Note:      strutil.TruncateRunes(text, 2000, "…"),
+				})
 			}
 		}
-		if line.Type == "subagent" {
-			marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: line.Subtype})
+		if msg.Model != "" && meta.Model == "" {
+			meta.Model = msg.Model
 		}
 		for _, item := range msg.Content.Items {
 			switch item.Type {
@@ -348,9 +432,6 @@ func (a ClaudeCodeAdapter) ParseSince(path string, offset int64, startSeq int) (
 				}
 				if call.Name == "Task" || call.Name == "Agent" {
 					marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: call.Name})
-				}
-				if _, exists := pending[item.ID]; !exists {
-					pendingOrder = append(pendingOrder, item.ID)
 				}
 				pending[item.ID] = call
 			case "tool_result":
@@ -368,8 +449,11 @@ func (a ClaudeCodeAdapter) ParseSince(path string, offset int64, startSeq int) (
 			}
 		}
 	})
+	if meta.Title == "" {
+		meta.Title = filepath.Base(path)
+	}
 
-	return events, marks, meta, info.Size(), err
+	return events[:safeEvents], marks[:safeMarks], meta, safeOffset, err
 }
 
 // Tail-specific types for Claude Code JSONL format.

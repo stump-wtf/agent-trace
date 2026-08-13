@@ -506,7 +506,14 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 		return nil, nil, SessionMeta{}, 0, err
 	}
 
-	var title, parentID string
+	var title string
+	// parent_session_id is NULL for every top-level session, the same trap
+	// Parse and listDBSessionsSince already document. Scanning it into a string
+	// failed on exactly those rows, and the error is indistinguishable from a
+	// missing session — so the watcher skipped the session on every poll after
+	// the first and incremental parsing silently emitted nothing, forever, for
+	// every session that was not a subagent branch.
+	var parentID sql.NullString
 	var createdAt, updatedAt int64
 	err = db.QueryRowContext(context.Background(),
 		`SELECT title, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?`, sessionID).
@@ -526,7 +533,7 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 		StartedAt: msToRFC3339(createdAt),
 		EndedAt:   msToRFC3339(updatedAt),
 	}
-	if parentID != "" {
+	if parentID.Valid && parentID.String != "" {
 		meta.Auxiliary = true
 	}
 	if meta.Title == "" || meta.Title == "Untitled Session" {
@@ -549,6 +556,13 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 	seq := startSeq
 	pendingCalls := map[string]classify.ToolCall{}
 
+	// Watermark and result counts as of the last message that left no tool call
+	// outstanding. A Crush tool_call and its tool_result are separate message
+	// rows written seconds apart, so without this the poll that sees the call
+	// advances past it and the next poll drops the orphaned result — see the
+	// ClaudeCodeAdapter.ParseSince note for the full shape of that failure.
+	safeWatermark, safeEvents, safeMarks := watermark, 0, 0
+
 	for rows.Next() {
 		var msgID, role, partsJSON string
 		var model sql.NullString
@@ -557,7 +571,7 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 			continue
 		}
 		ts := msToRFC3339(msgCreatedAt)
-		if model.Valid && model.String != "" {
+		if model.Valid && model.String != "" && meta.Model == "" {
 			meta.Model = model.String
 		}
 		var parts []crushPart
@@ -612,9 +626,17 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 				seq++
 			}
 		}
+		if len(pendingCalls) == 0 {
+			safeWatermark, safeEvents, safeMarks = msgCreatedAt, len(events), len(marks)
+		}
 	}
 
-	return events, marks, meta, updatedAt, nil
+	// The watermark is a messages.created_at value because that is the column
+	// the query filters on. Returning sessions.updated_at, as this did, mixes
+	// two clocks: the session row is touched after its messages are inserted,
+	// so the next poll's `created_at > watermark` skips any message written in
+	// the gap between them, and skips it permanently.
+	return events[:safeEvents], marks[:safeMarks], meta, safeWatermark, nil
 }
 
 type crushPart struct {
