@@ -23,7 +23,9 @@ import (
 	"gitea.stump.rocks/stump.wtf/agent-trace/tail"
 )
 
-// SpanKind mirrors OTel span kinds without importing the full SDK.
+// SpanKind mirrors OTel span kinds without importing the full SDK. These are
+// this package's own values, not the OTLP proto enum — an exporter targeting a
+// collector must translate them (see WriteJSON).
 type SpanKind int
 
 const (
@@ -44,6 +46,11 @@ const (
 // Span is a lightweight OTel-compatible span structure. It carries enough
 // information for any OTel exporter to serialize without depending on the
 // go.opentelemetry.io/otel SDK at compile time.
+//
+// Attributes values must be one of the types OTel permits — string, bool,
+// int64, float64, or a slice of one of those. The map is untyped so callers
+// can carry non-string values, but nothing validates it: an unsupported value
+// (a func, a channel, a NaN/Inf float) makes the entire trace unserializable.
 type Span struct {
 	TraceID      string         `json:"traceId"`
 	SpanID       string         `json:"spanId"`
@@ -348,10 +355,19 @@ type timelineEntry struct {
 	startTime time.Time
 }
 
-// WriteJSON serializes a Trace as OTLP-compatible JSON to the given writer.
-// The output is a JSON object with traceId, session, and spans fields suitable
-// for direct submission to an OTel collector's HTTP JSON endpoint or inspection.
-func WriteJSON(trace Trace, w io.Writer) error {
+// WriteJSON serializes a Trace as this package's own JSON representation — a
+// single object with traceId, session, and spans fields — to the given writer.
+//
+// This is not the OTLP/HTTP JSON wire format: OTLP nests spans under
+// resourceSpans/scopeSpans, encodes attributes as typed key/value pairs, and
+// uses Unix-nanosecond timestamp strings. Posting this payload straight to a
+// collector's /v1/traces endpoint will be rejected; a collector-bound exporter
+// must translate first. The output is intended for inspection, storage, and
+// submission to Cairn's trace API.
+//
+// Marshaling fails if any Span carries an attribute value JSON cannot encode
+// (see Span.Attributes for the permitted set); nothing is written in that case.
+func WriteJSON(w io.Writer, trace Trace) error {
 	data, err := json.Marshal(trace)
 	if err != nil {
 		return fmt.Errorf("marshal trace: %w", err)
