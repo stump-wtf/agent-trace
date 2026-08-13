@@ -271,7 +271,7 @@ func TestCrushFilteredListerMatchesInMemoryOnTies(t *testing.T) {
 func TestSortSessionsByRecencyOrdersByInstant(t *testing.T) {
 	whole := msToRFC3339(1767268800000) // 2026-01-01T12:00:00Z
 	frac := msToRFC3339(1767268800500)  // 2026-01-01T12:00:00.5Z — 500ms later
-	if !(whole > frac) {
+	if whole <= frac {
 		t.Fatalf("fixture no longer exercises the trap: %q vs %q", whole, frac)
 	}
 	metas := []SessionMeta{
