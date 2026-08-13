@@ -2,6 +2,8 @@ package tail
 
 import (
 	"testing"
+
+	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
 )
 
 func TestSessionKey(t *testing.T) {
@@ -48,9 +50,9 @@ func TestTruncateRunes(t *testing.T) {
 		{"abc", 2, "…", "a…"},
 	}
 	for _, tt := range tests {
-		got := truncateRunes(tt.s, tt.max, tt.suffix)
+		got := strutil.TruncateRunes(tt.s, tt.max, tt.suffix)
 		if got != tt.want {
-			t.Errorf("truncateRunes(%q, %d, %q) = %q, want %q", tt.s, tt.max, tt.suffix, got, tt.want)
+			t.Errorf("strutil.TruncateRunes(%q, %d, %q) = %q, want %q", tt.s, tt.max, tt.suffix, got, tt.want)
 		}
 	}
 }

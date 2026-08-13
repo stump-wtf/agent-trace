@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
 )
 
 // PiAdapter discovers and parses Pi agent session logs from
@@ -83,19 +84,7 @@ func (a PiAdapter) Summarize(path string) (SessionMeta, error) {
 	if !recognized {
 		return SessionMeta{}, fmt.Errorf("not a pi session: %s", path)
 	}
-	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	if header.ID != "" {
-		id = header.ID
-	}
-	meta := SessionMeta{
-		Key:       sessionKey(string(a.Harness()), path),
-		ID:        id,
-		Harness:   a.Harness(),
-		Path:      path,
-		Cwd:       header.Cwd,
-		StartedAt: header.Timestamp,
-		EndedAt:   header.Timestamp,
-	}
+	meta := a.piBaseMeta(path, header)
 	for _, entry := range linearizePi(entries) {
 		if entry.Timestamp != "" {
 			if meta.StartedAt == "" {
@@ -134,19 +123,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 	if !recognized {
 		return nil, nil, SessionMeta{}, fmt.Errorf("not a pi session: %s", path)
 	}
-	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	if header.ID != "" {
-		id = header.ID
-	}
-	meta := SessionMeta{
-		Key:       sessionKey(string(a.Harness()), path),
-		ID:        id,
-		Harness:   a.Harness(),
-		Path:      path,
-		Cwd:       header.Cwd,
-		StartedAt: header.Timestamp,
-		EndedAt:   header.Timestamp,
-	}
+	meta := a.piBaseMeta(path, header)
 
 	opts := osClassifyOptions()
 	pending := map[string]classify.ToolCall{}
@@ -175,7 +152,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 				Seq:       seq,
 				Timestamp: entry.Timestamp,
 				Type:      "compaction",
-				Note:      truncateRunes("branch: "+entry.Summary, 2000, "…"),
+				Note:      strutil.TruncateRunes("branch: "+entry.Summary, 2000, "…"),
 			})
 		case "custom_message":
 			// Extension-injected context, not a real user turn.
@@ -195,7 +172,7 @@ func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Sessio
 						Seq:       seq,
 						Timestamp: entry.Timestamp,
 						Type:      "user-message",
-						Note:      truncateRunes(text, 2000, "…"),
+						Note:      strutil.TruncateRunes(text, 2000, "…"),
 					})
 				}
 			case "assistant":
@@ -296,6 +273,24 @@ func isPiHeader(data []byte) bool {
 		return false
 	}
 	return probe.Type == "session" && len(probe.ID) > 0 && probe.ID[0] == '"'
+}
+
+// piBaseMeta builds the initial SessionMeta for a Pi session from the file
+// path and parsed header entry.
+func (a PiAdapter) piBaseMeta(path string, header piRawEntry) SessionMeta {
+	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if header.ID != "" {
+		id = header.ID
+	}
+	return SessionMeta{
+		Key:       sessionKey(string(a.Harness()), path),
+		ID:        id,
+		Harness:   a.Harness(),
+		Path:      path,
+		Cwd:       header.Cwd,
+		StartedAt: header.Timestamp,
+		EndedAt:   header.Timestamp,
+	}
 }
 
 func readPiSession(path string) (header piRawEntry, entries []piRawEntry, recognized bool, err error) {
@@ -409,7 +404,7 @@ func piSessionTitle(entries []piRawEntry, firstUserText, path string) string {
 	}
 	if firstUserText != "" {
 		preview := strings.Join(strings.Fields(firstUserText), " ")
-		return truncateRunes(preview, 240, "…")
+		return strutil.TruncateRunes(preview, 240, "…")
 	}
 	return filepath.Base(path)
 }
