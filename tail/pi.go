@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
-	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
+	"github.com/stump-wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/internal/strutil"
 )
 
 // PiAdapter discovers and parses Pi agent session logs from

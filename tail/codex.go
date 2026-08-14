@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
-	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
+	"github.com/stump-wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/internal/strutil"
 )
 
 // CodexAdapter discovers and parses OpenAI Codex session logs from

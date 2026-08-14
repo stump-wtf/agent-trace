@@ -1,4 +1,4 @@
-module gitea.stump.rocks/stump.wtf/agent-trace
+module github.com/stump-wtf/agent-trace
 
 go 1.26.5
 

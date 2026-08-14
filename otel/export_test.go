@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
-	"gitea.stump.rocks/stump.wtf/agent-trace/tail"
+	"github.com/stump-wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/tail"
 )
 
 // TestSpanAttributeTypes verifies that Span.Attributes can hold non-string

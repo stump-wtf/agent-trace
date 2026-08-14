@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/classify"
 )
 
 // TestVerifyPatternsFlowThroughWatcher verifies that WatchConfig.VerifyPatterns

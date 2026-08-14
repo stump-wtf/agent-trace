@@ -3,8 +3,8 @@ package otel
 import (
 	"testing"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
-	"gitea.stump.rocks/stump.wtf/agent-trace/tail"
+	"github.com/stump-wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/tail"
 )
 
 func TestBuildTraceEndTime(t *testing.T) {
