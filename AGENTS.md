@@ -10,7 +10,9 @@ make lint    # gofmt + go vet + golangci-lint
 make check   # lint + test
 ```
 
-Module path: `gitea.stump.rocks/stump.wtf/agent-trace`, Go 1.26. CI runs on Gitea Actions (`.gitea/workflows/ci.yaml`) with separate `lint` and `test` jobs.
+Module path: `github.com/stump-wtf/agent-trace`, Go 1.26. CI runs on Gitea Actions (`.gitea/workflows/ci.yaml`) with separate `lint` and `test` jobs.
+
+**The module path is not where you send changes.** Gitea (`gitea.stump.rocks/stump.wtf/agent-trace`) stays canonical — branch, push, PR and file issues there; `github.com/stump-wtf/agent-trace` is the read-only push mirror. The module path names the mirror anyway because that is the only address `go get` can reach from outside the LAN: the module has to resolve for public consumers, for GitHub Actions, and for the checksum database. Pointing it at the Gitea host made every fetch depend on `GOPRIVATE` being set and on `sum.golang.org` being able to reach a host that only answers on the home LAN — which it cannot, so verification 404'd.
 
 ## Architecture
 

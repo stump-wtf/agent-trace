@@ -3,7 +3,7 @@ package tail
 import (
 	"testing"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
+	"github.com/stump-wtf/agent-trace/internal/strutil"
 )
 
 func TestSessionKey(t *testing.T) {

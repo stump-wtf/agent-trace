@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/classify"
 )
 
 // Watcher monitors agent session directories for new and growing .jsonl

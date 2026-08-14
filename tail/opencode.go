@@ -10,8 +10,8 @@ import (
 	"sort"
 	"time"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
-	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
+	"github.com/stump-wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/internal/strutil"
 )
 
 // HarnessOpenCode is the harness identifier for OpenCode sessions.

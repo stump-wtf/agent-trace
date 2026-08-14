@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/classify"
 )
 
 // parseSessionTimeOk parses an RFC 3339 / RFC 3339Nano timestamp and returns

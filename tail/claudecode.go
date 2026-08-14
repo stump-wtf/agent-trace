@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
-	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
+	"github.com/stump-wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/internal/strutil"
 )
 
 // ClaudeCodeAdapter discovers and parses Claude Code session logs from

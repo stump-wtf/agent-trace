@@ -13,7 +13,7 @@ This module covers mindwalk's trace parsing, classification, and event/mark emis
 Pure classification of agent tool calls into semantic actions (`search`, `read`, `edit`, `exec`, `verify`) and file targets. No I/O — the `Options` struct lets callers inject a `FileExists` func and home/tmp dirs for weak-target filtering and outside-scope detection, plus `VerifyPatterns` to extend the built-in verify command list (`just test`, `bun test`, …). Pass nil Options to keep all weak targets and the default verify patterns.
 
 ```go
-import "gitea.stump.rocks/stump.wtf/agent-trace/classify"
+import "github.com/stump-wtf/agent-trace/classify"
 
 event := classify.BuildEvent(seq, cwd, call, result)
 // event.Action == "edit", event.Targets == [{Path: "foo.go", Touch: "edit"}]
@@ -35,7 +35,7 @@ event := classify.BuildEventWith(opts, seq, cwd, call, result)
 Live session log discovery and per-agent JSONL parsing. Watches agent session directories, tails growing files, and emits classified `Event`s. Supports Claude Code, Codex, Crush, OpenCode, and Pi via the `Adapter` interface — `DefaultAdapters()` returns all five.
 
 ```go
-import "gitea.stump.rocks/stump.wtf/agent-trace/tail"
+import "github.com/stump-wtf/agent-trace/tail"
 
 watcher := tail.NewWatcherWithConfig(tail.DefaultWatchConfig(), tail.DefaultAdapters())
 ctx, cancel := context.WithCancel(context.Background())
@@ -62,7 +62,7 @@ Each adapter has a `Dir` field for testing with temp directories. The Codex adap
 Converts classified events and marks into OpenTelemetry span structs. Maps user messages to parent spans, tool calls to child spans, errors to status codes. Deterministic trace/span IDs enable idempotent re-submission.
 
 ```go
-import "gitea.stump.rocks/stump.wtf/agent-trace/otel"
+import "github.com/stump-wtf/agent-trace/otel"
 
 trace := otel.BuildTrace(session, events, marks)
 // trace.Spans[0].Name, .StartTime, .EndTime, .ParentSpanID

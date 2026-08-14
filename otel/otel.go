@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
-	"gitea.stump.rocks/stump.wtf/agent-trace/tail"
+	"github.com/stump-wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/tail"
 )
 
 // SpanKind mirrors OTel span kinds without importing the full SDK. These are

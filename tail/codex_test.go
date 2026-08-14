@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/classify"
 )
 
 func TestCodexParse(t *testing.T) {

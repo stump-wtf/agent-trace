@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/internal/strutil"
+	"github.com/stump-wtf/agent-trace/internal/strutil"
 )
 
 const toolSummaryVerbLimit = 96

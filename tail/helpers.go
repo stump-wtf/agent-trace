@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gitea.stump.rocks/stump.wtf/agent-trace/classify"
+	"github.com/stump-wtf/agent-trace/classify"
 )
 
 // dirDiagnostics checks whether a directory exists and is readable. Shared by
