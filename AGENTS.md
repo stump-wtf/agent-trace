@@ -50,7 +50,7 @@ Discovers and parses live agent session logs from per-harness directories, emitt
 | `CrushAdapter` | `~/.local/share/crush/projects.json` | SQLite (`crush.db`), messages stored as JSON parts |
 | `OpenCodeAdapter` | `~/.opencode/opencode.db` | SQLite, parts stored as JSON |
 
-`DefaultAdapters()` returns Claude Code, Codex, and Pi. `NewWatcher` + `ScanOnce` for batch processing. Each adapter has a `Dir` field (JSONL) or `DBPath` field (SQLite) to override the default session directory (useful for testing).
+`DefaultAdapters()` returns all five adapters (Claude Code, Codex, Crush, OpenCode, Pi); a machine without a given harness simply contributes no sessions. `NewWatcher` + `ScanOnce` for batch processing. Each adapter has a `Dir` field (JSONL) or `DBPath`/`ProjectsPath` fields (SQLite) to override the default session directory (useful for testing).
 
 **SQLite helpers** (`sqlite_helpers.go`): `openSQLite` opens a read-only SQLite database with a `sync.Map`-based connection cache to avoid per-poll open/close churn. `splitDBSessionPath` splits composite `"dbPath/sessionID"` paths. Both are generic — shared by Crush and OpenCode adapters.
 
@@ -91,4 +91,4 @@ Contains `TruncateRunes(s, max, suffix)` used by the classify and tail packages.
 
 - **`Weak` target filtering does filesystem I/O** despite the package doc's "no filesystem access" framing — it calls `Options.FileExists`, which `osClassifyOptions` backs with `os.Stat`. Pass `Options{FileExists: nil}` to disable.
 - **Pi adapter `linearizePi`** walks `parentId` from the last entry backward. If the file is truncated mid-write (live tailing), the leaf may be incomplete.
-- **Watcher re-parses entire files** on each poll cycle. For long-running sessions this means re-reading the full file every 2s. Byte-offset tailing is a future optimization.
+- **Incremental parsing is opt-in per adapter** via the `IncrementalParser` interface (byte-offset tailing for JSONL, message-timestamp watermarks for SQLite); adapters that do not implement it still full-parse every cycle. See Gitea issue #62 for coverage.
