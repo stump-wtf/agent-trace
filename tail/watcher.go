@@ -343,7 +343,6 @@ func (w *Watcher) scanSession(ctx context.Context, a Adapter, meta SessionMeta) 
 	// EndedAt changes whenever a new event arrives, regardless of storage.
 	w.mu.Lock()
 	prevEndedAt := w.fileState[meta.Key]
-	w.fileState[meta.Key] = meta.EndedAt
 	lastSeq := w.lastEmitted[meta.Key]
 	lastMark := w.lastMark[meta.Key]
 	watermark := w.parseState[meta.Key]
@@ -395,7 +394,15 @@ func (w *Watcher) scanSession(ctx context.Context, a Adapter, meta SessionMeta) 
 		}
 	}
 
+	// Both pieces of scan state advance here, together, and only on a parse
+	// that succeeded. fileState is what the `meta.EndedAt == prevEndedAt`
+	// short-circuit above consults, so committing it before the parse would
+	// mean a failed parse still told the next poll "already handled this
+	// EndedAt" — and the session would be skipped until it changed again. For
+	// a session whose last write is the one that failed to parse, that is
+	// never, and its trailing events are lost for good.
 	w.mu.Lock()
+	w.fileState[meta.Key] = meta.EndedAt
 	w.parseState[meta.Key] = newWatermark
 	w.mu.Unlock()
 
