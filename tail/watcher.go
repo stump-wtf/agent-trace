@@ -28,6 +28,11 @@ type Watcher struct {
 	stopOnce     sync.Once
 }
 
+// eventBufferSize is the depth of the watcher's outbound event channel. It
+// is the slack a consumer gets before emitEvents blocks — which it may now do
+// safely, since sends happen with w.mu released.
+const eventBufferSize = 256
+
 // Adapter is the interface each agent-specific parser implements.
 //
 // The context parameters are cancellation bounds, not request scoping: a
@@ -232,7 +237,7 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 	return &Watcher{
 		cfg:          cfg,
 		adapters:     adapters,
-		events:       make(chan Event, 256),
+		events:       make(chan Event, eventBufferSize),
 		lastActivity: make(map[string]time.Time),
 		lastEmitted:  make(map[string]int),
 		lastMark:     make(map[string]int),
@@ -421,6 +426,21 @@ func (w *Watcher) scanSession(ctx context.Context, a Adapter, meta SessionMeta) 
 // timestamps feed lastActivity even while parked, because a session waiting
 // on its next tool call is not idle.
 //
+// The batch is assembled and all watcher state is committed under w.mu, and
+// the lock is released before anything is sent. Sending under the lock is
+// what this deliberately avoids: the channel is buffered, so once a slow
+// consumer fills it the send blocks — and blocking with w.mu held also
+// blocks LastActivity and IsIdle, which are the two methods a consumer calls
+// to decide whether a session is still working. A backed-up consumer would
+// stall precisely the API it needs to make progress.
+//
+// Because state is committed before the first send, an event counts as
+// emitted once it is in the batch, not once it is received. The only way a
+// send does not complete is w.done, and Start closes the events channel on
+// its way out, so nothing would consume the remainder anyway; the alternative
+// — re-acquiring the lock after each send to record what actually landed —
+// buys nothing and reopens the window this split exists to close.
+//
 // The caller must not hold w.mu.
 func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, meta SessionMeta, lastSeq, lastMark int) {
 	now := time.Now()
@@ -451,6 +471,7 @@ func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, met
 	}
 	delete(w.pendingMarks, meta.Key)
 
+	batch := make([]Event, 0, len(events))
 	for _, ev := range events {
 		if ev.Seq <= lastSeq {
 			continue
@@ -471,23 +492,18 @@ func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, met
 			lastMark = newMarks[0].Seq
 			newMarks = newMarks[1:]
 		}
-		select {
-		case w.events <- Event{
+		batch = append(batch, Event{
 			Session:    meta,
 			Classified: ev,
 			Marks:      riding,
 			ReceivedAt: now,
-		}:
-		case <-w.done:
-			w.mu.Unlock()
-			return
-		}
+		})
 	}
 	// Whatever is left has no event to ride yet — park it for the next cycle.
 	if len(newMarks) > 0 {
 		w.pendingMarks[meta.Key] = append(w.pendingMarks[meta.Key], newMarks...)
 	}
-	// Applied after the event loop, so a mark newer than the last event still
+	// Applied after the batch loop, so a mark newer than the last event still
 	// counts as activity. Marks are activity even while parked: a session
 	// waiting on its next tool call is not idle.
 	if latestMarkTime.After(lastEventTime) {
@@ -499,6 +515,14 @@ func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, met
 		w.lastActivity[meta.Key] = lastEventTime
 	}
 	w.mu.Unlock()
+
+	for _, ev := range batch {
+		select {
+		case w.events <- ev:
+		case <-w.done:
+			return
+		}
+	}
 }
 
 // parseSessionTime parses a session timestamp, returning the zero time when it
