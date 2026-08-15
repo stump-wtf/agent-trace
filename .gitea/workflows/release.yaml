@@ -53,20 +53,19 @@ jobs:
           version="${TAG_REF#refs/tags/}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-          # The notes are the CHANGELOG section for this version: everything
-          # between its heading and the next one. Extracted rather than
-          # hand-written so the release page and the file cannot disagree.
-          semver="${version#v}"
-          awk -v want="$semver" '
-            /^## \[/ {
-              if (found) exit
-              if (index($0, "[" want "]") > 0) { found = 1; next }
-            }
-            found { print }
-          ' CHANGELOG.md > /tmp/notes.md
-
-          if [ ! -s /tmp/notes.md ]; then
-            echo "::error::no CHANGELOG.md section found for $version — add one before tagging"
+          # The notes are the CHANGELOG section for this version, extracted
+          # rather than hand-written so the release pages and the file cannot
+          # disagree. The extraction lives in scripts/release-notes.sh, under
+          # test in scripts/release_notes_test.go — inline in this file it was
+          # unrunnable outside a tag push, and its first version silently swept
+          # the trailing "## Versioning" section into the notes.
+          #
+          # A missing section exits non-zero, which is what stops a tag from
+          # publishing empty notes. That matters more than it looks: once the
+          # Go module proxy caches a version it is locked to that commit, so a
+          # bad release cannot be recut under the same tag.
+          if ! bash scripts/release-notes.sh "$version" CHANGELOG.md > /tmp/notes.md; then
+            echo "::error::no CHANGELOG.md section for $version — add one before tagging"
             exit 1
           fi
           echo "Release notes for $version:"
