@@ -20,7 +20,7 @@ type Watcher struct {
 	lastActivity map[string]time.Time // session key → last event time from session data
 	lastEmitted  map[string]int       // session key → highest event seq emitted
 	fileState    map[string]string    // session key → last known EndedAt (change detection)
-	parseState   map[string]int64     // session key → incremental parse watermark (byte offset or epoch-ms)
+	parseState   map[string]int64     // session key → incremental parse watermark (byte offset or native timestamp unit)
 	mu           sync.Mutex
 	done         chan struct{}
 	stopOnce     sync.Once
@@ -108,8 +108,9 @@ type AgentGraphBuilder interface {
 
 // IncrementalParser is an optional interface adapters implement to avoid
 // re-reading and re-parsing the entire session on every poll. The watcher
-// tracks a per-session watermark (byte offset for JSONL, epoch-ms for SQLite)
-// and passes it to ParseSince along with the seq to continue from.
+// tracks a per-session watermark (byte offset for JSONL, the storage's
+// native timestamp unit for SQLite — seconds for Crush, milliseconds for
+// OpenCode) and passes it to ParseSince along with the seq to continue from.
 //
 // Implementations return only events/marks discovered after the watermark,
 // with seq numbers continuing from startSeq. The returned newWatermark is
@@ -128,8 +129,9 @@ type IncrementalParser interface {
 	// Watermark returns the current high-water mark for the session at path.
 	// For JSONL adapters this is the offset past the last complete line — not
 	// the file size, which can land inside a record a harness is still
-	// writing. For SQLite adapters it is the latest message timestamp in
-	// epoch milliseconds. Called after a full Parse to establish the initial
+	// writing. For SQLite adapters it is the latest message timestamp in the
+	// column's native unit (seconds for Crush, milliseconds for OpenCode).
+	// Called after a full Parse to establish the initial
 	// watermark.
 	Watermark(path string) int64
 }

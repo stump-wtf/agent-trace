@@ -20,7 +20,8 @@ import (
 // it for the watcher, which guards on IsZero instead.
 //
 // Every adapter normalizes to RFC 3339 before the value reaches SessionMeta
-// (the SQLite-backed ones via msToRFC3339), so one parser covers all of them.
+// (the SQLite-backed ones via msToRFC3339 / secToRFC3339, matching the units
+// their schemas store), so one parser covers all of them.
 func parseSessionTimeOk(ts string) (time.Time, bool) {
 	if ts == "" {
 		return time.Time{}, false
@@ -224,11 +225,27 @@ func sinceLowerBoundMs(f SessionFilter) (int64, bool) {
 	return f.Since.UnixMilli(), true
 }
 
+// sinceLowerBoundSec is sinceLowerBoundMs for second-precision storage — the
+// units Crush's schema actually stores despite its own comment claiming
+// milliseconds. The contract is identical: Unix() truncates downward, so the
+// bound sits at or before Since, and a `stored_sec >= bound` predicate can
+// over-select but never drop a session the exact filter would keep. Passing a
+// millisecond bound to a second-precision column (or the reverse) violates
+// that contract catastrophically — the bound lands 1000x off and the pushdown
+// silently matches nothing, which is what this helper exists to prevent.
+func sinceLowerBoundSec(f SessionFilter) (int64, bool) {
+	if f.Since.IsZero() {
+		return 0, false
+	}
+	return f.Since.Unix(), true
+}
+
 // sortSessionsByRecency orders sessions newest-ended first, and is the single
 // ordering rule for every adapter that sorts in Go. Two properties matter, and
 // both were broken by comparing EndedAt as a raw string:
 //
-// It compares parsed instants, not RFC 3339 text. msToRFC3339 emits
+// It compares parsed instants, not RFC 3339 text. The timestamp converters
+// (msToRFC3339, secToRFC3339) emit
 // RFC3339Nano, which drops trailing fractional zeros, so "…:01Z" and
 // "…:01.5Z" sort by the byte values of 'Z' (0x5A) and '.' (0x2E) — putting the
 // whole second *after* the later fractional one. Sessions unknown to the clock

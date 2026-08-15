@@ -493,5 +493,16 @@ type opencodeToolState struct {
 	Error  string          `json:"error"`
 }
 
-// Ensure time is imported for potential future use.
-var _ = time.Time{}
+// msToRFC3339 renders an OpenCode timestamp as RFC 3339. OpenCode writes
+// Date.now()-style Unix MILLISECONDS into session.time_created/time_updated
+// and the message/part equivalents — unlike Crush, whose schema stores
+// seconds. Keep the two converters distinct: a shared unit-agnostic helper is
+// exactly how the Crush adapter spent its first week rendering every
+// timestamp as January 1970.
+func msToRFC3339(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	t := time.UnixMilli(ms).UTC()
+	return t.Format(time.RFC3339Nano)
+}

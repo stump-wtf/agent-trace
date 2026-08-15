@@ -206,10 +206,10 @@ func TestCrushFilteredListerSkipsNonMatchingProjects(t *testing.T) {
 // Two things have to be true at once for the pushdown to diverge: the slice fed
 // to the sort must differ between the two paths (multiple projects, some of
 // them skipped by the cwd pushdown or thinned by the SQL bound), and sessions
-// must tie on the sort key. Ties are not exotic — updated_at is milliseconds,
-// so a migration or a burst of activity produces them, and every row with
-// updated_at <= 0 ties at "" because msToRFC3339 maps them all to the empty
-// string.
+// must tie on the sort key. Ties are not exotic — updated_at is whole
+// seconds, so a migration or a burst of activity produces them, and every row
+// with updated_at <= 0 ties at "" because secToRFC3339 maps them all to the
+// empty string.
 //
 // Before sortSessionsByRecency imposed a total order, this failed with roughly
 // two thirds of the positions mismatched.
@@ -236,8 +236,8 @@ func TestCrushFilteredListerMatchesInMemoryOnTies(t *testing.T) {
 			// updated_at (the sort key) draws from a handful of values so rows
 			// tie heavily; created_at (the Since key) spreads out so the bound
 			// prunes a different subset than the cwd skip does.
-			updated := base.Add(time.Duration(i%3) * time.Hour).UnixMilli()
-			created := base.Add(time.Duration(i*17) * time.Minute).UnixMilli()
+			updated := base.Add(time.Duration(i%3) * time.Hour).Unix()
+			created := base.Add(time.Duration(i*17) * time.Minute).Unix()
 			if _, err := db.ExecContext(context.Background(),
 				`INSERT INTO sessions (id, parent_session_id, title, created_at, updated_at) VALUES (?, '', 'x', ?, ?)`,
 				fmt.Sprintf("p%d-s%d", p, i), created, updated); err != nil {
@@ -381,6 +381,27 @@ func TestSinceLowerBoundMsNeverExcludes(t *testing.T) {
 		}
 	}
 	if _, ok := sinceLowerBoundMs(SessionFilter{}); ok {
+		t.Error("zero Since reported a bound; the pushdown must not filter at all")
+	}
+}
+
+// TestSinceLowerBoundSecNeverExcludes is TestSinceLowerBoundMsNeverExcludes
+// for second-precision storage (Crush). The sub-second case matters just as
+// much: Unix() truncates downward, so a Since mid-second must not round up and
+// silently drop the session created in that second.
+func TestSinceLowerBoundSecNeverExcludes(t *testing.T) {
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, extra := range []time.Duration{0, time.Nanosecond, 500 * time.Millisecond, 999999999 * time.Nanosecond} {
+		since := base.Add(extra)
+		bound, ok := sinceLowerBoundSec(SessionFilter{Since: since})
+		if !ok {
+			t.Fatalf("no bound for a non-zero Since")
+		}
+		if time.Unix(bound, 0).After(since) {
+			t.Errorf("bound %v is after Since %v — the pushdown would drop qualifying rows", time.Unix(bound, 0), since)
+		}
+	}
+	if _, ok := sinceLowerBoundSec(SessionFilter{}); ok {
 		t.Error("zero Since reported a bound; the pushdown must not filter at all")
 	}
 }

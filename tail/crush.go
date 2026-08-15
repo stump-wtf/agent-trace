@@ -98,7 +98,7 @@ func (a CrushAdapter) graphNodes(dbPath string) ([]AgentNode, error) {
 		node := AgentNode{
 			SessionID: id,
 			Harness:   a.Harness(),
-			StartedAt: msToRFC3339(createdAt),
+			StartedAt: secToRFC3339(createdAt),
 			Title:     title,
 		}
 		if parentID.Valid {
@@ -208,13 +208,13 @@ func (a CrushAdapter) ListSessions() ([]SessionMeta, error) {
 // read, and the exact predicate is applied in exactly one place, so this can
 // never disagree with ListSessions followed by in-memory filtering.
 func (a CrushAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, error) {
-	sinceMs, hasSince := sinceLowerBoundMs(f)
+	sinceSec, hasSince := sinceLowerBoundSec(f)
 	var metas []SessionMeta
 	for _, db := range a.dbPaths() {
 		if f.Cwd != "" && !cwdMatches(db.cwd, f.Cwd) {
 			continue
 		}
-		sessions, err := a.listDBSessionsSince(db.dbPath, db.cwd, sinceMs, hasSince)
+		sessions, err := a.listDBSessionsSince(db.dbPath, db.cwd, sinceSec, hasSince)
 		if err != nil {
 			continue
 		}
@@ -228,12 +228,12 @@ func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) 
 	return a.listDBSessionsSince(dbPath, cwd, 0, false)
 }
 
-// listDBSessionsSince is listDBSessions with an optional epoch-millisecond
+// listDBSessionsSince is listDBSessions with an optional epoch-second
 // lower bound pushed into the query. The bound is a coarse prefilter (see
-// sinceLowerBoundMs): created_at is the same column msToRFC3339 turns into
+// sinceLowerBoundSec): created_at is the same column secToRFC3339 turns into
 // StartedAt, so a row below the bound cannot satisfy the exact filter, while
 // rows above it still face the in-memory pass.
-func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, hasSince bool) ([]SessionMeta, error) {
+func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceSec int64, hasSince bool) ([]SessionMeta, error) {
 	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, err
@@ -246,7 +246,7 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 	var args []any
 	if hasSince {
 		query += ` WHERE created_at >= ?`
-		args = append(args, sinceMs)
+		args = append(args, sinceSec)
 	}
 	query += ` ORDER BY updated_at DESC`
 	rows, err := db.QueryContext(context.Background(), query, args...)
@@ -274,8 +274,8 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 			Path:      dbPath + "/" + id,
 			Cwd:       cwd,
 			Title:     title,
-			StartedAt: msToRFC3339(createdAt),
-			EndedAt:   msToRFC3339(updatedAt),
+			StartedAt: secToRFC3339(createdAt),
+			EndedAt:   secToRFC3339(updatedAt),
 		}
 		if parentID.Valid && parentID.String != "" {
 			meta.Auxiliary = true
@@ -368,8 +368,8 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 		Path:      dbPath + "/" + sessionID,
 		Cwd:       cwd,
 		Title:     title,
-		StartedAt: msToRFC3339(createdAt),
-		EndedAt:   msToRFC3339(updatedAt),
+		StartedAt: secToRFC3339(createdAt),
+		EndedAt:   secToRFC3339(updatedAt),
 	}
 	if parentID.Valid && parentID.String != "" {
 		meta.Auxiliary = true
@@ -403,7 +403,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 		if err := rows.Scan(&msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
 			continue
 		}
-		ts := msToRFC3339(msgCreatedAt)
+		ts := secToRFC3339(msgCreatedAt)
 		if model.Valid && model.String != "" && meta.Model == "" {
 			meta.Model = model.String
 		}
@@ -482,8 +482,9 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	return events, marks, meta, nil
 }
 
-// Watermark returns the latest message timestamp (epoch-ms) for the session,
-// used as an incremental watermark for SQLite-backed adapters.
+// Watermark returns the latest message timestamp for the session, in the
+// units messages.created_at natively stores (Unix seconds for Crush), used
+// as an incremental watermark for SQLite-backed adapters.
 func (a CrushAdapter) Watermark(path string) int64 {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
@@ -493,13 +494,13 @@ func (a CrushAdapter) Watermark(path string) int64 {
 	if err != nil {
 		return 0
 	}
-	var maxMs sql.NullInt64
+	var maxTS sql.NullInt64
 	err = db.QueryRowContext(context.Background(),
-		`SELECT MAX(created_at) FROM messages WHERE session_id = ?`, sessionID).Scan(&maxMs)
-	if err != nil || !maxMs.Valid {
+		`SELECT MAX(created_at) FROM messages WHERE session_id = ?`, sessionID).Scan(&maxTS)
+	if err != nil || !maxTS.Valid {
 		return 0
 	}
-	return maxMs.Int64
+	return maxTS.Int64
 }
 
 // ParseSince reads only messages with created_at > watermark, returning events
@@ -539,8 +540,8 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 		Path:      dbPath + "/" + sessionID,
 		Cwd:       cwd,
 		Title:     title,
-		StartedAt: msToRFC3339(createdAt),
-		EndedAt:   msToRFC3339(updatedAt),
+		StartedAt: secToRFC3339(createdAt),
+		EndedAt:   secToRFC3339(updatedAt),
 	}
 	if parentID.Valid && parentID.String != "" {
 		meta.Auxiliary = true
@@ -579,7 +580,7 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 		if err := rows.Scan(&msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
 			continue
 		}
-		ts := msToRFC3339(msgCreatedAt)
+		ts := secToRFC3339(msgCreatedAt)
 		if model.Valid && model.String != "" && meta.Model == "" {
 			meta.Model = model.String
 		}
@@ -671,10 +672,15 @@ type crushPartData struct {
 	Text       string `json:"text"`
 }
 
-func msToRFC3339(ms int64) string {
-	if ms <= 0 {
+// secToRFC3339 renders a Crush timestamp as RFC 3339. Crush stores Unix
+// SECONDS in sessions.created_at/updated_at and messages.created_at, even
+// though the schema's own comment claims milliseconds — the default trigger
+// writes strftime('%s', 'now'), which is seconds. Verified against live
+// databases; do not "fix" this back to time.UnixMilli without re-checking
+// real data, because the schema comment is the lie.
+func secToRFC3339(sec int64) string {
+	if sec <= 0 {
 		return ""
 	}
-	t := time.UnixMilli(ms).UTC()
-	return t.Format(time.RFC3339Nano)
+	return time.Unix(sec, 0).UTC().Format(time.RFC3339Nano)
 }

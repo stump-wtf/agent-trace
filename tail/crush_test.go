@@ -64,12 +64,12 @@ func TestCrushAdapterParse(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	now := time.Now().UnixMilli()
+	now := time.Now().Unix()
 	sessionID := "test-session-001"
 
 	// Insert a session.
 	_, err = db.Exec(`INSERT INTO sessions (id, title, parent_session_id, created_at, updated_at) VALUES (?, ?, '', ?, ?)`,
-		sessionID, "Test Session", now, now+5000)
+		sessionID, "Test Session", now, now+5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestCrushAdapterParse(t *testing.T) {
 	for i, parts := range []string{userParts, assistantParts, toolParts} {
 		role := []string{"user", "assistant", "tool"}[i]
 		_, err = db.Exec(`INSERT INTO messages (id, session_id, role, parts, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			"msg-"+string(rune('0'+i)), sessionID, role, parts, "test-model", now+int64(i*1000), now+int64(i*1000))
+			"msg-"+string(rune('0'+i)), sessionID, role, parts, "test-model", now+int64(i), now+int64(i))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -144,10 +144,10 @@ func TestCrushAdapterListSessions(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	now := time.Now().UnixMilli()
+	now := time.Now().Unix()
 	for i := range 3 {
 		_, err = db.Exec(`INSERT INTO sessions (id, title, parent_session_id, created_at, updated_at) VALUES (?, ?, '', ?, ?)`,
-			fmt.Sprintf("sess-%d", i), fmt.Sprintf("Session %d", i), now+int64(i*1000), now+int64(i*1000+500))
+			fmt.Sprintf("sess-%d", i), fmt.Sprintf("Session %d", i), now+int64(i*10), now+int64(i*10+1))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -181,7 +181,7 @@ func TestCrushAdapterSubagent(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	now := time.Now().UnixMilli()
+	now := time.Now().Unix()
 	_, err = db.Exec(`INSERT INTO sessions (id, title, parent_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
 		"sub-1", "Subagent", "parent-1", now, now)
 	if err != nil {
@@ -210,15 +210,52 @@ func TestCrushAdapterRejectsMissingDB(t *testing.T) {
 	}
 }
 
-func TestCrushMsToRFC3339(t *testing.T) {
-	if msToRFC3339(0) != "" {
-		t.Error("ms=0 should produce empty string")
+func TestCrushSecToRFC3339(t *testing.T) {
+	if secToRFC3339(0) != "" {
+		t.Error("sec=0 should produce empty string")
 	}
-	ts := msToRFC3339(1784148215000)
+	ts := secToRFC3339(1784148215)
 	if ts == "" {
-		t.Error("valid ms should produce RFC3339 string")
+		t.Error("valid sec should produce RFC3339 string")
 	}
 	if ts[:4] != "2026" {
 		t.Errorf("expected 2026 date, got %q", ts[:4])
+	}
+}
+
+// TestCrushTimestampsAreSecondsNotMillis pins the units of Crush's timestamp
+// columns against regression. Crush's schema comment claims milliseconds, but
+// the trigger that populates the columns writes strftime('%s', 'now') — Unix
+// seconds — and live databases confirm it. Decoding seconds as milliseconds
+// rendered every session as January 1970.
+func TestCrushTimestampsAreSecondsNotMillis(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "crush.db")
+	createTestCrushDB(t, dbPath)
+
+	created := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions (id, title, parent_session_id, created_at, updated_at) VALUES (?, ?, '', ?, ?)`,
+		"sess-sec", "Seconds session", created.Unix(), created.Add(time.Minute).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
+	metas, err := adapter.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(metas))
+	}
+	if got, want := metas[0].StartedAt, "2026-01-01T12:00:00Z"; got != want {
+		t.Errorf("StartedAt = %q, want %q (columns are Unix seconds, not milliseconds)", got, want)
+	}
+	if got, want := metas[0].EndedAt, "2026-01-01T12:01:00Z"; got != want {
+		t.Errorf("EndedAt = %q, want %q", got, want)
 	}
 }
