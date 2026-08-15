@@ -17,6 +17,12 @@ jobs:
   # A tag must not ship if the code it names is broken. This repeats the PR
   # checks on the tagged commit rather than trusting that main was green when
   # the tag was cut, because a tag can name any commit.
+  #
+  # The golangci-lint install is not optional: `make lint` exits non-zero when
+  # the binary is absent rather than skipping the linter, precisely so a green
+  # run cannot mean "the linter never ran". Keep the pinned version in step
+  # with ci.yaml's lint job — if they drift, a tag can pass checks that a pull
+  # request would have failed.
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -25,6 +31,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
       - name: check
         run: make check
 
