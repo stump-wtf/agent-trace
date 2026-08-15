@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,13 +56,21 @@ func (a ClaudeCodeAdapter) WithRoot(root string) Adapter {
 
 // ListSessions walks the session directory and returns metadata for each
 // recognized Claude Code session file, sorted newest-first.
-func (a ClaudeCodeAdapter) ListSessions() ([]SessionMeta, error) {
+func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	dir := a.SessionDir()
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return nil, nil
 	}
 	var metas []SessionMeta
 	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		// Checked per entry rather than once up front: the walk is the part
+		// that scales with the number of sessions, and Summarize opens and
+		// reads each file. Returning the error stops the walk and surfaces
+		// context.Canceled to the caller instead of a truncated listing that
+		// looks like "this harness has fewer sessions than it does".
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return nil
 		}
@@ -149,7 +158,7 @@ func (a ClaudeCodeAdapter) Summarize(path string) (SessionMeta, error) {
 
 // Parse reads a complete session file and returns all tool call/result pairs
 // as classified events, plus timeline marks.
-func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
 	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
 		return nil, nil, SessionMeta{}, err
@@ -274,7 +283,7 @@ func (a ClaudeCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark
 // Watermark returns the offset just past the last complete line, for use as an
 // incremental watermark. It is deliberately not the file size: see
 // readCompleteJSONLines for why a watermark must land on a record boundary.
-func (a ClaudeCodeAdapter) Watermark(path string) int64 {
+func (a ClaudeCodeAdapter) Watermark(ctx context.Context, path string) int64 {
 	return jsonlCompleteOffset(path)
 }
 
@@ -323,7 +332,7 @@ func sessionHeadCwd(path string) string {
 // keeps the stream both complete and duplicate-free. A call that never gets a
 // result — a session killed mid-tool — parks the watermark on a short tail that
 // is cheap to re-read, rather than corrupting everything after it.
-func (a ClaudeCodeAdapter) ParseSince(path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, nil, SessionMeta{}, 0, err

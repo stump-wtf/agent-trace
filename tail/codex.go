@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -60,13 +61,19 @@ func (a CodexAdapter) WithRoot(root string) Adapter {
 
 // ListSessions walks the session directory and returns metadata for each
 // recognized Codex session file, sorted newest-first.
-func (a CodexAdapter) ListSessions() ([]SessionMeta, error) {
+func (a CodexAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	dir := a.SessionDir()
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return nil, nil
 	}
 	var metas []SessionMeta
 	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		// See ClaudeCodeAdapter.ListSessions: the per-entry check is what
+		// makes a cancelled context stop the walk rather than a partial
+		// listing masquerading as a complete one.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return nil
 		}
@@ -162,7 +169,7 @@ func (a CodexAdapter) Summarize(path string) (SessionMeta, error) {
 }
 
 // Parse reads a complete Codex session file and returns classified events.
-func (a CodexAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
 	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
 		return nil, nil, SessionMeta{}, err

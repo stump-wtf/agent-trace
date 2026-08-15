@@ -11,7 +11,7 @@ func TestCodexParse(t *testing.T) {
 	adapter := CodexAdapter{Dir: "testdata"}
 	path := filepath.Join("testdata", "codex_marks.jsonl")
 
-	events, marks, meta, err := adapter.Parse(path)
+	events, marks, meta, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestCodexParseOrphanedCall(t *testing.T) {
 {"type":"response_item","timestamp":"2026-01-01T10:00:01Z","payload":{"type":"function_call","call_id":"c1","name":"shell","arguments":{"command":"ls"}}}
 `)
 	adapter := CodexAdapter{}
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestCodexParseOrphanedOutput(t *testing.T) {
 {"type":"response_item","timestamp":"2026-01-01T10:00:01Z","payload":{"type":"function_call_output","call_id":"unknown","output":"result"}}
 `)
 	adapter := CodexAdapter{}
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestCodexParseDuplicateCall(t *testing.T) {
 {"type":"response_item","timestamp":"2026-01-01T10:00:03Z","payload":{"type":"function_call_output","call_id":"c1","output":"done"}}
 `)
 	adapter := CodexAdapter{}
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestCodexParseResponseItemMessage(t *testing.T) {
 {"type":"response_item","timestamp":"2026-01-01T10:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"hello world"}]}}
 `)
 	adapter := CodexAdapter{}
-	_, marks, _, err := adapter.Parse(path)
+	_, marks, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestCodexParseTopLevelMessageString(t *testing.T) {
 {"type":"message","timestamp":"2026-01-01T10:00:01Z","role":"user","content":"plain text message"}
 `)
 	adapter := CodexAdapter{}
-	_, marks, _, err := adapter.Parse(path)
+	_, marks, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestCodexParseRejectsNonSession(t *testing.T) {
 		`{"type":"something_else","timestamp":"2026-01-01T10:00:00Z"}
 `)
 	adapter := CodexAdapter{}
-	_, _, _, err := adapter.Parse(path)
+	_, _, _, err := adapter.Parse(t.Context(), path)
 	if err == nil {
 		t.Error("expected error for non-Codex file")
 	}
@@ -173,7 +173,7 @@ func TestCodexParseRejectsNonSession(t *testing.T) {
 func TestCodexParseMarksTimestamp(t *testing.T) {
 	path := filepath.Join("testdata", "codex_marks.jsonl")
 	adapter := CodexAdapter{Dir: "testdata"}
-	_, marks, _, err := adapter.Parse(path)
+	_, marks, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}

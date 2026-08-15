@@ -36,7 +36,7 @@ func TestVerifyPatternsFlowThroughWatcher(t *testing.T) {
 	}
 
 	// Verify the patterns actually affect classification.
-	events, _, _, err := adapter.Parse(sessionFile)
+	events, _, _, err := adapter.Parse(t.Context(), sessionFile)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}

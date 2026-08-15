@@ -61,7 +61,7 @@ func TestCrushListsTopLevelSessionsWithNullParent(t *testing.T) {
 	writeCrushProjects(t, projects, cwd, filepath.Dir(dbPath))
 	a := CrushAdapter{ProjectsPath: projects}
 
-	metas, err := a.ListSessions()
+	metas, err := a.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestCrushParseAndSummarizeResolveCwdFromProjects(t *testing.T) {
 
 	// The cwd every event is classified against must be the one the listing
 	// reported, not the empty single-database override.
-	_, _, meta, err := a.Parse(dbPath + "/s1")
+	_, _, meta, err := a.Parse(t.Context(), dbPath+"/s1")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestCrushParseKeepsMessagesWithNullModel(t *testing.T) {
 	db.Close()
 
 	a := CrushAdapter{DBPath: dbPath, Cwd: dir}
-	events, marks, meta, err := a.Parse(dbPath + "/s1")
+	events, marks, meta, err := a.Parse(t.Context(), dbPath+"/s1")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

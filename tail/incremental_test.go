@@ -23,7 +23,7 @@ func TestClaudeCodeParseSince(t *testing.T) {
 	adapter := ClaudeCodeAdapter{}
 
 	// Full parse first.
-	events1, _, _, err := adapter.Parse(path)
+	events1, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestClaudeCodeParseSince(t *testing.T) {
 	}
 
 	// Record the watermark.
-	wm := adapter.Watermark(path)
+	wm := adapter.Watermark(t.Context(), path)
 	if wm == 0 {
 		t.Fatal("Watermark should be non-zero for a non-empty file")
 	}
@@ -50,7 +50,7 @@ func TestClaudeCodeParseSince(t *testing.T) {
 	f.Close()
 
 	// Incremental parse from the watermark.
-	events2, _, _, newWm, err := adapter.ParseSince(path, wm, 1)
+	events2, _, _, newWm, err := adapter.ParseSince(t.Context(), path, wm, 1)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestClaudeCodeParseSinceFileShrunk(t *testing.T) {
 	}
 
 	adapter := ClaudeCodeAdapter{}
-	events, _, _, _, err := adapter.ParseSince(path, 999999, 0)
+	events, _, _, _, err := adapter.ParseSince(t.Context(), path, 999999, 0)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestCrushParseSince(t *testing.T) {
 	path := dbPath + "/" + sessionID
 
 	// Full parse.
-	events1, _, _, err := adapter.Parse(path)
+	events1, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestCrushParseSince(t *testing.T) {
 	}
 
 	// Record the watermark.
-	wm := adapter.Watermark(path)
+	wm := adapter.Watermark(t.Context(), path)
 	if wm == 0 {
 		t.Fatal("Watermark should be non-zero")
 	}
@@ -169,7 +169,7 @@ func TestCrushParseSince(t *testing.T) {
 	resetDBCache()
 
 	// Incremental parse from the watermark.
-	events2, marks2, _, _, err := adapter.ParseSince(path, wm, 1)
+	events2, marks2, _, _, err := adapter.ParseSince(t.Context(), path, wm, 1)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}

@@ -29,11 +29,24 @@ type Watcher struct {
 }
 
 // Adapter is the interface each agent-specific parser implements.
+//
+// The context parameters are cancellation bounds, not request scoping: a
+// caller that is done (a stopped watcher, a timed-out batch scan) expects the
+// adapter to abandon in-flight work instead of running queries to completion.
+//
+// How far that goes differs by backing store, and the difference is worth
+// knowing before relying on a deadline. The SQLite-backed adapters honour
+// cancellation mid-query, so a cancelled context aborts a running scan. The
+// file-backed adapters check it between files while walking a session
+// directory — the unbounded part, which grows with the number of sessions —
+// but a single Parse of one already-opened file runs to completion, bounded
+// by that file's size. Do not expect a deadline to interrupt one large
+// whole-file parse.
 type Adapter interface {
 	Harness() Harness
 	SessionDir() string
-	ListSessions() ([]SessionMeta, error)
-	Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error)
+	ListSessions(ctx context.Context) ([]SessionMeta, error)
+	Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error)
 	// WithRoot returns a copy of the adapter configured to discover sessions
 	// under the given root directory instead of the compiled-in default.
 	// This lets a consumer holding []Adapter from DefaultAdapters retarget
@@ -127,7 +140,7 @@ type IncrementalParser interface {
 	// ParseSince reads only content discovered after the watermark and returns
 	// events/marks with seq continuing from startSeq. The returned
 	// newWatermark is stored for the next poll.
-	ParseSince(path string, watermark int64, startSeq int) (events []classify.Event, marks []classify.Mark, meta SessionMeta, newWatermark int64, err error)
+	ParseSince(ctx context.Context, path string, watermark int64, startSeq int) (events []classify.Event, marks []classify.Mark, meta SessionMeta, newWatermark int64, err error)
 	// Watermark returns the current high-water mark for the session at path.
 	// For JSONL adapters this is the offset past the last complete line — not
 	// the file size, which can land inside a record a harness is still
@@ -135,7 +148,7 @@ type IncrementalParser interface {
 	// column's native unit (seconds for Crush, milliseconds for OpenCode).
 	// Called after a full Parse to establish the initial
 	// watermark.
-	Watermark(path string) int64
+	Watermark(ctx context.Context, path string) int64
 }
 
 // jsonlCompleteOffset returns the offset just past the last newline-terminated
@@ -289,9 +302,10 @@ func (w *Watcher) Stop() {
 
 // ScanOnce performs a single scan of all adapters, parsing every discovered
 // session and emitting events. Useful for batch processing without live
-// tailing. Does not close the events channel.
-func (w *Watcher) ScanOnce() error {
-	w.scanOnce(context.Background())
+// tailing. Does not close the events channel. The context bounds the scan:
+// adapters that support cancellation abandon in-flight work when it is done.
+func (w *Watcher) ScanOnce(ctx context.Context) error {
+	w.scanOnce(ctx)
 	return nil
 }
 
@@ -304,7 +318,7 @@ func (w *Watcher) scanOnce(ctx context.Context) {
 			return
 		default:
 		}
-		sessions, err := a.ListSessions()
+		sessions, err := a.ListSessions(ctx)
 		if err != nil {
 			continue
 		}
@@ -316,12 +330,12 @@ func (w *Watcher) scanOnce(ctx context.Context) {
 				return
 			default:
 			}
-			w.scanSession(a, meta)
+			w.scanSession(ctx, a, meta)
 		}
 	}
 }
 
-func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
+func (w *Watcher) scanSession(ctx context.Context, a Adapter, meta SessionMeta) {
 	// Change detection uses the session's own EndedAt timestamp instead of
 	// os.Stat file size. This works for both JSONL and SQLite sessions:
 	// SQLite databases in WAL mode don't grow the main file on writes (the
@@ -355,13 +369,13 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 
 	if ip, ok := a.(IncrementalParser); ok && !firstScan {
 		var err error
-		events, marks, _, newWatermark, err = ip.ParseSince(meta.Path, watermark, lastSeq+1)
+		events, marks, _, newWatermark, err = ip.ParseSince(ctx, meta.Path, watermark, lastSeq+1)
 		if err != nil {
 			return
 		}
 	} else {
 		var err error
-		events, marks, _, err = a.Parse(meta.Path)
+		events, marks, _, err = a.Parse(ctx, meta.Path)
 		if err != nil {
 			return
 		}
@@ -377,7 +391,7 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 		// scan. JSONL adapters use file size; SQLite adapters use the latest
 		// message timestamp. ParseSince on the next poll will use this.
 		if ip, ok := a.(IncrementalParser); ok {
-			newWatermark = ip.Watermark(meta.Path)
+			newWatermark = ip.Watermark(ctx, meta.Path)
 		}
 	}
 

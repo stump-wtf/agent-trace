@@ -8,7 +8,7 @@ import (
 func TestCodexFidelityTurnContext(t *testing.T) {
 	adapter := CodexAdapter{Dir: "testdata", IndexPath: "/dev/null"}
 	path := filepath.Join("testdata", "codex_fidelity.jsonl")
-	_, _, meta, err := adapter.Parse(path)
+	_, _, meta, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestCodexFidelityTurnContext(t *testing.T) {
 func TestCodexFidelityPatchApplyEnd(t *testing.T) {
 	adapter := CodexAdapter{Dir: "testdata", IndexPath: "/dev/null"}
 	path := filepath.Join("testdata", "codex_fidelity.jsonl")
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestCodexOlderFormatBareID(t *testing.T) {
 {"type":"response_item","timestamp":"2026-01-01T10:00:02Z","payload":{"type":"function_call_output","call_id":"c1","output":"file.go"}}
 `)
 	adapter := CodexAdapter{}
-	events, _, meta, err := adapter.Parse(path)
+	events, _, meta, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}

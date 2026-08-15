@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
@@ -106,7 +107,7 @@ func TestCrushListSessionsPropagatesIterationError(t *testing.T) {
 	// treats a failed project database as contributing nothing, so the error it
 	// now receives is observable here rather than through ListSessions.
 	a := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	if _, err := a.listDBSessionsSince(dbPath, "/test", 0, false); err == nil {
+	if _, err := a.listDBSessionsSince(context.Background(), dbPath, "/test", 0, false); err == nil {
 		t.Fatal("expected a mid-iteration failure to propagate as an error, got nil")
 	}
 }
@@ -164,7 +165,7 @@ func TestCrushParsePropagatesIterationError(t *testing.T) {
 	}
 
 	a := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	if _, _, _, err := a.Parse(dbPath + "/sess-x"); err == nil {
+	if _, _, _, err := a.Parse(context.Background(), dbPath+"/sess-x"); err == nil {
 		t.Fatal("expected a mid-iteration failure to propagate as an error, got nil")
 	}
 }
@@ -219,7 +220,7 @@ func TestOpenCodeListSessionsPropagatesIterationError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.listSessionsSince(odb, dbPath, 0, false); err == nil {
+	if _, err := a.listSessionsSince(context.Background(), odb, dbPath, 0, false); err == nil {
 		t.Fatal("expected a mid-iteration failure to propagate as an error, got nil")
 	}
 }

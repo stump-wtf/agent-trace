@@ -92,7 +92,7 @@ func TestCrushAdapterParse(t *testing.T) {
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test/project"}
 	path := dbPath + "/" + sessionID
 
-	events, marks, meta, err := adapter.Parse(path)
+	events, marks, meta, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestCrushAdapterListSessions(t *testing.T) {
 	_ = db.Close()
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestCrushAdapterSubagent(t *testing.T) {
 	_ = db.Close()
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestCrushAdapterSubagent(t *testing.T) {
 
 func TestCrushAdapterRejectsMissingDB(t *testing.T) {
 	adapter := CrushAdapter{DBPath: "/nonexistent/crush.db"}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions should handle missing DB gracefully: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestCrushTimestampsAreSecondsNotMillis(t *testing.T) {
 	_ = db.Close()
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(context.Background())
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}

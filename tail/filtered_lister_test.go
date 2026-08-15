@@ -30,14 +30,14 @@ func assertFilteredMatchesInMemory(t *testing.T, a Adapter, filters []SessionFil
 	if !ok {
 		t.Fatalf("%s does not implement FilteredLister", a.Harness())
 	}
-	all, err := a.ListSessions()
+	all, err := a.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
 	for i, f := range filters {
 		t.Run(fmt.Sprintf("filter_%d", i), func(t *testing.T) {
 			want := filterSessions(all, f)
-			got, err := fl.ListSessionsFiltered(f)
+			got, err := fl.ListSessionsFiltered(t.Context(), f)
 			if err != nil {
 				t.Fatalf("ListSessionsFiltered: %v", err)
 			}
@@ -180,7 +180,7 @@ func TestCrushFilteredListerSkipsNonMatchingProjects(t *testing.T) {
 	})
 
 	a := CrushAdapter{ProjectsPath: projects}
-	got, err := a.ListSessionsFiltered(SessionFilter{Cwd: wanted})
+	got, err := a.ListSessionsFiltered(t.Context(), SessionFilter{Cwd: wanted})
 	if err != nil {
 		t.Fatalf("ListSessionsFiltered: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestCrushFilteredListerSkipsNonMatchingProjects(t *testing.T) {
 
 	// And the unfiltered listing still sees both, so the filter is doing the
 	// narrowing rather than the fixture being wrong.
-	all, err := a.ListSessions()
+	all, err := a.ListSessions(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestCrushShortSessionIDTitleFallback(t *testing.T) {
 	db.Close()
 
 	a := CrushAdapter{DBPath: dbPath, Cwd: filepath.Join(dir, "project")}
-	metas, err := a.ListSessions()
+	metas, err := a.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestCrushShortSessionIDTitleFallback(t *testing.T) {
 	if metas[0].Title != "project — abc" {
 		t.Errorf("title = %q, want %q", metas[0].Title, "project — abc")
 	}
-	if _, err := a.ListSessionsFiltered(SessionFilter{Cwd: filepath.Join(dir, "project")}); err != nil {
+	if _, err := a.ListSessionsFiltered(t.Context(), SessionFilter{Cwd: filepath.Join(dir, "project")}); err != nil {
 		t.Errorf("ListSessionsFiltered: %v", err)
 	}
 }
@@ -351,7 +351,7 @@ func TestCrushShortSessionIDTitleFallback(t *testing.T) {
 // the generic path marshals as [].
 func TestOpenCodeFilteredListerEmptyResultShape(t *testing.T) {
 	a := OpenCodeAdapter{DBPath: filepath.Join(t.TempDir(), "absent.db")}
-	got, err := a.ListSessionsFiltered(SessionFilter{Cwd: "/nowhere"})
+	got, err := a.ListSessionsFiltered(t.Context(), SessionFilter{Cwd: "/nowhere"})
 	if err != nil {
 		t.Fatalf("ListSessionsFiltered: %v", err)
 	}

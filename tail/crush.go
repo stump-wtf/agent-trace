@@ -194,8 +194,8 @@ func (a CrushAdapter) dbPaths() []struct {
 // body rather than two makes FilteredLister's "identical to ListSessions
 // followed by in-memory filtering" contract true by construction instead of by
 // two hand-synchronized copies of the same loop, sort, and error policy.
-func (a CrushAdapter) ListSessions() ([]SessionMeta, error) {
-	return a.ListSessionsFiltered(SessionFilter{})
+func (a CrushAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
+	return a.ListSessionsFiltered(ctx, SessionFilter{})
 }
 
 // ListSessionsFiltered implements FilteredLister. Crush stores one database
@@ -207,14 +207,14 @@ func (a CrushAdapter) ListSessions() ([]SessionMeta, error) {
 // filterSessions still runs over the result: the pushdown only narrows what is
 // read, and the exact predicate is applied in exactly one place, so this can
 // never disagree with ListSessions followed by in-memory filtering.
-func (a CrushAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, error) {
+func (a CrushAdapter) ListSessionsFiltered(ctx context.Context, f SessionFilter) ([]SessionMeta, error) {
 	sinceSec, hasSince := sinceLowerBoundSec(f)
 	var metas []SessionMeta
 	for _, db := range a.dbPaths() {
 		if f.Cwd != "" && !cwdMatches(db.cwd, f.Cwd) {
 			continue
 		}
-		sessions, err := a.listDBSessionsSince(db.dbPath, db.cwd, sinceSec, hasSince)
+		sessions, err := a.listDBSessionsSince(ctx, db.dbPath, db.cwd, sinceSec, hasSince)
 		if err != nil {
 			continue
 		}
@@ -224,8 +224,8 @@ func (a CrushAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, erro
 	return filterSessions(metas, f), nil
 }
 
-func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) {
-	return a.listDBSessionsSince(dbPath, cwd, 0, false)
+func (a CrushAdapter) listDBSessions(ctx context.Context, dbPath, cwd string) ([]SessionMeta, error) {
+	return a.listDBSessionsSince(ctx, dbPath, cwd, 0, false)
 }
 
 // listDBSessionsSince is listDBSessions with an optional epoch-second
@@ -233,7 +233,7 @@ func (a CrushAdapter) listDBSessions(dbPath, cwd string) ([]SessionMeta, error) 
 // sinceLowerBoundSec): created_at is the same column secToRFC3339 turns into
 // StartedAt, so a row below the bound cannot satisfy the exact filter, while
 // rows above it still face the in-memory pass.
-func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceSec int64, hasSince bool) ([]SessionMeta, error) {
+func (a CrushAdapter) listDBSessionsSince(ctx context.Context, dbPath, cwd string, sinceSec int64, hasSince bool) ([]SessionMeta, error) {
 	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, err
@@ -249,7 +249,7 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceSec int64, ha
 		args = append(args, sinceSec)
 	}
 	query += ` ORDER BY updated_at DESC`
-	rows, err := db.QueryContext(context.Background(), query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +324,7 @@ func (a CrushAdapter) Summarize(path string) (SessionMeta, error) {
 	if dbPath == "" {
 		return SessionMeta{}, fmt.Errorf("not a Crush session: %s", path)
 	}
-	metas, err := a.listDBSessions(dbPath, a.cwdForDB(dbPath))
+	metas, err := a.listDBSessions(context.Background(), dbPath, a.cwdForDB(dbPath))
 	if err != nil {
 		return SessionMeta{}, err
 	}
@@ -337,7 +337,7 @@ func (a CrushAdapter) Summarize(path string) (SessionMeta, error) {
 }
 
 // Parse reads a complete Crush session and returns classified events.
-func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return nil, nil, SessionMeta{}, fmt.Errorf("not a Crush session: %s", path)
@@ -353,11 +353,11 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	var title string
 	var parentID sql.NullString
 	var createdAt, updatedAt int64
-	err = db.QueryRowContext(context.Background(),
+	err = db.QueryRowContext(ctx,
 		`SELECT title, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?`, sessionID).
 		Scan(&title, &parentID, &createdAt, &updatedAt)
 	if err != nil {
-		return nil, nil, SessionMeta{}, fmt.Errorf("session not found: %s", sessionID)
+		return nil, nil, SessionMeta{}, fmt.Errorf("reading crush session %s: %w", sessionID, err)
 	}
 
 	cwd := a.cwdForDB(dbPath)
@@ -376,7 +376,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 	}
 
 	// Read messages in order.
-	rows, err := db.QueryContext(context.Background(),
+	rows, err := db.QueryContext(ctx,
 		`SELECT id, role, parts, model, created_at FROM messages WHERE session_id = ? ORDER BY created_at`, sessionID)
 	if err != nil {
 		return nil, nil, meta, err
@@ -485,7 +485,7 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 // Watermark returns the latest message timestamp for the session, in the
 // units messages.created_at natively stores (Unix seconds for Crush), used
 // as an incremental watermark for SQLite-backed adapters.
-func (a CrushAdapter) Watermark(path string) int64 {
+func (a CrushAdapter) Watermark(ctx context.Context, path string) int64 {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return 0
@@ -495,7 +495,7 @@ func (a CrushAdapter) Watermark(path string) int64 {
 		return 0
 	}
 	var maxTS sql.NullInt64
-	err = db.QueryRowContext(context.Background(),
+	err = db.QueryRowContext(ctx,
 		`SELECT MAX(created_at) FROM messages WHERE session_id = ?`, sessionID).Scan(&maxTS)
 	if err != nil || !maxTS.Valid {
 		return 0
@@ -506,7 +506,7 @@ func (a CrushAdapter) Watermark(path string) int64 {
 // ParseSince reads only messages with created_at > watermark, returning events
 // and marks with seq continuing from startSeq. This avoids re-querying and
 // re-parsing the entire message history on every watcher poll.
-func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return nil, nil, SessionMeta{}, 0, fmt.Errorf("not a Crush session: %s", path)
@@ -525,11 +525,11 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 	// every session that was not a subagent branch.
 	var parentID sql.NullString
 	var createdAt, updatedAt int64
-	err = db.QueryRowContext(context.Background(),
+	err = db.QueryRowContext(ctx,
 		`SELECT title, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?`, sessionID).
 		Scan(&title, &parentID, &createdAt, &updatedAt)
 	if err != nil {
-		return nil, nil, SessionMeta{}, 0, fmt.Errorf("session not found: %s", sessionID)
+		return nil, nil, SessionMeta{}, 0, fmt.Errorf("reading crush session %s: %w", sessionID, err)
 	}
 
 	cwd := a.cwdForDB(dbPath)
@@ -551,7 +551,7 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 	}
 
 	query := `SELECT id, role, parts, model, created_at FROM messages WHERE session_id = ? AND created_at > ? ORDER BY created_at`
-	rows, err := db.QueryContext(context.Background(), query, sessionID, watermark)
+	rows, err := db.QueryContext(ctx, query, sessionID, watermark)
 	if err != nil {
 		return nil, nil, meta, 0, err
 	}

@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -69,7 +70,7 @@ func TestOpenCodeUserMarkSeqTracksEventTimeline(t *testing.T) {
 	buildOpenCodeMarkSeqDB(t, dbPath, "ses_seq")
 
 	a := OpenCodeAdapter{DBPath: dbPath}
-	events, marks, _, err := a.Parse(dbPath + "/ses_seq")
+	events, marks, _, err := a.Parse(context.Background(), dbPath+"/ses_seq")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func TestOpenCodeUserMarksAreReachableByEvents(t *testing.T) {
 	buildOpenCodeMarkSeqDB(t, dbPath, "ses_reach")
 
 	a := OpenCodeAdapter{DBPath: dbPath}
-	events, marks, _, err := a.Parse(dbPath + "/ses_reach")
+	events, marks, _, err := a.Parse(context.Background(), dbPath+"/ses_reach")
 	if err != nil {
 		t.Fatal(err)
 	}

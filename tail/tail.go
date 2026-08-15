@@ -5,6 +5,7 @@
 package tail
 
 import (
+	"context"
 	"path/filepath"
 	"sort"
 	"time"
@@ -160,7 +161,7 @@ type SessionFilter struct {
 // filtering. The result must be identical to what ListSessions followed by
 // in-memory filtering would produce.
 type FilteredLister interface {
-	ListSessionsFiltered(SessionFilter) ([]SessionMeta, error)
+	ListSessionsFiltered(ctx context.Context, f SessionFilter) ([]SessionMeta, error)
 }
 
 // ListSessionsFiltered returns sessions from the adapter that satisfy the
@@ -168,12 +169,13 @@ type FilteredLister interface {
 // used directly; otherwise the result of ListSessions is filtered in memory.
 //
 // The zero-value filter matches every session, making this equivalent to
-// ListSessions. Filtering is exact — see the SessionFilter docs.
-func ListSessionsFiltered(a Adapter, f SessionFilter) ([]SessionMeta, error) {
+// ListSessions. Filtering is exact — see the SessionFilter docs. The context
+// bounds the adapter's I/O: a cancelled context abandons in-flight queries.
+func ListSessionsFiltered(ctx context.Context, a Adapter, f SessionFilter) ([]SessionMeta, error) {
 	if fl, ok := a.(FilteredLister); ok {
-		return fl.ListSessionsFiltered(f)
+		return fl.ListSessionsFiltered(ctx, f)
 	}
-	sessions, err := a.ListSessions()
+	sessions, err := a.ListSessions(ctx)
 	if err != nil {
 		return nil, err
 	}

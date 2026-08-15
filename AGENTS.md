@@ -40,7 +40,7 @@ Stateless core with one opt-in I/O surface: the `Options` struct supplies a `Fil
 
 Discovers and parses live agent session logs from per-harness directories, emitting `classify.ToolCall`/`ToolResult` pairs that feed `classify.BuildEvent`. Supports JSONL-backed adapters (Claude Code, Codex, Pi) and SQLite-backed adapters (Crush, OpenCode).
 
-**Adapter pattern** (`watcher.go`): `Adapter` interface with `Harness()`, `SessionDir()`, `ListSessions()`, `Parse()`. Five implementations:
+**Adapter pattern** (`watcher.go`): `Adapter` interface with `Harness()`, `SessionDir()`, `ListSessions(ctx)`, `Parse(ctx, path)`. Five implementations:
 
 | Adapter | Directory | Format |
 |---|---|---|

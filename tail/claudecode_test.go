@@ -9,7 +9,7 @@ func TestClaudeCodeParseBasic(t *testing.T) {
 	adapter := ClaudeCodeAdapter{Dir: "testdata"}
 	path := filepath.Join("testdata", "claudecode_basic.jsonl")
 
-	events, marks, meta, err := adapter.Parse(path)
+	events, marks, meta, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestClaudeCodeParseOrphanedCall(t *testing.T) {
 	path := writeTempJSONL(t, "cc_orphan.jsonl",
 		`{"type":"assistant","timestamp":"2026-01-01T10:00:00Z","sessionId":"s1","cwd":"/tmp","message":{"role":"assistant","model":"m","content":[{"type":"tool_use","id":"c1","name":"Read","input":{"file_path":"/tmp/foo.go"}}]}}`)
 	adapter := ClaudeCodeAdapter{}
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestClaudeCodeParseRejectsNonSession(t *testing.T) {
 	path := writeTempJSONL(t, "cc_bad.jsonl",
 		`{"foo":"bar"}`)
 	adapter := ClaudeCodeAdapter{}
-	_, _, _, err := adapter.Parse(path)
+	_, _, _, err := adapter.Parse(t.Context(), path)
 	if err == nil {
 		t.Error("expected error for non-CC file")
 	}
@@ -93,7 +93,7 @@ not valid json
 {"type":"assistant","timestamp":"2026-01-01T10:00:01Z","sessionId":"s1","message":{"role":"assistant","model":"m","content":[{"type":"tool_use","id":"c1","name":"bash","input":{"command":"ls"}}]}}
 {"type":"user","timestamp":"2026-01-01T10:00:02Z","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"file.go"}]}}`)
 	adapter := ClaudeCodeAdapter{}
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestClaudeCodeCompactionMark(t *testing.T) {
 		`{"type":"system","timestamp":"2026-01-01T10:00:00Z","sessionId":"s1","cwd":"/tmp","subtype":"compact messages"}
 {"type":"user","timestamp":"2026-01-01T10:00:01Z","sessionId":"s1","cwd":"/tmp","message":{"role":"user","content":"hello"}}`)
 	adapter := ClaudeCodeAdapter{}
-	_, marks, _, err := adapter.Parse(path)
+	_, marks, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}

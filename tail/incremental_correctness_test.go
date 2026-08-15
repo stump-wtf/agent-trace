@@ -45,7 +45,7 @@ func TestParseSinceHoldsUnresolvedCall(t *testing.T) {
 
 	// Poll 1: the call is open, so nothing is emitted and the watermark must
 	// not advance past it.
-	events, _, _, wm, err := a.ParseSince(path, 0, 0)
+	events, _, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestParseSinceHoldsUnresolvedCall(t *testing.T) {
 
 	// Poll 2: the result lands and the call is emitted exactly once.
 	appendLines(t, path, ccToolResult("c1", "2026-01-01T10:00:09Z"))
-	events, _, _, wm2, err := a.ParseSince(path, wm, 0)
+	events, _, _, wm2, err := a.ParseSince(t.Context(), path, wm, 0)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestParseSinceHoldsUnresolvedCall(t *testing.T) {
 	}
 
 	// Poll 3: nothing new, and nothing repeated.
-	events, _, _, _, err = a.ParseSince(path, wm2, 1)
+	events, _, _, _, err = a.ParseSince(t.Context(), path, wm2, 1)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -89,13 +89,13 @@ func TestParseSinceSurvivesPartialLine(t *testing.T) {
 	path := writeTempJSONL(t, "s.jsonl", partial)
 	a := ClaudeCodeAdapter{}
 
-	wm := a.Watermark(path)
+	wm := a.Watermark(t.Context(), path)
 	if wm != 0 {
 		t.Fatalf("Watermark on a file with no complete line = %d, want 0", wm)
 	}
 
 	appendLines(t, path, rest+"\n"+ccToolResult("c1", "2026-01-01T10:00:01Z"))
-	events, _, _, _, err := a.ParseSince(path, wm, 0)
+	events, _, _, _, err := a.ParseSince(t.Context(), path, wm, 0)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -112,14 +112,14 @@ func TestParseSinceClassifiesAgainstSessionCwd(t *testing.T) {
 	path := writeTempJSONL(t, "s.jsonl", head)
 	a := ClaudeCodeAdapter{}
 
-	_, _, fullMeta, err := a.Parse(path)
+	_, _, fullMeta, err := a.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	wm := a.Watermark(path)
+	wm := a.Watermark(t.Context(), path)
 
 	appendLines(t, path, ccToolUse("c1", "Read", "2026-01-01T10:01:00Z")+ccToolResult("c1", "2026-01-01T10:01:01Z"))
-	_, _, incMeta, _, err := a.ParseSince(path, wm, 1)
+	_, _, incMeta, _, err := a.ParseSince(t.Context(), path, wm, 1)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -137,10 +137,10 @@ func TestParseSinceTruncatesMarkNotes(t *testing.T) {
 	head := ccToolUse("c0", "Read", "2026-01-01T10:00:00Z") + ccToolResult("c0", "2026-01-01T10:00:01Z")
 	path := writeTempJSONL(t, "s.jsonl", head)
 	a := ClaudeCodeAdapter{}
-	wm := a.Watermark(path)
+	wm := a.Watermark(t.Context(), path)
 
 	appendLines(t, path, `{"type":"user","timestamp":"2026-01-01T10:01:00Z","sessionId":"s1","cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"`+strings.Repeat("x", 5000)+`"}]}}`+"\n")
-	_, marks, _, _, err := a.ParseSince(path, wm, 1)
+	_, marks, _, _, err := a.ParseSince(t.Context(), path, wm, 1)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestCrushParseSinceNullParent(t *testing.T) {
 	}
 
 	a := CrushAdapter{DBPath: dbPath, Cwd: dir}
-	events, _, meta, _, err := a.ParseSince(dbPath+"/s1", 0, 0)
+	events, _, meta, _, err := a.ParseSince(t.Context(), dbPath+"/s1", 0, 0)
 	if err != nil {
 		t.Fatalf("ParseSince on a NULL-parent session: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestCrushParseSinceWatermarkIsMessageTime(t *testing.T) {
 	}
 
 	a := CrushAdapter{DBPath: dbPath, Cwd: dir}
-	events, _, _, wm, err := a.ParseSince(dbPath+"/s1", 0, 0)
+	events, _, _, wm, err := a.ParseSince(t.Context(), dbPath+"/s1", 0, 0)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestCrushParseSinceWatermarkIsMessageTime(t *testing.T) {
 	}
 	resetDBCache()
 
-	events, _, _, _, err = a.ParseSince(dbPath+"/s1", wm, 1)
+	events, _, _, _, err = a.ParseSince(t.Context(), dbPath+"/s1", wm, 1)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestCrushParseSinceHoldsUnresolvedCall(t *testing.T) {
 	}
 
 	a := CrushAdapter{DBPath: dbPath, Cwd: dir}
-	events, _, _, wm, err := a.ParseSince(dbPath+"/s1", 0, 0)
+	events, _, _, wm, err := a.ParseSince(t.Context(), dbPath+"/s1", 0, 0)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestCrushParseSinceHoldsUnresolvedCall(t *testing.T) {
 	}
 	resetDBCache()
 
-	events, _, _, _, err = a.ParseSince(dbPath+"/s1", wm, 0)
+	events, _, _, _, err = a.ParseSince(t.Context(), dbPath+"/s1", wm, 0)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}

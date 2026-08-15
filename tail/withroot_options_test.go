@@ -54,7 +54,7 @@ func TestVerifyPatternsReachRetargetedAdapters(t *testing.T) {
 		if a.Harness() != HarnessClaudeCode {
 			continue
 		}
-		events, _, _, err := a.Parse(filepath.Join(dir, "s.jsonl"))
+		events, _, _, err := a.Parse(t.Context(), filepath.Join(dir, "s.jsonl"))
 		if err != nil {
 			t.Fatalf("Parse: %v", err)
 		}

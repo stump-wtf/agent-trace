@@ -220,7 +220,7 @@ func TestWithRootReturnsAdapterInterface(t *testing.T) {
 		// Exercise all interface methods to make sure nothing panics.
 		_ = retargeted.Harness()
 		_ = retargeted.SessionDir()
-		_, _ = retargeted.ListSessions() // empty dir, should return nil/nil
+		_, _ = retargeted.ListSessions(t.Context()) // empty dir, should return nil/nil
 	}
 }
 
@@ -374,7 +374,7 @@ func TestDefaultAdaptersToleratesMissingBackingStores(t *testing.T) {
 				}
 			}
 			for _, a := range DefaultAdaptersIn(home) {
-				sessions, err := a.ListSessions()
+				sessions, err := a.ListSessions(t.Context())
 				if err != nil {
 					t.Errorf("%s ListSessions returned error: %v", a.Harness(), err)
 				}

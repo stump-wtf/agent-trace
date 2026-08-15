@@ -14,7 +14,7 @@ import (
 // TestWatcherWithCrushAdapter verifies the watcher can discover and parse
 // SQLite-backed (Crush) sessions. This exercises three bug fixes:
 //  1. SessionMeta.Path must carry the composite dbPath/sessionID so
-//     watcher's a.Parse(meta.Path) routes correctly
+//     watcher's a.Parse(t.Context(), meta.Path) routes correctly
 //  2. Change detection must not rely on os.Stat file size (SQLite WAL mode)
 //  3. fileState must be keyed by session key, not by file path
 func TestWatcherWithCrushAdapter(t *testing.T) {
@@ -152,7 +152,7 @@ func TestCrushListSessionsSkipsAuxiliary(t *testing.T) {
 	_ = db.Close()
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestCrushListSessionsPathIsComposite(t *testing.T) {
 	insertCrushSession(t, dbPath, "composite-check-001", "Test", now, now+1000)
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}

@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -21,10 +22,10 @@ type staticAdapter struct {
 func (s staticAdapter) Harness() Harness        { return "static" }
 func (s staticAdapter) SessionDir() string      { return "/fake" }
 func (s staticAdapter) WithRoot(string) Adapter { return s }
-func (s staticAdapter) ListSessions() ([]SessionMeta, error) {
+func (s staticAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	return s.sessions, s.err
 }
-func (s staticAdapter) Parse(string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+func (s staticAdapter) Parse(ctx context.Context, _ string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
 	return nil, nil, SessionMeta{}, nil
 }
 
@@ -47,7 +48,7 @@ func TestFilterZeroValueMatchesAll(t *testing.T) {
 		makeSession("s2", "/home/joe/project-b", "2026-06-01T10:00:00Z"),
 	}
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestFilterCwdExactMatch(t *testing.T) {
 		makeSession("s3", "", "2026-01-01T10:00:00Z"),
 	}
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{Cwd: "/home/joe/project-a"})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Cwd: "/home/joe/project-a"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,7 +85,7 @@ func TestFilterCwdPrefixMatch(t *testing.T) {
 		makeSession("s3", "/home/joe/project-b", "2026-01-01T10:00:00Z"),
 	}
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{Cwd: "/home/joe/project-a"})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Cwd: "/home/joe/project-a"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestFilterCwdNoFalsePositivePrefix(t *testing.T) {
 		makeSession("s2", "/home/joe/project", "2026-01-01T10:00:00Z"),
 	}
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{Cwd: "/home/joe"})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Cwd: "/home/joe"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestFilterCwdEmptySessionCwdDoesNotMatch(t *testing.T) {
 		makeSession("s1", "", "2026-01-01T10:00:00Z"),
 	}
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{Cwd: "/home/joe"})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Cwd: "/home/joe"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -136,7 +137,7 @@ func TestFilterSince(t *testing.T) {
 	}
 	since := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{Since: since})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Since: since})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestFilterSinceBoundaryInclusive(t *testing.T) {
 	}
 	since := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{Since: since})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Since: since})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestFilterSinceExcludesMissingTimestamp(t *testing.T) {
 	}
 	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{Since: since})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Since: since})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestFilterSinceExcludesGarbageTimestamp(t *testing.T) {
 	}
 	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{Since: since})
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Since: since})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -216,7 +217,7 @@ func TestFilterCwdAndSince(t *testing.T) {
 	}
 	since := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	a := staticAdapter{sessions: sessions}
-	got, err := ListSessionsFiltered(a, SessionFilter{
+	got, err := ListSessionsFiltered(t.Context(), a, SessionFilter{
 		Cwd:   "/proj-a",
 		Since: since,
 	})
@@ -236,7 +237,7 @@ func TestFilterCwdAndSince(t *testing.T) {
 func TestFilterPropagatesError(t *testing.T) {
 	wantErr := errors.New("disk on fire")
 	a := staticAdapter{err: wantErr}
-	_, err := ListSessionsFiltered(a, SessionFilter{Cwd: "/proj"})
+	_, err := ListSessionsFiltered(t.Context(), a, SessionFilter{Cwd: "/proj"})
 	if !errors.Is(err, wantErr) {
 		t.Errorf("expected error %v, got %v", wantErr, err)
 	}
@@ -252,7 +253,7 @@ type filteredAdapter struct {
 	lastCall SessionFilter
 }
 
-func (f *filteredAdapter) ListSessionsFiltered(filter SessionFilter) ([]SessionMeta, error) {
+func (f *filteredAdapter) ListSessionsFiltered(ctx context.Context, filter SessionFilter) ([]SessionMeta, error) {
 	f.called = true
 	f.lastCall = filter
 	return []SessionMeta{makeSession("pushed-down", "/deep", "2026-01-01T00:00:00Z")}, nil
@@ -260,7 +261,7 @@ func (f *filteredAdapter) ListSessionsFiltered(filter SessionFilter) ([]SessionM
 
 func TestListSessionsFilteredDelegatesToFilteredLister(t *testing.T) {
 	fa := &filteredAdapter{}
-	got, err := ListSessionsFiltered(Adapter(fa), SessionFilter{Cwd: "/test"})
+	got, err := ListSessionsFiltered(t.Context(), Adapter(fa), SessionFilter{Cwd: "/test"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -292,7 +293,7 @@ func TestListSessionsFilteredClaudeCode(t *testing.T) {
 	adapter := ClaudeCodeAdapter{Dir: dir}
 
 	t.Run("Cwd filter", func(t *testing.T) {
-		got, err := ListSessionsFiltered(adapter, SessionFilter{Cwd: "/home/joe/project-a"})
+		got, err := ListSessionsFiltered(t.Context(), adapter, SessionFilter{Cwd: "/home/joe/project-a"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -306,7 +307,7 @@ func TestListSessionsFilteredClaudeCode(t *testing.T) {
 
 	t.Run("Since filter", func(t *testing.T) {
 		since := time.Date(2026, 6, 1, 10, 30, 0, 0, time.UTC)
-		got, err := ListSessionsFiltered(adapter, SessionFilter{Since: since})
+		got, err := ListSessionsFiltered(t.Context(), adapter, SessionFilter{Since: since})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -319,7 +320,7 @@ func TestListSessionsFilteredClaudeCode(t *testing.T) {
 	})
 
 	t.Run("zero filter returns all", func(t *testing.T) {
-		got, err := ListSessionsFiltered(adapter, SessionFilter{})
+		got, err := ListSessionsFiltered(t.Context(), adapter, SessionFilter{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

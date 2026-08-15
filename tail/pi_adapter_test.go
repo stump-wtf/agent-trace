@@ -13,7 +13,7 @@ func TestPiParseBasic(t *testing.T) {
 			`{"type":"message","id":"m4","parentId":"m3","timestamp":"2026-01-01T10:00:04Z","message":{"role":"assistant","model":"pi-model","content":[{"type":"toolCall","id":"tc2","name":"bash","arguments":{"command":"go test ./..."}}]}}`+"\n"+
 			`{"type":"message","id":"m5","parentId":"m4","timestamp":"2026-01-01T10:00:05Z","message":{"role":"toolResult","toolCallId":"tc2","content":"PASS","isError":false}}`+"\n")
 	adapter := PiAdapter{}
-	events, marks, meta, err := adapter.Parse(path)
+	events, marks, meta, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestPiParseOrphanedCall(t *testing.T) {
 		`{"type":"session","id":"s1","timestamp":"2026-01-01T10:00:00Z","cwd":"/tmp"}`+"\n"+
 			`{"type":"message","id":"m1","parentId":"s1","timestamp":"2026-01-01T10:00:01Z","message":{"role":"assistant","model":"m","content":[{"type":"toolCall","id":"tc1","name":"read","arguments":{"path":"/tmp/foo.go"}}]}}`+"\n")
 	adapter := PiAdapter{}
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestPiParseRejectsNonSession(t *testing.T) {
 	path := writeTempJSONL(t, "pi_bad.jsonl",
 		`{"foo":"bar"}`)
 	adapter := PiAdapter{}
-	_, _, _, err := adapter.Parse(path)
+	_, _, _, err := adapter.Parse(t.Context(), path)
 	if err == nil {
 		t.Error("expected error for non-pi file")
 	}
@@ -73,7 +73,7 @@ func TestPiBashExecution(t *testing.T) {
 		`{"type":"session","id":"s1","timestamp":"2026-01-01T10:00:00Z","cwd":"/tmp"}`+"\n"+
 			`{"type":"message","id":"m1","parentId":"s1","timestamp":"2026-01-01T10:00:01Z","message":{"role":"bashExecution","command":"ls","output":"file.go","exitCode":0}}`+"\n")
 	adapter := PiAdapter{}
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestPiBashExecutionError(t *testing.T) {
 		`{"type":"session","id":"s1","timestamp":"2026-01-01T10:00:00Z","cwd":"/tmp"}`+"\n"+
 			`{"type":"message","id":"m1","parentId":"s1","timestamp":"2026-01-01T10:00:01Z","message":{"role":"bashExecution","command":"false","output":"error","exitCode":1}}`+"\n")
 	adapter := PiAdapter{}
-	events, _, _, err := adapter.Parse(path)
+	events, _, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestPiCompactionMark(t *testing.T) {
 			`{"type":"compaction","id":"c1","parentId":"s1","timestamp":"2026-01-01T10:00:01Z"}`+"\n"+
 			`{"type":"message","id":"m1","parentId":"c1","timestamp":"2026-01-01T10:00:02Z","message":{"role":"user","content":"hello"}}`+"\n")
 	adapter := PiAdapter{}
-	_, marks, _, err := adapter.Parse(path)
+	_, marks, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestPiBranchSummaryMark(t *testing.T) {
 			`{"type":"branch_summary","id":"b1","parentId":"s1","timestamp":"2026-01-01T10:00:01Z","summary":"switched from feature to main"}`+"\n"+
 			`{"type":"message","id":"m1","parentId":"b1","timestamp":"2026-01-01T10:00:02Z","message":{"role":"user","content":"hello"}}`+"\n")
 	adapter := PiAdapter{}
-	_, marks, _, err := adapter.Parse(path)
+	_, marks, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestPiV1FileWithoutIDs(t *testing.T) {
 		`{"type":"session","id":"s1","timestamp":"2026-01-01T10:00:00Z","cwd":"/tmp"}`+"\n"+
 			`{"type":"message","timestamp":"2026-01-01T10:00:01Z","message":{"role":"user","content":"hello"}}`+"\n")
 	adapter := PiAdapter{}
-	_, marks, _, err := adapter.Parse(path)
+	_, marks, _, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}

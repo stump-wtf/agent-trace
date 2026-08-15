@@ -20,7 +20,7 @@ func (m mockAdapter) SessionDir() string { return m.dir }
 func (m mockAdapter) WithRoot(dir string) Adapter {
 	return mockAdapter{dir: dir}
 }
-func (m mockAdapter) ListSessions() ([]SessionMeta, error) {
+func (m mockAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
 		return nil, err
@@ -41,7 +41,7 @@ func (m mockAdapter) ListSessions() ([]SessionMeta, error) {
 	return metas, nil
 }
 
-func (m mockAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+func (m mockAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, SessionMeta{}, err

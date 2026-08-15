@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,13 +58,19 @@ func (a PiAdapter) WithRoot(root string) Adapter {
 
 // ListSessions walks the session directory and returns metadata for each
 // recognized Pi session file, sorted newest-first.
-func (a PiAdapter) ListSessions() ([]SessionMeta, error) {
+func (a PiAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	dir := a.SessionDir()
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return nil, nil
 	}
 	var metas []SessionMeta
 	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		// See ClaudeCodeAdapter.ListSessions: the per-entry check is what
+		// makes a cancelled context stop the walk rather than a partial
+		// listing masquerading as a complete one.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return nil
 		}
@@ -125,7 +132,7 @@ func (a PiAdapter) Summarize(path string) (SessionMeta, error) {
 }
 
 // Parse reads a complete Pi session file and returns classified events.
-func (a PiAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
 	header, entries, recognized, err := readPiSession(path)
 	if err != nil && !recognized {
 		return nil, nil, SessionMeta{}, err

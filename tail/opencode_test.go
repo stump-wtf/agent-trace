@@ -122,7 +122,7 @@ func TestOpenCodeParseBasic(t *testing.T) {
 	adapter := OpenCodeAdapter{DBPath: dbPath}
 	path := dbPath + "/" + sessionID
 
-	events, marks, meta, err := adapter.Parse(path)
+	events, marks, meta, err := adapter.Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestOpenCodeListSessions(t *testing.T) {
 	_ = db.Close()
 
 	adapter := OpenCodeAdapter{DBPath: dbPath}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestOpenCodeSubagent(t *testing.T) {
 	_ = db.Close()
 
 	adapter := OpenCodeAdapter{DBPath: dbPath}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestOpenCodeCompactionMark(t *testing.T) {
 	_ = db.Close()
 
 	adapter := OpenCodeAdapter{DBPath: dbPath}
-	_, marks, _, err := adapter.Parse(dbPath + "/" + sessionID)
+	_, marks, _, err := adapter.Parse(t.Context(), dbPath+"/"+sessionID)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestOpenCodeCompactionMark(t *testing.T) {
 
 func TestOpenCodeMissingDB(t *testing.T) {
 	adapter := OpenCodeAdapter{DBPath: "/nonexistent/opencode.db"}
-	metas, err := adapter.ListSessions()
+	metas, err := adapter.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("should handle missing DB gracefully: %v", err)
 	}

@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stump-wtf/agent-trace/classify"
@@ -34,7 +35,7 @@ func (s *scriptAdapter) WithRoot(dir string) Adapter {
 	return &scriptAdapter{path: dir, scans: s.scans}
 }
 
-func (s *scriptAdapter) ListSessions() ([]SessionMeta, error) {
+func (s *scriptAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	// Each ScanOnce lists exactly once, so this is the cycle counter both the
 	// meta and the parse results key off.
 	s.calls++
@@ -48,7 +49,7 @@ func (s *scriptAdapter) ListSessions() ([]SessionMeta, error) {
 	}}, nil
 }
 
-func (s *scriptAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+func (s *scriptAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
 	scan := s.scans[min(s.calls-1, len(s.scans)-1)]
 	meta := SessionMeta{
 		Key:     sessionKey("script", s.path),
@@ -86,7 +87,7 @@ type incrScriptAdapter struct {
 	sinceScans []scriptScan
 }
 
-func (s *incrScriptAdapter) ParseSince(path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+func (s *incrScriptAdapter) ParseSince(ctx context.Context, path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
 	scan := s.sinceScans[min(s.calls-1, len(s.sinceScans)-1)]
 	meta := SessionMeta{
 		Key:     sessionKey("script", s.path),
@@ -98,7 +99,7 @@ func (s *incrScriptAdapter) ParseSince(path string, watermark int64, startSeq in
 	return scan.events, scan.marks, meta, scan.watermark, nil
 }
 
-func (s *incrScriptAdapter) Watermark(path string) int64 { return 1 }
+func (s *incrScriptAdapter) Watermark(ctx context.Context, path string) int64 { return 1 }
 
 func TestWatcherMarksRideTheirSiblingEvents(t *testing.T) {
 	// One cycle: a user message (seq 0, a mark) followed by a tool call (seq
@@ -113,7 +114,7 @@ func TestWatcherMarksRideTheirSiblingEvents(t *testing.T) {
 		endedAt: "2026-01-01T10:00:02Z",
 	}}}
 	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
-	if err := w.ScanOnce(); err != nil {
+	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	got := drain(w.Events())
@@ -156,14 +157,14 @@ func TestWatcherTrailingMarksParkUntilTheNextEvent(t *testing.T) {
 		},
 	}}
 	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
-	if err := w.ScanOnce(); err != nil {
+	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	got := drain(w.Events())
 	if len(got) != 1 || len(got[0].Marks) != 0 {
 		t.Fatalf("cycle 1: got %d events (marks %d on first), want 1 event with no marks — the trailing mark has nothing to ride yet", len(got), len(got[0].Marks))
 	}
-	if err := w.ScanOnce(); err != nil {
+	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	got = drain(w.Events())
@@ -200,7 +201,7 @@ func TestWatcherMarksDedupAcrossFullReparses(t *testing.T) {
 	}}
 	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
 	for range 2 {
-		if err := w.ScanOnce(); err != nil {
+		if err := w.ScanOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -240,13 +241,13 @@ func TestWatcherIncrementalMarksSurviveTheWatermark(t *testing.T) {
 		},
 	}}
 	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
-	if err := w.ScanOnce(); err != nil {
+	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := drain(w.Events()); len(got) != 0 {
 		t.Fatalf("cycle 1: got %d events, want 0", len(got))
 	}
-	if err := w.ScanOnce(); err != nil {
+	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	got := drain(w.Events())
@@ -269,7 +270,7 @@ func TestWatcherMarksFeedIdleDetection(t *testing.T) {
 		endedAt: "2026-01-01T10:00:05Z", // EndedAt is older than the mark
 	}}}
 	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
-	if err := w.ScanOnce(); err != nil {
+	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	key := sessionKey("script", "/script/s5")
@@ -298,7 +299,7 @@ func TestWatcherMarkNewerThanLastEventStillCountsAsActivity(t *testing.T) {
 		endedAt: "2026-01-01T10:00:30Z",
 	}}}
 	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
-	if err := w.ScanOnce(); err != nil {
+	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	key := sessionKey("script", "/script/s6")

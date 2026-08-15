@@ -14,7 +14,7 @@ func TestClaudeCodeAgentIDAndSidechain(t *testing.T) {
 	adapter := ClaudeCodeAdapter{}
 
 	t.Run("Parse populates AgentID and IsSidechain", func(t *testing.T) {
-		_, _, meta, err := adapter.Parse(path)
+		_, _, meta, err := adapter.Parse(t.Context(), path)
 		if err != nil {
 			t.Fatalf("Parse failed: %v", err)
 		}
@@ -52,7 +52,7 @@ func TestClaudeCodeNoAgentIDOrSidechain(t *testing.T) {
 	path := filepath.Join("testdata", "claudecode_basic.jsonl")
 
 	t.Run("Parse leaves AgentID empty and IsSidechain false for top-level session", func(t *testing.T) {
-		_, _, meta, err := adapter.Parse(path)
+		_, _, meta, err := adapter.Parse(t.Context(), path)
 		if err != nil {
 			t.Fatalf("Parse failed: %v", err)
 		}
@@ -90,7 +90,7 @@ func TestClaudeCodeAgentIDWithoutSidechain(t *testing.T) {
 	adapter := ClaudeCodeAdapter{}
 
 	t.Run("Parse captures AgentID, IsSidechain stays false", func(t *testing.T) {
-		_, _, meta, err := adapter.Parse(path)
+		_, _, meta, err := adapter.Parse(t.Context(), path)
 		if err != nil {
 			t.Fatalf("Parse failed: %v", err)
 		}
@@ -115,7 +115,7 @@ func TestClaudeCodeAgentIDFirstOccurrenceWins(t *testing.T) {
 	adapter := ClaudeCodeAdapter{}
 
 	t.Run("Parse keeps first AgentID", func(t *testing.T) {
-		_, _, meta, err := adapter.Parse(path)
+		_, _, meta, err := adapter.Parse(t.Context(), path)
 		if err != nil {
 			t.Fatalf("Parse failed: %v", err)
 		}
@@ -157,7 +157,7 @@ func TestClaudeCodeSidechainNotListed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sessions, err := ClaudeCodeAdapter{Dir: dir}.ListSessions()
+	sessions, err := ClaudeCodeAdapter{Dir: dir}.ListSessions(t.Context())
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}

@@ -124,8 +124,8 @@ func (a OpenCodeAdapter) dbPath() string {
 // every session and pushes nothing down, so the two entry points cannot drift
 // on ordering, on the "a missing database is an empty result, not an error"
 // policy, or on anything else — see the CrushAdapter.ListSessions note.
-func (a OpenCodeAdapter) ListSessions() ([]SessionMeta, error) {
-	return a.ListSessionsFiltered(SessionFilter{})
+func (a OpenCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
+	return a.ListSessionsFiltered(ctx, SessionFilter{})
 }
 
 // ListSessionsFiltered implements FilteredLister, pushing the time bound into
@@ -136,7 +136,7 @@ func (a OpenCodeAdapter) ListSessions() ([]SessionMeta, error) {
 // nil so that they match the generic path in ListSessionsFiltered byte for
 // byte: filterSessions yields a non-nil empty slice under a non-zero filter,
 // which marshals as [] where nil marshals as null.
-func (a OpenCodeAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, error) {
+func (a OpenCodeAdapter) ListSessionsFiltered(ctx context.Context, f SessionFilter) ([]SessionMeta, error) {
 	dbPath := a.dbPath()
 	if dbPath == "" {
 		return filterSessions(nil, f), nil
@@ -146,7 +146,7 @@ func (a OpenCodeAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, e
 		return filterSessions(nil, f), nil
 	}
 	sinceMs, hasSince := sinceLowerBoundMs(f)
-	metas, err := a.listSessionsSince(db, dbPath, sinceMs, hasSince)
+	metas, err := a.listSessionsSince(ctx, db, dbPath, sinceMs, hasSince)
 	if err != nil {
 		return filterSessions(nil, f), nil
 	}
@@ -154,7 +154,7 @@ func (a OpenCodeAdapter) ListSessionsFiltered(f SessionFilter) ([]SessionMeta, e
 }
 
 func (a OpenCodeAdapter) listSessions(db *sql.DB, dbPath string) ([]SessionMeta, error) {
-	return a.listSessionsSince(db, dbPath, 0, false)
+	return a.listSessionsSince(context.Background(), db, dbPath, 0, false)
 }
 
 // listSessionsSince is listSessions with an optional epoch-millisecond lower
@@ -167,7 +167,7 @@ func (a OpenCodeAdapter) listSessions(db *sql.DB, dbPath string) ([]SessionMeta,
 // approximating that with SQL LIKE would risk disagreeing with cwdMatches on
 // trailing separators or "." elements — the cheap win is not worth a pushdown
 // that can diverge from the exact predicate.
-func (a OpenCodeAdapter) listSessionsSince(db *sql.DB, dbPath string, sinceMs int64, hasSince bool) ([]SessionMeta, error) {
+func (a OpenCodeAdapter) listSessionsSince(ctx context.Context, db *sql.DB, dbPath string, sinceMs int64, hasSince bool) ([]SessionMeta, error) {
 	// Composed rather than written out twice, so the column list exists once
 	// and a schema change cannot update one copy and leave the other to fail
 	// in rows.Scan (where the per-row `continue` would swallow it).
@@ -187,7 +187,7 @@ func (a OpenCodeAdapter) listSessionsSince(db *sql.DB, dbPath string, sinceMs in
 		args = append(args, sinceMs)
 	}
 	query += ` ORDER BY time_updated DESC, id DESC`
-	rows, err := db.QueryContext(context.Background(), query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +265,7 @@ func (a OpenCodeAdapter) Summarize(path string) (SessionMeta, error) {
 }
 
 // Parse reads a complete OpenCode session and returns classified events.
-func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+func (a OpenCodeAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return nil, nil, SessionMeta{}, fmt.Errorf("not an OpenCode session: %s", path)
@@ -279,12 +279,12 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 	var title, directory string
 	var parentID, model sql.NullString
 	var createdAt, updatedAt int64
-	err = db.QueryRowContext(context.Background(),
+	err = db.QueryRowContext(ctx,
 		`SELECT title, directory, parent_id, model, time_created, time_updated
 		 FROM session WHERE id = ?`, sessionID).
 		Scan(&title, &directory, &parentID, &model, &createdAt, &updatedAt)
 	if err != nil {
-		return nil, nil, SessionMeta{}, fmt.Errorf("session not found: %s", sessionID)
+		return nil, nil, SessionMeta{}, fmt.Errorf("reading opencode session %s: %w", sessionID, err)
 	}
 
 	var modelStr string
@@ -316,7 +316,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 	// Read parts ordered by message time then part insertion.
 	// OpenCode stores tool calls and results in a single ToolPart whose
 	// state progresses: pending → running → completed/error.
-	rows, err := db.QueryContext(context.Background(),
+	rows, err := db.QueryContext(ctx,
 		`SELECT p.data, p.time_created
 		 FROM part p
 		 JOIN message m ON p.message_id = m.id
@@ -431,7 +431,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 	// forever and never emitted. markSeqAt puts each mark back where it
 	// belongs in the event timeline, matching what the Crush and Claude Code
 	// adapters get for free by building marks and events in one pass.
-	msgRows, err := db.QueryContext(context.Background(),
+	msgRows, err := db.QueryContext(ctx,
 		`SELECT data, time_created FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user'
 		 ORDER BY time_created`, sessionID)
 	if err == nil {
