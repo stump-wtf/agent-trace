@@ -106,6 +106,9 @@ func (a CrushAdapter) graphNodes(dbPath string) ([]AgentNode, error) {
 		}
 		nodes = append(nodes, node)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing crush sessions for the agent graph: %w", err)
+	}
 	return nodes, nil
 }
 
@@ -288,6 +291,9 @@ func (a CrushAdapter) listDBSessionsSince(dbPath, cwd string, sinceMs int64, has
 		}
 		metas = append(metas, meta)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scanning sessions in %s: %w", dbPath, err)
+	}
 	return metas, nil
 }
 
@@ -458,6 +464,9 @@ func (a CrushAdapter) Parse(path string) ([]classify.Event, []classify.Mark, Ses
 				seq++
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, meta, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
 	}
 
 	// Flush orphaned tool calls.
@@ -636,6 +645,14 @@ func (a CrushAdapter) ParseSince(path string, watermark int64, startSeq int) ([]
 	// two clocks: the session row is touched after its messages are inserted,
 	// so the next poll's `created_at > watermark` skips any message written in
 	// the gap between them, and skips it permanently.
+	//
+	// An iteration error is returned rather than swallowed: truncating here
+	// would advance nothing — the watcher only stores newWatermark on success —
+	// but a partial slice handed back as success would emit a subset of the
+	// session's events and marks as though it were the whole truth.
+	if err := rows.Err(); err != nil {
+		return nil, nil, meta, watermark, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
+	}
 	return events[:safeEvents], marks[:safeMarks], meta, safeWatermark, nil
 }
 

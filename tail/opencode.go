@@ -85,6 +85,9 @@ func (a OpenCodeAdapter) AgentGraph() (*AgentGraph, error) {
 			graph.Children[node.ParentID] = append(graph.Children[node.ParentID], node)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing opencode sessions for the agent graph: %w", err)
+	}
 	return graph, nil
 }
 
@@ -232,6 +235,9 @@ func (a OpenCodeAdapter) listSessionsSince(db *sql.DB, dbPath string, sinceMs in
 			}
 		}
 		metas = append(metas, meta)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scanning sessions in %s: %w", dbPath, err)
 	}
 	return metas, nil
 }
@@ -404,6 +410,9 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 			})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, meta, fmt.Errorf("reading parts for session %s: %w", sessionID, err)
+	}
 
 	// Read user messages separately for marks.
 	msgRows, err := db.QueryContext(context.Background(),
@@ -433,6 +442,14 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 					Note:      strutil.TruncateRunes(text, 2000, "…"),
 				})
 			}
+		}
+		// A mid-iteration failure here means the marks collected so far are a
+		// prefix, not the session's turn boundaries. Returning it as success
+		// would hand consumers a trace with fabricated turn structure, so the
+		// error propagates even though this pass is "only" for marks.
+		if err := msgRows.Err(); err != nil {
+			_ = msgRows.Close()
+			return nil, nil, meta, fmt.Errorf("reading user messages for session %s: %w", sessionID, err)
 		}
 		_ = msgRows.Close()
 	}
