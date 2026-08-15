@@ -334,6 +334,12 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := 0
+	// eventTimes[i] is the raw time_created of the part that produced event i,
+	// kept in seq order so the user-message pass below can place its marks in
+	// the event timeline. Raw integers, not the rendered RFC 3339 strings:
+	// RFC3339Nano drops trailing fractional zeros, so string comparison
+	// misorders a whole second against a fractional one.
+	var eventTimes []int64
 
 	for rows.Next() {
 		var dataJSON string
@@ -392,6 +398,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 			}
 
 			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
+			eventTimes = append(eventTimes, timeCreated)
 			seq++
 
 		case "compaction":
@@ -415,6 +422,15 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 	}
 
 	// Read user messages separately for marks.
+	//
+	// These marks are collected in a second pass, so they cannot take `seq`
+	// the way the inline compaction/subtask marks above do: by this point seq
+	// has run past every event, and a mark numbered beyond the last event is
+	// unreachable. The watcher delivers a mark by attaching it to the first
+	// event whose seq is at or after the mark's, so such a mark is parked
+	// forever and never emitted. markSeqAt puts each mark back where it
+	// belongs in the event timeline, matching what the Crush and Claude Code
+	// adapters get for free by building marks and events in one pass.
 	msgRows, err := db.QueryContext(context.Background(),
 		`SELECT data, time_created FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user'
 		 ORDER BY time_created`, sessionID)
@@ -436,7 +452,7 @@ func (a OpenCodeAdapter) Parse(path string) ([]classify.Event, []classify.Mark, 
 			text := classify.ContentToString(msg.Content)
 			if text != "" && !injectedUserMessage(text) {
 				marks = append(marks, classify.Mark{
-					Seq:       seq,
+					Seq:       markSeqAt(eventTimes, timeCreated),
 					Timestamp: ts,
 					Type:      "user-message",
 					Note:      strutil.TruncateRunes(text, 2000, "…"),
@@ -505,4 +521,19 @@ func msToRFC3339(ms int64) string {
 	}
 	t := time.UnixMilli(ms).UTC()
 	return t.Format(time.RFC3339Nano)
+}
+
+// markSeqAt returns the seq a mark at time t should carry: the seq of the
+// first event at or after it, which is the count of events strictly before
+// it. eventTimes must be ascending in seq order, which it is — the parts
+// query orders by message time then part time.
+//
+// The three cases match the inline-mark semantics of the other adapters. A
+// mark before every event gets 0 and rides the first one. A mark between two
+// events gets the later one's seq and rides that. A mark after every event
+// gets len(eventTimes), one past the last event, and is parked until the
+// session produces its next event — the correct behaviour for a session
+// whose most recent activity is the user's turn.
+func markSeqAt(eventTimes []int64, t int64) int {
+	return sort.Search(len(eventTimes), func(i int) bool { return eventTimes[i] >= t })
 }

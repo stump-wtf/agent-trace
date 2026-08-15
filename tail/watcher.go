@@ -17,10 +17,12 @@ type Watcher struct {
 	cfg          WatchConfig
 	adapters     []Adapter
 	events       chan Event
-	lastActivity map[string]time.Time // session key → last event time from session data
-	lastEmitted  map[string]int       // session key → highest event seq emitted
-	fileState    map[string]string    // session key → last known EndedAt (change detection)
-	parseState   map[string]int64     // session key → incremental parse watermark (byte offset or native timestamp unit)
+	lastActivity map[string]time.Time       // session key → last event time from session data
+	lastEmitted  map[string]int             // session key → highest event seq emitted
+	lastMark     map[string]int             // session key → highest mark seq emitted
+	pendingMarks map[string][]classify.Mark // session key → marks awaiting an event to ride on
+	fileState    map[string]string          // session key → last known EndedAt (change detection)
+	parseState   map[string]int64           // session key → incremental parse watermark (byte offset or native timestamp unit)
 	mu           sync.Mutex
 	done         chan struct{}
 	stopOnce     sync.Once
@@ -220,6 +222,8 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 		events:       make(chan Event, 256),
 		lastActivity: make(map[string]time.Time),
 		lastEmitted:  make(map[string]int),
+		lastMark:     make(map[string]int),
+		pendingMarks: make(map[string][]classify.Mark),
 		fileState:    make(map[string]string),
 		parseState:   make(map[string]int64),
 		done:         make(chan struct{}),
@@ -327,10 +331,14 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 	prevEndedAt := w.fileState[meta.Key]
 	w.fileState[meta.Key] = meta.EndedAt
 	lastSeq := w.lastEmitted[meta.Key]
+	lastMark := w.lastMark[meta.Key]
 	watermark := w.parseState[meta.Key]
 	firstScan := prevEndedAt == ""
 	if lastSeq == 0 && firstScan {
 		lastSeq = -1 // first scan: emit everything including seq 0
+	}
+	if lastMark == 0 && firstScan {
+		lastMark = -1 // and the same for marks, which share the seq space
 	}
 	w.mu.Unlock()
 
@@ -357,6 +365,14 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 		if err != nil {
 			return
 		}
+		// A full parse re-derives every mark, so any parked marks from an
+		// earlier cycle come back in this result — keeping them parked as well
+		// would duplicate them. Only the incremental path carries marks forward
+		// across cycles, because ParseSince never repeats content it already
+		// returned.
+		w.mu.Lock()
+		delete(w.pendingMarks, meta.Key)
+		w.mu.Unlock()
 		// After a full parse, record the watermark for the next incremental
 		// scan. JSONL adapters use file size; SQLite adapters use the latest
 		// message timestamp. ParseSince on the next poll will use this.
@@ -369,17 +385,51 @@ func (w *Watcher) scanSession(a Adapter, meta SessionMeta) {
 	w.parseState[meta.Key] = newWatermark
 	w.mu.Unlock()
 
-	w.emitEvents(events, marks, meta, lastSeq)
+	w.emitEvents(events, marks, meta, lastSeq, lastMark)
 }
 
-// emitEvents sends new events and marks through the watcher's event channel,
-// updating lastEmitted and lastActivity. Events with seq <= lastSeq are
-// skipped (dedup). The caller must not hold w.mu.
-func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, meta SessionMeta, lastSeq int) {
+// emitEvents sends new events — each carrying any marks whose seq falls at
+// or before it and after the previous event — through the watcher's event
+// channel, updating lastEmitted, lastMark, and lastActivity. Events with seq
+// <= lastSeq are skipped (dedup), as are marks with seq <= lastMark.
+//
+// Marks with no event at-or-after their seq in this batch are parked in
+// pendingMarks and ride the next event the session produces, so a session
+// whose latest activity is a user message (a mark, not a tool call) still
+// delivers it once an event follows. Marks are activity too: their
+// timestamps feed lastActivity even while parked, because a session waiting
+// on its next tool call is not idle.
+//
+// The caller must not hold w.mu.
+func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, meta SessionMeta, lastSeq, lastMark int) {
 	now := time.Now()
 	lastEventTime := parseSessionTime(meta.EndedAt)
 
 	w.mu.Lock()
+	// Marks not yet emitted: the batch's own, plus any parked by an earlier
+	// cycle. Both are seq-ascending, and parked marks always predate this
+	// batch's content, so the concatenation stays sorted.
+	var newMarks []classify.Mark
+	for _, m := range w.pendingMarks[meta.Key] {
+		if m.Seq > lastMark {
+			newMarks = append(newMarks, m)
+		}
+	}
+	// Held separately rather than folded into lastEventTime here: the event
+	// loop below assigns lastEventTime outright, so a mark newer than the
+	// batch's last event would be overwritten and the session would look idle
+	// while it is in fact waiting on the user's turn.
+	var latestMarkTime time.Time
+	for _, m := range marks {
+		if m.Seq > lastMark {
+			newMarks = append(newMarks, m)
+		}
+		if t := parseSessionTime(m.Timestamp); !t.IsZero() && t.After(latestMarkTime) {
+			latestMarkTime = t
+		}
+	}
+	delete(w.pendingMarks, meta.Key)
+
 	for _, ev := range events {
 		if ev.Seq <= lastSeq {
 			continue
@@ -390,10 +440,21 @@ func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, met
 				lastEventTime = t
 			}
 		}
+		// Marks up to and including this event's seq ride it. Marks before the
+		// first new event ride that first event even if a strictly-later event
+		// exists in the batch — consumers reorder by seq (otel.BuildTrace does
+		// exactly that), so the ride is transport, not ordering.
+		var riding []classify.Mark
+		for len(newMarks) > 0 && newMarks[0].Seq <= ev.Seq {
+			riding = append(riding, newMarks[0])
+			lastMark = newMarks[0].Seq
+			newMarks = newMarks[1:]
+		}
 		select {
 		case w.events <- Event{
 			Session:    meta,
 			Classified: ev,
+			Marks:      riding,
 			ReceivedAt: now,
 		}:
 		case <-w.done:
@@ -401,13 +462,18 @@ func (w *Watcher) emitEvents(events []classify.Event, marks []classify.Mark, met
 			return
 		}
 	}
-	for _, m := range marks {
-		if m.Seq <= w.lastEmitted[meta.Key] {
-			continue
-		}
-		_ = m
+	// Whatever is left has no event to ride yet — park it for the next cycle.
+	if len(newMarks) > 0 {
+		w.pendingMarks[meta.Key] = append(w.pendingMarks[meta.Key], newMarks...)
+	}
+	// Applied after the event loop, so a mark newer than the last event still
+	// counts as activity. Marks are activity even while parked: a session
+	// waiting on its next tool call is not idle.
+	if latestMarkTime.After(lastEventTime) {
+		lastEventTime = latestMarkTime
 	}
 	w.lastEmitted[meta.Key] = lastSeq
+	w.lastMark[meta.Key] = lastMark
 	if !lastEventTime.IsZero() {
 		w.lastActivity[meta.Key] = lastEventTime
 	}
