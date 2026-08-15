@@ -1,0 +1,144 @@
+name: release
+
+# Releases are cut by pushing a version tag to Gitea. Never tag the GitHub
+# mirror directly: the push mirror prunes refs the source does not have, so a
+# tag created there is removed on the next sync. Pushing here reaches GitHub
+# within seconds, which is what makes `go get` resolve the version — the module
+# path is github.com/stump-wtf/agent-trace.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # A tag must not ship if the code it names is broken. This repeats the PR
+  # checks on the tagged commit rather than trusting that main was green when
+  # the tag was cut, because a tag can name any commit.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: check
+        run: make check
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive version and release notes
+        id: notes
+        env:
+          TAG_REF: ${{ gitea.ref }}
+        run: |
+          set -euo pipefail
+          version="${TAG_REF#refs/tags/}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # The notes are the CHANGELOG section for this version: everything
+          # between its heading and the next one. Extracted rather than
+          # hand-written so the release page and the file cannot disagree.
+          semver="${version#v}"
+          awk -v want="$semver" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "[" want "]") > 0) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > /tmp/notes.md
+
+          if [ ! -s /tmp/notes.md ]; then
+            echo "::error::no CHANGELOG.md section found for $version — add one before tagging"
+            exit 1
+          fi
+          echo "Release notes for $version:"
+          cat /tmp/notes.md
+
+      - name: Create the Gitea release
+        env:
+          # The per-run token Gitea injects; scoped to this repo by contents: write.
+          TOKEN: ${{ secrets.GITEA_TOKEN }}
+          VERSION: ${{ steps.notes.outputs.version }}
+          SERVER_URL: ${{ gitea.server_url }}
+          REPO: ${{ gitea.repository }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg tag "$VERSION" \
+            --arg name "$VERSION" \
+            --rawfile body /tmp/notes.md \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}' \
+            > /tmp/payload.json
+
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: token $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data @/tmp/payload.json \
+            "${SERVER_URL}/api/v1/repos/${REPO}/releases")
+
+          if [ "$code" != "201" ]; then
+            echo "::error::creating the Gitea release failed with HTTP $code"
+            # The response can echo request context, so surface only the message.
+            jq -r '.message // "no message"' /tmp/resp.json || true
+            exit 1
+          fi
+          echo "Created Gitea release $VERSION"
+
+      # The push mirror replicates git refs, not release objects, so the
+      # GitHub release page stays empty unless it is created explicitly. This
+      # is cosmetic for Go consumers — `go get` needs only the tag, which the
+      # mirror already carried — so a missing token skips the step instead of
+      # failing a release that has otherwise succeeded.
+      - name: Mirror the release to GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+          VERSION: ${{ steps.notes.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::GH_MIRROR_TOKEN not set — skipping the GitHub release."
+            echo "The tag itself reached GitHub via the push mirror, so 'go get ${VERSION}' works regardless."
+            exit 0
+          fi
+
+          for attempt in 1 2 3 4 5 6; do
+            if curl -sSf -H "Authorization: Bearer $GH_TOKEN" \
+                 "https://api.github.com/repos/stump-wtf/agent-trace/git/ref/tags/${VERSION}" \
+                 >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for the push mirror to carry ${VERSION} to GitHub (attempt $attempt)..."
+            sleep 10
+          done
+
+          jq -n \
+            --arg tag "$VERSION" \
+            --arg name "$VERSION" \
+            --rawfile body /tmp/notes.md \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}' \
+            > /tmp/gh_payload.json
+
+          code=$(curl -sS -o /tmp/gh_resp.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            --data @/tmp/gh_payload.json \
+            "https://api.github.com/repos/stump-wtf/agent-trace/releases")
+
+          if [ "$code" != "201" ]; then
+            echo "::warning::creating the GitHub release failed with HTTP $code — the tag is still published."
+            jq -r '.message // "no message"' /tmp/gh_resp.json || true
+            exit 0
+          fi
+          echo "Mirrored release $VERSION to GitHub"
