@@ -573,13 +573,31 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	var marks []classify.Mark
 	seq := startSeq
 	pendingCalls := map[string]classify.ToolCall{}
+	// callTimes remembers the created_at of each still-unresolved call, so
+	// the safe point can be kept strictly below it.
+	callTimes := map[string]int64{}
 
-	// Watermark and result counts as of the last message that left no tool call
-	// outstanding. A Crush tool_call and its tool_result are separate message
-	// rows written seconds apart, so without this the poll that sees the call
-	// advances past it and the next poll drops the orphaned result — see the
-	// ClaudeCodeAdapter.ParseSince note for the full shape of that failure.
-	safeWatermark, safeEvents, safeMarks := watermark, 0, 0
+	// Watermark and result counts as of the last message that left no tool
+	// call outstanding. A Crush tool_call and its tool_result are separate
+	// message rows written seconds apart, so without this the poll that sees
+	// the call advances past it and the next poll drops the orphaned result —
+	// see the ClaudeCodeAdapter.ParseSince note for the full shape of that
+	// failure.
+	//
+	// Safe points are a stack, not three scalars, because of timestamp ties.
+	// messages.created_at has second resolution, so a resolved call and a
+	// still-open call routinely share a timestamp. A safe point AT that
+	// shared second would put the watermark equal to the open call's time,
+	// and the next poll's strict `created_at > watermark` would then exclude
+	// that call — and the result that eventually lands for it — forever. The
+	// stack is rolled back to the last point strictly below the earliest
+	// unresolved call before returning.
+	type crushSafePoint struct {
+		t      int64
+		events int
+		marks  int
+	}
+	safe := []crushSafePoint{{watermark, 0, 0}}
 
 	for rows.Next() {
 		var msgID, role, partsJSON string
@@ -632,6 +650,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 					Timestamp: ts,
 				}
 				pendingCalls[callID] = call
+				callTimes[callID] = msgCreatedAt
 			case "tool_result":
 				callID := part.Data.ToolCallID
 				call, ok := pendingCalls[callID]
@@ -639,13 +658,14 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 					continue
 				}
 				delete(pendingCalls, callID)
+				delete(callTimes, callID)
 				result := classify.ToolResult{Content: part.Data.Content}
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
 				seq++
 			}
 		}
 		if len(pendingCalls) == 0 {
-			safeWatermark, safeEvents, safeMarks = msgCreatedAt, len(events), len(marks)
+			safe = append(safe, crushSafePoint{msgCreatedAt, len(events), len(marks)})
 		}
 	}
 
@@ -662,7 +682,19 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	if err := rows.Err(); err != nil {
 		return nil, nil, meta, watermark, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
 	}
-	return events[:safeEvents], marks[:safeMarks], meta, safeWatermark, nil
+	if len(callTimes) > 0 {
+		earliest := int64(0)
+		for _, t := range callTimes {
+			if earliest == 0 || t < earliest {
+				earliest = t
+			}
+		}
+		for len(safe) > 1 && safe[len(safe)-1].t >= earliest {
+			safe = safe[:len(safe)-1]
+		}
+	}
+	sp := safe[len(safe)-1]
+	return events[:sp.events], marks[:sp.marks], meta, sp.t, nil
 }
 
 type crushPart struct {
