@@ -490,6 +490,302 @@ func (a OpenCodeAdapter) Parse(ctx context.Context, path string) ([]classify.Eve
 	return events, marks, meta, nil
 }
 
+// Watermark returns the latest part or message timestamp for the session, in
+// the unit time_created natively stores (Unix milliseconds for OpenCode), for
+// use as an incremental watermark.
+//
+// Both tables contribute: ParseSince filters its user-message pass on the
+// same value, so a watermark that ignored message rows would re-read the
+// trailing user message of every conversational turn on the next poll and
+// re-derive its mark at a fresh seq — a duplicate.
+func (a OpenCodeAdapter) Watermark(ctx context.Context, path string) int64 {
+	dbPath, sessionID := splitDBSessionPath(path)
+	if dbPath == "" {
+		return 0
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return 0
+	}
+	var maxTS sql.NullInt64
+	err = db.QueryRowContext(ctx,
+		`SELECT MAX(t) FROM (
+			SELECT MAX(time_created) AS t FROM part WHERE session_id = ?
+			UNION ALL
+			SELECT MAX(time_created) AS t FROM message WHERE session_id = ?
+		)`, sessionID, sessionID).Scan(&maxTS)
+	if err != nil || !maxTS.Valid {
+		return 0
+	}
+	return maxTS.Int64
+}
+
+// ParseSince reads only parts and messages with time_created beyond the
+// watermark, returning events and marks with seq continuing from startSeq.
+//
+// OpenCode needs a different withhold rule than Crush. A Crush tool call and
+// its result are separate immutable rows; an OpenCode tool call is ONE part
+// row whose state mutates in place — pending → running → completed/error —
+// with time_updated bumped and time_created unchanged. Filtering on
+// time_created therefore sees a running tool exactly once, on the poll that
+// lands while it is still running, and would never see its completion. So a
+// tool part in a non-terminal state (pending or running) is treated as
+// outstanding: its event is withheld and the watermark refuses to advance
+// past it, which re-reads the row every poll until it turns terminal — at
+// which point it is emitted once, with its final result. Everything after
+// the first such part is withheld along with it, the same prefix-cut the
+// other adapters apply to an unresolved call.
+//
+// The watermark also must never equal the time_created of a withheld row:
+// the next poll filters on a strict `>`, so an equal value would exclude
+// that row forever. Safe points are recorded as the row is passed and rolled
+// back to the last one strictly below the earliest outstanding part.
+func (a OpenCodeAdapter) ParseSince(ctx context.Context, path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+	dbPath, sessionID := splitDBSessionPath(path)
+	if dbPath == "" {
+		return nil, nil, SessionMeta{}, 0, fmt.Errorf("not an OpenCode session: %s", path)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, err
+	}
+
+	// Get session metadata, as in Parse.
+	var title, directory string
+	var parentID, model sql.NullString
+	var createdAt, updatedAt int64
+	err = db.QueryRowContext(ctx,
+		`SELECT title, directory, parent_id, model, time_created, time_updated
+		 FROM session WHERE id = ?`, sessionID).
+		Scan(&title, &directory, &parentID, &model, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, fmt.Errorf("reading opencode session %s: %w", sessionID, err)
+	}
+
+	var modelStr string
+	if model.Valid {
+		var m struct {
+			ID         string `json:"id"`
+			ProviderID string `json:"providerID"`
+		}
+		if json.Unmarshal([]byte(model.String), &m) == nil && m.ID != "" {
+			modelStr = m.ID
+		}
+	}
+
+	meta := SessionMeta{
+		Key:       sessionKey(string(a.Harness()), dbPath+"/"+sessionID),
+		ID:        sessionID,
+		Harness:   a.Harness(),
+		Path:      dbPath + "/" + sessionID,
+		Cwd:       directory,
+		Model:     modelStr,
+		Title:     title,
+		StartedAt: msToRFC3339(createdAt),
+		EndedAt:   msToRFC3339(updatedAt),
+	}
+	if parentID.Valid && parentID.String != "" {
+		meta.Auxiliary = true
+	}
+	if meta.Title == "" {
+		if directory != "" {
+			meta.Title = filepath.Base(directory) + " — " + sessionID[:min(8, len(sessionID))]
+		} else {
+			meta.Title = sessionID
+		}
+	}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT p.data, p.time_created
+		 FROM part p
+		 JOIN message m ON p.message_id = m.id
+		 WHERE p.session_id = ? AND p.time_created > ?
+		 ORDER BY m.time_created, p.time_created`, sessionID, watermark)
+	if err != nil {
+		return nil, nil, meta, 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
+	var events []classify.Event
+	var marks []windowMark
+	var eventTimes []int64
+	seq := startSeq
+
+	// Safe points: (row time, events emitted so far), recorded after each row
+	// that left nothing outstanding, rolled back at the end to the last point
+	// strictly before the earliest outstanding part's time.
+	type opencodeSafePoint struct {
+		t      int64
+		events int
+	}
+	safe := []opencodeSafePoint{{watermark, 0}}
+	var outstandingAt int64
+	hasOutstanding := false
+
+	for rows.Next() {
+		var dataJSON string
+		var timeCreated int64
+		if err := rows.Scan(&dataJSON, &timeCreated); err != nil {
+			continue
+		}
+		ts := msToRFC3339(timeCreated)
+
+		var part opencodePart
+		if json.Unmarshal([]byte(dataJSON), &part) != nil {
+			continue
+		}
+
+		// Marks carry the row time that produced them so the withheld tail
+		// can be trimmed without re-parsing timestamps.
+		switch part.Type {
+		case "text":
+			// Role lives on the parent row; user messages are emitted from
+			// the message-table pass below.
+		case "tool":
+			if part.Tool == "" || part.CallID == "" {
+				continue
+			}
+			if part.State != nil && (part.State.Status == "pending" || part.State.Status == "running") {
+				// Outstanding: withheld until the row turns terminal.
+				if !hasOutstanding || timeCreated < outstandingAt {
+					outstandingAt, hasOutstanding = timeCreated, true
+				}
+				continue
+			}
+			input := map[string]any{}
+			if part.State != nil {
+				if part.State.Input != nil {
+					input = *part.State.Input
+				}
+				if part.State.Raw != "" {
+					var raw any
+					if json.Unmarshal([]byte(part.State.Raw), &raw) == nil {
+						if m, ok := raw.(map[string]any); ok {
+							input = m
+						}
+					}
+				}
+			}
+			call := classify.ToolCall{
+				ID:        part.CallID,
+				Name:      part.Tool,
+				Input:     input,
+				Timestamp: ts,
+			}
+
+			result := classify.ToolResult{}
+			if part.State != nil {
+				switch part.State.Status {
+				case "completed":
+					result.Content = part.State.Output
+				case "error":
+					result.Content = part.State.Error
+					result.IsError = true
+				}
+			}
+
+			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
+			eventTimes = append(eventTimes, timeCreated)
+			seq++
+
+		case "compaction":
+			marks = append(marks, windowMark{
+				mark: classify.Mark{Seq: seq, Timestamp: ts, Type: "compaction"},
+				t:    timeCreated,
+			})
+
+		case "subtask":
+			marks = append(marks, windowMark{
+				mark: classify.Mark{Seq: seq, Timestamp: ts, Type: "subagent", Note: part.Agent},
+				t:    timeCreated,
+			})
+		}
+		if !hasOutstanding {
+			safe = append(safe, opencodeSafePoint{timeCreated, len(events)})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, meta, watermark, fmt.Errorf("reading parts for session %s: %w", sessionID, err)
+	}
+	if hasOutstanding {
+		for len(safe) > 1 && safe[len(safe)-1].t >= outstandingAt {
+			safe = safe[:len(safe)-1]
+		}
+	}
+	safePoint := safe[len(safe)-1]
+
+	// User messages for marks, as in Parse: seq placed against the event
+	// timeline, not inline, because the two passes read different tables.
+	msgRows, err := db.QueryContext(ctx,
+		`SELECT data, time_created FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user' AND time_created > ?
+		 ORDER BY time_created`, sessionID, watermark)
+	if err == nil {
+		for msgRows.Next() {
+			var dataJSON string
+			var timeCreated int64
+			if err := msgRows.Scan(&dataJSON, &timeCreated); err != nil {
+				continue
+			}
+			ts := msToRFC3339(timeCreated)
+			var msg struct {
+				Role    string `json:"role"`
+				Content any    `json:"content"`
+			}
+			if json.Unmarshal([]byte(dataJSON), &msg) != nil {
+				continue
+			}
+			text := classify.ContentToString(msg.Content)
+			if text != "" && !injectedUserMessage(text) {
+				marks = append(marks, windowMark{
+					mark: classify.Mark{
+						Seq:       startSeq + markSeqAt(eventTimes, timeCreated),
+						Timestamp: ts,
+						Type:      "user-message",
+						Note:      strutil.TruncateRunes(text, 2000, "…"),
+					},
+					t: timeCreated,
+				})
+			}
+		}
+		if err := msgRows.Err(); err != nil {
+			_ = msgRows.Close()
+			return nil, nil, meta, watermark, fmt.Errorf("reading user messages for session %s: %w", sessionID, err)
+		}
+		_ = msgRows.Close()
+	}
+
+	// Trim to the safe prefix. Marks are kept by row time, not seq: a mark
+	// whose message the watermark has consumed (time <= the safe point) was
+	// accounted for here — emitted, or parked on the watcher's pending queue
+	// — and must not be re-derived; a mark beyond it rides the withheld tail
+	// and comes back with it next poll.
+	var safeMarks []classify.Mark
+	for _, wm := range marks {
+		if wm.t > safePoint.t {
+			continue
+		}
+		safeMarks = append(safeMarks, wm.mark)
+	}
+	sort.SliceStable(safeMarks, func(i, j int) bool {
+		return safeMarks[i].Timestamp < safeMarks[j].Timestamp
+	})
+
+	return events[:safePoint.events], safeMarks, meta, safePoint.t, nil
+}
+
+// windowMark pairs a mark with the storage timestamp of the row that produced
+// it, so an incremental window can trim its withheld tail by time — the raw
+// value the watermark compares against, which the rendered RFC 3339 string
+// cannot be compared by reliably.
+type windowMark struct {
+	mark classify.Mark
+	t    int64
+}
+
 // OpenCode part types (subset relevant to tracing).
 
 type opencodePart struct {

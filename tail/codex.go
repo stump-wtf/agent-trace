@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -370,6 +371,260 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 		return nil, nil, SessionMeta{}, fmt.Errorf("not a Codex session: %s", path)
 	}
 	return events, marks, meta, err
+}
+
+// Watermark returns the offset just past the last complete line, for use as
+// an incremental watermark. It is deliberately not the file size: see
+// readCompleteJSONLines for why a watermark must land on a record boundary.
+func (a CodexAdapter) Watermark(ctx context.Context, path string) int64 {
+	return jsonlCompleteOffset(path)
+}
+
+// codexSessionHeadCwd reads the session's opening record and returns the cwd
+// it declares. ParseSince starts mid-file, so it cannot see the session_meta
+// record — but cwd is the base every relative path in the session resolves
+// against (see sessionHeadCwd for the Claude Code twin of this argument).
+func codexSessionHeadCwd(path string) string {
+	line := jsonlFirstLine(path)
+	if line == nil {
+		return ""
+	}
+	var head codexRawLine
+	if json.Unmarshal(line, &head) != nil {
+		return ""
+	}
+	switch head.Type {
+	case "session_meta":
+		var payload codexSessionMeta
+		if json.Unmarshal(head.Payload, &payload) == nil {
+			return payload.Cwd
+		}
+	case "turn_context":
+		var payload codexTurnContext
+		if json.Unmarshal(head.Payload, &payload) == nil {
+			return payload.Cwd
+		}
+	}
+	return ""
+}
+
+// ParseSince reads only lines appended after the byte offset, returning
+// events and marks with seq continuing from startSeq. It follows the
+// ClaudeCodeAdapter.ParseSince contract: the watermark advances only to the
+// last record boundary at which no call was outstanding, and events and
+// marks past that point are withheld for the next poll.
+//
+// One Codex-specific refinement. An apply_patch issued through the custom
+// tool is enriched with its authoritative per-file change list from a
+// patch_apply_end event_msg — and in real transcripts that event lands on the
+// line AFTER the call's output (see testdata/codex_fidelity.jsonl). A poll
+// that ends on the output would therefore advance past the pair and emit the
+// event unenriched, where a full Parse of the same file enriches it. The
+// watermark consequently refuses to land on a line that just resolved a
+// direct patch call: the next line — the patch event, if one is coming — is
+// read into the same window.
+func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, err
+	}
+	// If the file shrank (truncation/rotation), reset to full parse.
+	if info.Size() < offset {
+		return nil, nil, SessionMeta{}, 0, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, err
+	}
+	defer func() { _ = f.Close() }()
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return nil, nil, SessionMeta{}, 0, err
+		}
+	}
+
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
+	calls := map[string]classify.ToolCall{}
+	results := map[string]classify.ToolResult{}
+	callOrder := []string{}
+	directPatches := map[string]bool{}
+	patchResults := map[string]codexEventMsg{}
+	var marks []classify.Mark
+	meta := SessionMeta{
+		Key:     sessionKey(string(a.Harness()), path),
+		ID:      strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+		Harness: a.Harness(),
+		Path:    path,
+		Cwd:     codexSessionHeadCwd(path),
+	}
+
+	// Watermark and result counts as of the last record that left no call
+	// outstanding — and no patch event pending — the point it is safe to
+	// resume from.
+	safeOffset, safeEvents, safeMarks := offset, 0, 0
+	// True when the line just processed resolved a direct patch call, making
+	// the next line the last place its patch_apply_end can appear.
+	patchCheckPending := false
+
+	err = readCompleteJSONLines(f, offset, func(data []byte, end int64) {
+		defer func() {
+			if len(calls) == len(results) && !patchCheckPending {
+				safeOffset, safeEvents, safeMarks = end, len(callOrder), len(marks)
+			}
+		}()
+
+		patchCheckPending = false
+		var line codexRawLine
+		if json.Unmarshal(data, &line) != nil {
+			return
+		}
+		if line.Timestamp != "" {
+			meta.EndedAt = line.Timestamp
+		}
+		switch line.Type {
+		case "session_meta":
+			var payload codexSessionMeta
+			if json.Unmarshal(line.Payload, &payload) == nil {
+				if payload.ID != "" {
+					meta.ID = payload.ID
+				}
+				if payload.Cwd != "" && meta.Cwd == "" {
+					meta.Cwd = payload.Cwd
+				}
+				if payload.Git.Branch != "" && meta.GitBranch == "" {
+					meta.GitBranch = payload.Git.Branch
+				}
+			}
+		case "turn_context":
+			var payload codexTurnContext
+			if json.Unmarshal(line.Payload, &payload) == nil {
+				if payload.Cwd != "" && meta.Cwd == "" {
+					meta.Cwd = payload.Cwd
+				}
+				if payload.Model != "" && meta.Model == "" {
+					meta.Model = payload.Model
+				}
+			}
+		case "response_item":
+			var payload codexResponseItem
+			if json.Unmarshal(line.Payload, &payload) != nil {
+				return
+			}
+			if callID, name, input, ok := decodeCodexCall(payload); ok {
+				if _, exists := calls[callID]; exists {
+					return
+				}
+				if name == "spawn_agent" {
+					marks = append(marks, classify.Mark{
+						Seq:       startSeq + len(callOrder),
+						Timestamp: line.Timestamp,
+						Type:      "subagent",
+						Note:      name,
+					})
+				}
+				calls[callID] = classify.ToolCall{
+					ID:        callID,
+					Name:      name,
+					Input:     input,
+					Timestamp: line.Timestamp,
+				}
+				callOrder = append(callOrder, callID)
+				directPatches[callID] = payload.Type == "custom_tool_call" && name == "apply_patch"
+				return
+			}
+			if callID, result, ok := decodeCodexOutput(payload); ok {
+				if _, exists := calls[callID]; !exists {
+					return
+				}
+				if _, exists := results[callID]; exists {
+					return
+				}
+				results[callID] = result
+				if directPatches[callID] {
+					patchCheckPending = true
+				}
+				return
+			}
+			if payload.Type == "message" && payload.Role == "user" && payload.Content.HasText() {
+				text := payload.Content.Text()
+				if !injectedUserMessage(text) {
+					marks = append(marks, classify.Mark{
+						Seq:       startSeq + len(callOrder),
+						Timestamp: line.Timestamp,
+						Type:      "user-message",
+						Note:      strutil.TruncateRunes(text, 2000, "…"),
+					})
+				}
+			}
+		case "message":
+			if line.Role == "" {
+				return
+			}
+			if line.Role == "user" && line.Content.HasText() {
+				text := line.Content.Text()
+				if !injectedUserMessage(text) {
+					marks = append(marks, classify.Mark{
+						Seq:       startSeq + len(callOrder),
+						Timestamp: line.Timestamp,
+						Type:      "user-message",
+						Note:      strutil.TruncateRunes(text, 2000, "…"),
+					})
+				}
+			}
+		case "event_msg":
+			var payload codexEventMsg
+			if json.Unmarshal(line.Payload, &payload) != nil {
+				return
+			}
+			if payload.Type == "context_compacted" {
+				marks = append(marks, classify.Mark{
+					Seq:       startSeq + len(callOrder),
+					Timestamp: line.Timestamp,
+					Type:      "compaction",
+				})
+			}
+			if payload.Type == "patch_apply_end" && payload.CallID != "" && directPatches[payload.CallID] {
+				if _, exists := patchResults[payload.CallID]; !exists {
+					patchResults[payload.CallID] = payload
+				}
+			}
+		case "":
+			if line.ID != "" {
+				meta.ID = line.ID
+			}
+		}
+	})
+
+	// Assemble events in call order, enriching apply_patch calls exactly as
+	// Parse does — same enrichment, same order, so an incrementally-read
+	// window is identical to the same lines read by a full Parse.
+	events := make([]classify.Event, 0, len(callOrder))
+	for _, callID := range callOrder {
+		result, ok := results[callID]
+		if !ok {
+			continue // unresolved: withheld, re-read from the last safe offset
+		}
+		call := calls[callID]
+		if patchResult, ok := patchResults[callID]; ok {
+			call.Input = applyPatchChanges(call.Input, patchResult.Changes)
+			if patchResult.Success != nil {
+				result.IsError = !*patchResult.Success
+			}
+		}
+		events = append(events, classify.BuildEventWith(opts, startSeq+len(events), meta.Cwd, call, result))
+	}
+
+	if meta.Title == "" {
+		meta.Title = a.titleFor(meta.ID)
+	}
+	if meta.Title == "" {
+		meta.Title = filepath.Base(path)
+	}
+
+	return events[:safeEvents], marks[:safeMarks], meta, safeOffset, err
 }
 
 // Codex-specific types.

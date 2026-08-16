@@ -20,6 +20,16 @@ breaking changes arrive in minor releases. See the note under
   three JSONL adapters implement `FilteredLister` and skip an excluded file on
   its mtime without opening it; `filterSessions` still applies the exact
   predicate afterwards, so the pushdown can only ever over-select.
+- Incremental parsing for the remaining three adapters (#62). Codex and Pi join
+  Claude Code on byte-offset watermarks; OpenCode joins Crush on timestamp
+  watermarks (milliseconds, per its schema). Two harness-specific behaviours:
+  a Pi branch — an edited turn re-linearizes the append-only tree — is detected
+  and falls back to a full parse trimmed to the seq the watcher already emitted,
+  and an OpenCode tool part is withheld until its row turns terminal, because
+  OpenCode stores the call and its result as one row that mutates in place.
+  Codex additionally holds its watermark for one line after an apply_patch
+  output, so the patch_apply_end that enriches it is read into the same window
+  a full Parse would have used.
 
 ### Changed
 
@@ -46,6 +56,14 @@ breaking changes arrive in minor releases. See the note under
   OpenCode call — and `Summarize` sits on the hot path of every JSONL listing.
   The JSONL adapters check the context before opening the file; one file's read
   still runs to completion, per the Adapter cancellation contract.
+
+### Fixed
+
+- An incremental watermark could land ON the timestamp of a withheld row, and
+  the next poll's strict `>` filter then excluded that row forever (#62). Crush
+  could hit this whenever a resolved and an unresolved call shared a second —
+  routine at its schema's second resolution. Safe points are now kept strictly
+  below the earliest outstanding row's timestamp.
 
 ## [0.1.0] - 2026-08-15
 
