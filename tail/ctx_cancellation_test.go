@@ -137,3 +137,97 @@ func TestJSONLListSessionsHonorsContextCancellation(t *testing.T) {
 		})
 	}
 }
+
+// Summarize and AgentGraph were the two entry points left on
+// context.Background() when the Adapter methods gained their context
+// parameters (#72). Summarize sits on the hot path of every JSONL listing —
+// ListSessions calls it once per file — and the SQLite pair run a real query
+// per call, so a cancelled caller has to reach them too.
+func TestSummarizeHonorsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	crushDB := filepath.Join(t.TempDir(), "crush.db")
+	createTestCrushDB(t, crushDB)
+	insertCrushSessionWithMessage(t, crushDB, "sess-ctx")
+
+	openCodeDB := filepath.Join(t.TempDir(), "opencode.db")
+	createOpenCodeSession(t, openCodeDB, "ses_ctx_1")
+
+	jsonlDir := t.TempDir()
+	jsonlFile := filepath.Join(jsonlDir, "a.jsonl")
+	if err := os.WriteFile(jsonlFile, []byte(`{"type":"user","timestamp":"2026-01-01T10:00:00Z","message":{"role":"user","content":"hi"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		adapter Adapter
+		path    string
+	}{
+		{"crush", CrushAdapter{DBPath: crushDB, Cwd: "/test"}, crushDB + "/sess-ctx"},
+		{"opencode", OpenCodeAdapter{DBPath: openCodeDB}, openCodeDB + "/ses_ctx_1"},
+		{"claudecode", ClaudeCodeAdapter{Dir: jsonlDir}, jsonlFile},
+		{"codex", CodexAdapter{Dir: jsonlDir}, jsonlFile},
+		{"pi", PiAdapter{Dir: jsonlDir}, jsonlFile},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Summarize is a concrete-type method, not part of Adapter; the
+			// table carries Adapter for symmetry, so the assertion needs the
+			// concrete type back. Every adapter in this table is one of the
+			// five, and the default case failing the test is the point.
+			var meta SessionMeta
+			var err error
+			switch a := tc.adapter.(type) {
+			case CrushAdapter:
+				meta, err = a.Summarize(ctx, tc.path)
+			case OpenCodeAdapter:
+				meta, err = a.Summarize(ctx, tc.path)
+			case ClaudeCodeAdapter:
+				meta, err = a.Summarize(ctx, tc.path)
+			case CodexAdapter:
+				meta, err = a.Summarize(ctx, tc.path)
+			case PiAdapter:
+				meta, err = a.Summarize(ctx, tc.path)
+			default:
+				t.Fatalf("unhandled adapter type %T", tc.adapter)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Summarize with cancelled context: err = %v, want context.Canceled", err)
+			}
+			if meta != (SessionMeta{}) {
+				t.Errorf("Summarize returned %+v alongside the cancellation, want the zero meta", meta)
+			}
+		})
+	}
+}
+
+func TestAgentGraphHonorsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	crushDB := filepath.Join(t.TempDir(), "crush.db")
+	createTestCrushDB(t, crushDB)
+	insertCrushSessionWithMessage(t, crushDB, "sess-ctx")
+
+	openCodeDB := filepath.Join(t.TempDir(), "opencode.db")
+	createOpenCodeSession(t, openCodeDB, "ses_ctx_1")
+
+	for _, tc := range []struct {
+		name    string
+		builder AgentGraphBuilder
+	}{
+		{"crush", CrushAdapter{DBPath: crushDB, Cwd: "/test"}},
+		{"opencode", OpenCodeAdapter{DBPath: openCodeDB}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			graph, err := tc.builder.AgentGraph(ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("AgentGraph with cancelled context: err = %v, want context.Canceled", err)
+			}
+			if graph != nil {
+				t.Errorf("AgentGraph returned %+v alongside the cancellation, want nil", graph)
+			}
+		})
+	}
+}

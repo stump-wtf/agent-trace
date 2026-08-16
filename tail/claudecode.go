@@ -80,7 +80,7 @@ func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, err
 		if filepath.Ext(path) != ".jsonl" || strings.HasPrefix(filepath.Base(path), "agent-") {
 			return nil
 		}
-		meta, err := a.Summarize(path)
+		meta, err := a.Summarize(ctx, path)
 		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}
@@ -96,8 +96,13 @@ func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, err
 }
 
 // Summarize reads just enough of a session file to extract metadata without
-// parsing every event.
-func (a ClaudeCodeAdapter) Summarize(path string) (SessionMeta, error) {
+// parsing every event. The context is checked before the file is opened; the
+// read itself runs to completion, bounded by that file's size, per the
+// Adapter cancellation contract.
+func (a ClaudeCodeAdapter) Summarize(ctx context.Context, path string) (SessionMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionMeta{}, err
+	}
 	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
 		return SessionMeta{}, err

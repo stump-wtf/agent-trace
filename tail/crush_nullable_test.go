@@ -1,7 +1,6 @@
 package tail
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -45,12 +44,12 @@ func TestCrushListsTopLevelSessionsWithNullParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(t.Context(),
 		`INSERT INTO sessions (id, parent_session_id, title, created_at, updated_at)
 		 VALUES ('toplevel-0001', NULL, 'top', 1000, 1000)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(t.Context(),
 		`INSERT INTO sessions (id, parent_session_id, title, created_at, updated_at)
 		 VALUES ('child-0001', 'toplevel-0001', 'child', 2000, 2000)`); err != nil {
 		t.Fatal(err)
@@ -86,12 +85,12 @@ func TestCrushParseAndSummarizeResolveCwdFromProjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(t.Context(),
 		`INSERT INTO sessions (id, parent_session_id, title, created_at, updated_at)
 		 VALUES ('s1', NULL, 'top', 1000, 1000)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(t.Context(),
 		`INSERT INTO messages (id, session_id, role, parts, model, created_at, updated_at)
 		 VALUES ('m1','s1','assistant','[]','sonnet',1000,1000)`); err != nil {
 		t.Fatal(err)
@@ -111,7 +110,7 @@ func TestCrushParseAndSummarizeResolveCwdFromProjects(t *testing.T) {
 	if meta.Cwd != cwd {
 		t.Errorf("Parse cwd = %q, want %q", meta.Cwd, cwd)
 	}
-	sum, err := a.Summarize(dbPath + "/s1")
+	sum, err := a.Summarize(t.Context(), dbPath+"/s1")
 	if err != nil {
 		t.Fatalf("Summarize: %v", err)
 	}
@@ -129,18 +128,18 @@ func TestCrushParseKeepsMessagesWithNullModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(t.Context(),
 		`INSERT INTO sessions (id, parent_session_id, title, created_at, updated_at)
 		 VALUES ('s1', NULL, 't', 1000, 1000)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(t.Context(),
 		`INSERT INTO messages (id, session_id, role, parts, model, created_at, updated_at)
 		 VALUES ('m1','s1','user',?,NULL,1000,1000)`,
 		`[{"type":"text","data":{"text":"please run the tests"}}]`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(t.Context(),
 		`INSERT INTO messages (id, session_id, role, parts, model, created_at, updated_at)
 		 VALUES ('m2','s1','assistant',?,'sonnet',2000,2000)`,
 		`[{"type":"tool_call","data":{"id":"c1","name":"bash","input":"{}"}},

@@ -121,7 +121,7 @@ func TestCrushAgentGraphPropagatesIterationError(t *testing.T) {
 	// project database as contributing nothing to the tree, so the error is
 	// observable here rather than through the public method.
 	a := CrushAdapter{DBPath: dbPath}
-	if _, err := a.graphNodes(dbPath); err == nil {
+	if _, err := a.graphNodes(t.Context(), dbPath); err == nil {
 		t.Fatal("expected a mid-iteration failure to propagate as an error, got nil")
 	}
 }

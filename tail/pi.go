@@ -77,7 +77,7 @@ func (a PiAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
 		}
-		meta, err := a.Summarize(path)
+		meta, err := a.Summarize(ctx, path)
 		if err == nil {
 			metas = append(metas, meta)
 		}
@@ -92,8 +92,13 @@ func (a PiAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	return metas, nil
 }
 
-// Summarize extracts metadata from a Pi session file.
-func (a PiAdapter) Summarize(path string) (SessionMeta, error) {
+// Summarize extracts metadata from a Pi session file. The context is checked
+// before the file is opened; the read itself runs to completion, bounded by
+// that file's size, per the Adapter cancellation contract.
+func (a PiAdapter) Summarize(ctx context.Context, path string) (SessionMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionMeta{}, err
+	}
 	header, entries, recognized, err := readPiSession(path)
 	if err != nil && !recognized {
 		return SessionMeta{}, err

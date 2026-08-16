@@ -166,7 +166,7 @@ func TestPiSummarize(t *testing.T) {
 		`{"type":"session","id":"s1","timestamp":"2026-01-01T10:00:00Z","cwd":"/home/user/project"}`+"\n"+
 			`{"type":"session_info","id":"si1","parentId":"s1","name":"my session"}`+"\n")
 	adapter := PiAdapter{}
-	meta, err := adapter.Summarize(path)
+	meta, err := adapter.Summarize(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Summarize failed: %v", err)
 	}

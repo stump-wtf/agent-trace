@@ -30,7 +30,7 @@ func TestClaudeCodeAgentIDAndSidechain(t *testing.T) {
 	})
 
 	t.Run("Summarize populates AgentID and IsSidechain", func(t *testing.T) {
-		meta, err := adapter.Summarize(path)
+		meta, err := adapter.Summarize(t.Context(), path)
 		if err != nil {
 			t.Fatalf("Summarize failed: %v", err)
 		}
@@ -68,7 +68,7 @@ func TestClaudeCodeNoAgentIDOrSidechain(t *testing.T) {
 	})
 
 	t.Run("Summarize leaves AgentID empty and IsSidechain false for top-level session", func(t *testing.T) {
-		meta, err := adapter.Summarize(path)
+		meta, err := adapter.Summarize(t.Context(), path)
 		if err != nil {
 			t.Fatalf("Summarize failed: %v", err)
 		}
@@ -125,7 +125,7 @@ func TestClaudeCodeAgentIDFirstOccurrenceWins(t *testing.T) {
 	})
 
 	t.Run("Summarize keeps first AgentID", func(t *testing.T) {
-		meta, err := adapter.Summarize(path)
+		meta, err := adapter.Summarize(t.Context(), path)
 		if err != nil {
 			t.Fatalf("Summarize failed: %v", err)
 		}
@@ -171,7 +171,7 @@ func TestClaudeCodeSidechainNotListed(t *testing.T) {
 	}
 
 	// The field is still reachable directly, which is the supported path.
-	meta, err := ClaudeCodeAdapter{}.Summarize(sidechain)
+	meta, err := ClaudeCodeAdapter{}.Summarize(t.Context(), sidechain)
 	if err != nil {
 		t.Fatalf("Summarize failed: %v", err)
 	}

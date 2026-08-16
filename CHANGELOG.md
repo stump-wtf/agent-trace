@@ -11,6 +11,15 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Changed
+
+- `Summarize` and `AgentGraphBuilder.AgentGraph` take a `context.Context` (#72),
+  closing the gap #67 left open. Both opened `context.Background()`, so a
+  cancelled caller still waited on the SQLite query behind every Crush and
+  OpenCode call — and `Summarize` sits on the hot path of every JSONL listing.
+  The JSONL adapters check the context before opening the file; one file's read
+  still runs to completion, per the Adapter cancellation contract.
+
 ## [0.1.0] - 2026-08-15
 
 First tagged release. The library was extracted from `mindwalk` on 2026-08-09 and

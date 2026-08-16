@@ -105,7 +105,7 @@ not valid json
 func TestClaudeCodeSummarize(t *testing.T) {
 	adapter := ClaudeCodeAdapter{Dir: "testdata"}
 	path := filepath.Join("testdata", "claudecode_basic.jsonl")
-	meta, err := adapter.Summarize(path)
+	meta, err := adapter.Summarize(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Summarize failed: %v", err)
 	}

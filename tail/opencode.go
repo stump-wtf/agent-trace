@@ -47,7 +47,10 @@ func (a OpenCodeAdapter) Diagnostics() []DiagnosticCheck {
 // AgentGraph builds a parent-child tree of all sessions (including subagent
 // sessions excluded from ListSessions). Queries parent_id from the session
 // table and links children to their parents.
-func (a OpenCodeAdapter) AgentGraph() (*AgentGraph, error) {
+func (a OpenCodeAdapter) AgentGraph(ctx context.Context) (*AgentGraph, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dbPath := a.dbPath()
 	if dbPath == "" {
 		return &AgentGraph{Children: map[string][]AgentNode{}}, nil
@@ -56,7 +59,7 @@ func (a OpenCodeAdapter) AgentGraph() (*AgentGraph, error) {
 	if err != nil {
 		return &AgentGraph{Children: map[string][]AgentNode{}}, nil
 	}
-	rows, err := db.QueryContext(context.Background(),
+	rows, err := db.QueryContext(ctx,
 		`SELECT id, parent_id, title, time_created FROM session ORDER BY time_created`)
 	if err != nil {
 		return &AgentGraph{Children: map[string][]AgentNode{}}, nil
@@ -153,8 +156,8 @@ func (a OpenCodeAdapter) ListSessionsFiltered(ctx context.Context, f SessionFilt
 	return filterSessions(metas, f), nil
 }
 
-func (a OpenCodeAdapter) listSessions(db *sql.DB, dbPath string) ([]SessionMeta, error) {
-	return a.listSessionsSince(context.Background(), db, dbPath, 0, false)
+func (a OpenCodeAdapter) listSessions(ctx context.Context, db *sql.DB, dbPath string) ([]SessionMeta, error) {
+	return a.listSessionsSince(ctx, db, dbPath, 0, false)
 }
 
 // listSessionsSince is listSessions with an optional epoch-millisecond lower
@@ -242,8 +245,9 @@ func (a OpenCodeAdapter) listSessionsSince(ctx context.Context, db *sql.DB, dbPa
 	return metas, nil
 }
 
-// Summarize extracts metadata for a single OpenCode session.
-func (a OpenCodeAdapter) Summarize(path string) (SessionMeta, error) {
+// Summarize extracts metadata for a single OpenCode session. The context is
+// a cancellation bound on the underlying database query, matching Adapter.
+func (a OpenCodeAdapter) Summarize(ctx context.Context, path string) (SessionMeta, error) {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return SessionMeta{}, fmt.Errorf("not an OpenCode session: %s", path)
@@ -252,7 +256,7 @@ func (a OpenCodeAdapter) Summarize(path string) (SessionMeta, error) {
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	metas, err := a.listSessions(db, dbPath)
+	metas, err := a.listSessions(ctx, db, dbPath)
 	if err != nil {
 		return SessionMeta{}, err
 	}

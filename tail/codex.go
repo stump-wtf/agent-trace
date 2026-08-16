@@ -80,7 +80,7 @@ func (a CodexAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
 		}
-		meta, err := a.Summarize(path)
+		meta, err := a.Summarize(ctx, path)
 		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}
@@ -96,7 +96,13 @@ func (a CodexAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 }
 
 // Summarize extracts metadata from a Codex session file without full parsing.
-func (a CodexAdapter) Summarize(path string) (SessionMeta, error) {
+// The context is checked before the file is opened; the read itself runs to
+// completion, bounded by that file's size, per the Adapter cancellation
+// contract.
+func (a CodexAdapter) Summarize(ctx context.Context, path string) (SessionMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionMeta{}, err
+	}
 	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
 		return SessionMeta{}, err

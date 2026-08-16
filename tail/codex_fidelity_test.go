@@ -76,7 +76,7 @@ func TestCodexSubagentExclusion(t *testing.T) {
 		`{"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":"sub-1","cwd":"/tmp","thread_source":"subagent"}}
 `)
 	adapter := CodexAdapter{}
-	meta, err := adapter.Summarize(path)
+	meta, err := adapter.Summarize(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Summarize failed: %v", err)
 	}

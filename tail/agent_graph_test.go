@@ -47,7 +47,7 @@ func TestCrushAgentGraph(t *testing.T) {
 	_ = db.Close()
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	graph, err := adapter.AgentGraph()
+	graph, err := adapter.AgentGraph(t.Context())
 	if err != nil {
 		t.Fatalf("AgentGraph: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestOpenCodeAgentGraph(t *testing.T) {
 	_ = db.Close()
 
 	adapter := OpenCodeAdapter{DBPath: dbPath}
-	graph, err := adapter.AgentGraph()
+	graph, err := adapter.AgentGraph(t.Context())
 	if err != nil {
 		t.Fatalf("AgentGraph: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestAgentGraphEmptyDB(t *testing.T) {
 	createTestCrushDB(t, dbPath)
 
 	adapter := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
-	graph, err := adapter.AgentGraph()
+	graph, err := adapter.AgentGraph(t.Context())
 	if err != nil {
 		t.Fatalf("AgentGraph on empty DB: %v", err)
 	}

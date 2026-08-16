@@ -58,10 +58,17 @@ func (a CrushAdapter) Diagnostics() []DiagnosticCheck {
 // AgentGraph builds a parent-child tree of all sessions (including subagent
 // sessions excluded from ListSessions). Queries parent_session_id from every
 // project database and links children to their parents.
-func (a CrushAdapter) AgentGraph() (*AgentGraph, error) {
+func (a CrushAdapter) AgentGraph(ctx context.Context) (*AgentGraph, error) {
 	graph := &AgentGraph{Children: map[string][]AgentNode{}}
 	for _, db := range a.dbPaths() {
-		nodes, err := a.graphNodes(db.dbPath)
+		// Checked per database rather than once up front: the loop is the part
+		// that scales with the number of projects, and each graphNodes opens
+		// and queries a database. A cancelled caller gets context.Canceled
+		// instead of a truncated tree that looks like "no subagents ran".
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		nodes, err := a.graphNodes(ctx, db.dbPath)
 		if err != nil {
 			continue
 		}
@@ -76,12 +83,12 @@ func (a CrushAdapter) AgentGraph() (*AgentGraph, error) {
 	return graph, nil
 }
 
-func (a CrushAdapter) graphNodes(dbPath string) ([]AgentNode, error) {
+func (a CrushAdapter) graphNodes(ctx context.Context, dbPath string) ([]AgentNode, error) {
 	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(context.Background(),
+	rows, err := db.QueryContext(ctx,
 		`SELECT id, parent_session_id, title, created_at FROM sessions ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -317,14 +324,15 @@ func (a CrushAdapter) cwdForDB(dbPath string) string {
 	return ""
 }
 
-// Summarize extracts metadata from a single Crush session.
-func (a CrushAdapter) Summarize(path string) (SessionMeta, error) {
+// Summarize extracts metadata from a single Crush session. The context is a
+// cancellation bound on the underlying database query, matching Adapter.
+func (a CrushAdapter) Summarize(ctx context.Context, path string) (SessionMeta, error) {
 	// path is "dbPath/sessionID" from ListSessions
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
 		return SessionMeta{}, fmt.Errorf("not a Crush session: %s", path)
 	}
-	metas, err := a.listDBSessions(context.Background(), dbPath, a.cwdForDB(dbPath))
+	metas, err := a.listDBSessions(ctx, dbPath, a.cwdForDB(dbPath))
 	if err != nil {
 		return SessionMeta{}, err
 	}

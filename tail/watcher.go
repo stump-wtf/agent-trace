@@ -46,7 +46,9 @@ const eventBufferSize = 256
 // directory — the unbounded part, which grows with the number of sessions —
 // but a single Parse of one already-opened file runs to completion, bounded
 // by that file's size. Do not expect a deadline to interrupt one large
-// whole-file parse.
+// whole-file parse. Summarize follows the same shape: checked before the
+// file is opened (mid-query for the SQLite adapters), then bounded by one
+// file.
 type Adapter interface {
 	Harness() Harness
 	SessionDir() string
@@ -119,11 +121,15 @@ type AgentGraph struct {
 // to build a cross-session tree, linking a subagent's trace as a child of
 // the parent session's trace.
 //
+// The context is a cancellation bound like the Adapter ones: building the
+// graph queries every session row in the store, and a cancelled context stops
+// that scan rather than returning a truncated tree that looks complete.
+//
 // Only SQLite-backed adapters (Crush, OpenCode) implement this — they store
 // parent_session_id / parent_id in their schema. JSONL adapters don't carry
 // cross-session relationship data.
 type AgentGraphBuilder interface {
-	AgentGraph() (*AgentGraph, error)
+	AgentGraph(ctx context.Context) (*AgentGraph, error)
 }
 
 // IncrementalParser is an optional interface adapters implement to avoid
