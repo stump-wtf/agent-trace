@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -274,6 +275,241 @@ func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []
 	}
 	meta.Title = piSessionTitle(entries, firstUserText, path)
 	return events, marks, meta, err
+}
+
+// Watermark returns the offset just past the last complete line, for use as
+// an incremental watermark. It is deliberately not the file size: see
+// readCompleteJSONLines for why a watermark must land on a record boundary.
+func (a PiAdapter) Watermark(ctx context.Context, path string) int64 {
+	return jsonlCompleteOffset(path)
+}
+
+// piSessionHead reads the session's header record — the first line, which
+// carries the session id, cwd and opening timestamp. ParseSince starts
+// mid-file and needs it for the same reason ClaudeCodeAdapter needs
+// sessionHeadCwd: the metadata before the watermark is what new events are
+// attributed to.
+func piSessionHead(path string) (piRawEntry, bool) {
+	line := jsonlFirstLine(path)
+	if line == nil {
+		return piRawEntry{}, false
+	}
+	if !isPiHeader(line) {
+		return piRawEntry{}, false
+	}
+	var header piRawEntry
+	if json.Unmarshal(line, &header) != nil {
+		return piRawEntry{}, false
+	}
+	return header, true
+}
+
+// ParseSince reads only records appended after the byte offset, returning
+// events and marks with seq continuing from startSeq.
+//
+// Pi is not an append-only transcript: its records form a tree, and Parse
+// linearizes by walking the parent chain from the last record back to the
+// root. Appends therefore come in two shapes. A linear append — each new
+// record's parent the previous leaf — extends the chain, and the appended
+// records ARE the delta; they are processed directly, and the byte-offset
+// watermark behaves like any other JSONL adapter's (withheld past the last
+// record that left no tool call outstanding). A branch — a new record whose
+// parent is some earlier node, which is what pi writes when a turn is edited
+// and resubmitted — re-linearizes the whole chain, and the appended bytes are
+// no longer the delta. That case is detected by comparing each new record's
+// parent against the expected chain position, and it falls back to a full
+// Parse whose result is trimmed to the seq the watcher has already emitted:
+// byte-for-byte what the non-incremental path would have produced, at the
+// cost of one full read on the rare poll that lands after a branch.
+func (a PiAdapter) ParseSince(ctx context.Context, path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, err
+	}
+	// If the file shrank (truncation/rotation), reset to full parse.
+	if info.Size() < offset {
+		return nil, nil, SessionMeta{}, 0, nil
+	}
+
+	var newEntries []piRawEntry
+	var ends []int64
+	err = func() error {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		if offset > 0 {
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				return err
+			}
+		}
+		return readCompleteJSONLines(f, offset, func(data []byte, end int64) {
+			var entry piRawEntry
+			if json.Unmarshal(data, &entry) != nil {
+				return
+			}
+			newEntries = append(newEntries, entry)
+			ends = append(ends, end)
+		})
+	}()
+	if err != nil {
+		return nil, nil, SessionMeta{}, 0, err
+	}
+	if len(newEntries) == 0 {
+		return nil, nil, SessionMeta{}, offset, nil
+	}
+
+	// Continuation check: the record consumed just before the watermark is
+	// the previous leaf; a linear append chains onto it.
+	prevID := ""
+	if tail := jsonlLastLineBefore(path, offset); tail != nil {
+		var prev piRawEntry
+		if json.Unmarshal(tail, &prev) == nil {
+			prevID = prev.ID
+		}
+	}
+	linear := true
+	for _, entry := range newEntries {
+		if entry.ID == "" {
+			continue // v1 records carry no ids and no tree structure
+		}
+		if entry.ParentID != prevID {
+			linear = false
+			break
+		}
+		prevID = entry.ID
+	}
+	if !linear {
+		events, marks, meta, err := a.Parse(ctx, path)
+		if err != nil {
+			return nil, nil, SessionMeta{}, 0, err
+		}
+		if startSeq < len(events) {
+			events = events[startSeq:]
+		} else {
+			events = nil
+		}
+		return events, marks, meta, jsonlCompleteOffset(path), nil
+	}
+
+	header, _ := piSessionHead(path)
+	meta := a.piBaseMeta(path, header)
+
+	opts := a.opts
+	if opts == nil {
+		opts = osClassifyOptions(nil)
+	}
+	pending := map[string]classify.ToolCall{}
+	var events []classify.Event
+	var marks []classify.Mark
+	firstUserText := ""
+	seq := startSeq
+
+	// Offset and result counts as of the last record that left no tool call
+	// outstanding — the ClaudeCodeAdapter.ParseSince withhold rule. Orphaned
+	// calls are deliberately NOT flushed here, unlike Parse: an unresolved
+	// call is re-read from the last safe offset next poll and emitted once
+	// its result lands, rather than emitted empty and then again complete.
+	safeIdx, safeEvents, safeMarks := -1, 0, 0
+
+	for i, entry := range newEntries {
+		if entry.Timestamp != "" {
+			meta.EndedAt = entry.Timestamp
+		}
+		switch entry.Type {
+		case "model_change":
+			if entry.ModelID != "" {
+				meta.Model = entry.ModelID
+			}
+		case "compaction":
+			marks = append(marks, classify.Mark{Seq: seq, Timestamp: entry.Timestamp, Type: "compaction"})
+		case "branch_summary":
+			marks = append(marks, classify.Mark{
+				Seq:       seq,
+				Timestamp: entry.Timestamp,
+				Type:      "compaction",
+				Note:      strutil.TruncateRunes("branch: "+entry.Summary, 2000, "…"),
+			})
+		case "custom_message":
+			// Extension-injected context, not a real user turn.
+		case "session_info":
+			if entry.Name != "" {
+				meta.Title = entry.Name
+			}
+		case "message":
+			var msg piMessage
+			if json.Unmarshal(entry.Message, &msg) != nil {
+				continue
+			}
+			switch msg.Role {
+			case "user":
+				text := piContentText(msg.Content)
+				if !injectedUserMessage(text) {
+					if firstUserText == "" {
+						firstUserText = text
+					}
+					marks = append(marks, classify.Mark{
+						Seq:       seq,
+						Timestamp: entry.Timestamp,
+						Type:      "user-message",
+						Note:      strutil.TruncateRunes(text, 2000, "…"),
+					})
+				}
+			case "assistant":
+				if msg.Model != "" && meta.Model == "" {
+					meta.Model = msg.Model
+				}
+				for _, block := range piContentBlocks(msg.Content) {
+					if block.Type != "toolCall" || block.ID == "" {
+						continue
+					}
+					call := classify.ToolCall{
+						ID:        block.ID,
+						Name:      block.Name,
+						Input:     block.Arguments,
+						Timestamp: entry.Timestamp,
+					}
+					pending[call.ID] = call
+				}
+			case "toolResult":
+				call, ok := pending[msg.ToolCallID]
+				if !ok {
+					continue
+				}
+				delete(pending, msg.ToolCallID)
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{
+					Content: piContentText(msg.Content),
+					IsError: msg.IsError,
+				}))
+				seq++
+			case "bashExecution":
+				call := classify.ToolCall{
+					Name:      "bash",
+					Input:     map[string]any{"command": msg.Command},
+					Timestamp: entry.Timestamp,
+				}
+				isErr := msg.ExitCode != nil && *msg.ExitCode != 0
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{
+					Content: msg.Output,
+					IsError: isErr,
+				}))
+				seq++
+			}
+		}
+		if len(pending) == 0 {
+			safeIdx, safeEvents, safeMarks = i, len(events), len(marks)
+		}
+	}
+
+	safeOffset := offset
+	if safeIdx >= 0 {
+		safeOffset = ends[safeIdx]
+	}
+	if meta.Title == "" {
+		meta.Title = piSessionTitle(newEntries, firstUserText, path)
+	}
+	return events[:safeEvents], marks[:safeMarks], meta, safeOffset, nil
 }
 
 // Pi-specific types.
