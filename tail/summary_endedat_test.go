@@ -218,3 +218,60 @@ func TestSummarizeSeesAnAppendItCannotRead(t *testing.T) {
 			"\"nothing happened\" and skips the session", before.EndedAt)
 	}
 }
+
+// TestSummarizeKeepsTheExactTimestampWhenTheHeadEndsOnItsBound is the other half
+// of TestSummarizeKeepsTheExactTimestampWhenTheTailIsReadable, and it covers an
+// ordinary file rather than an exotic one: a complete, fully readable session
+// whose line count lands exactly on maxLines.
+//
+// The head consumes every line including the last, but stops on the bound
+// instead of on EOF, so it reports complete=false. scanSummaryTail then finds
+// start >= size and has nothing to deliver — which is "the head already got
+// there", not "the window held no whole line". Reporting SawFinalLine=false for
+// it would date a session that was read perfectly by its mtime, which is the
+// substitution this change exists to make only when it has to.
+//
+// @joestump 08/23/2026 - Added while reviewing #88.
+func TestSummarizeKeepsTheExactTimestampWhenTheHeadEndsOnItsBound(t *testing.T) {
+	root := t.TempDir()
+	proj := filepath.Join(root, ".claude", "projects", "p")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(proj, "s0.jsonl")
+
+	stamp := func(x time.Time) string { return x.UTC().Format("2006-01-02T15:04:05.000Z") }
+	start := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	contentEnd := start.Add(time.Hour)
+	mtime := time.Now().Truncate(time.Second)
+
+	n := defaultSummaryBudget().maxLines
+	var b strings.Builder
+	fmt.Fprintf(&b, `{"type":"user","timestamp":%q,"sessionId":"s0","cwd":"/w","message":{"role":"user","content":"hi"}}`+"\n", stamp(start))
+	for i := 1; i < n-1; i++ {
+		fmt.Fprintf(&b, `{"type":"assistant","timestamp":%q,"sessionId":"s0","message":{"role":"assistant","model":"m","content":[]}}`+"\n", stamp(start.Add(time.Duration(i)*time.Minute)))
+	}
+	fmt.Fprintf(&b, `{"type":"assistant","timestamp":%q,"sessionId":"s0","message":{"role":"assistant","model":"m","content":[]}}`+"\n", stamp(contentEnd))
+	if got := strings.Count(b.String(), "\n"); got != n {
+		t.Fatalf("fixture has %d lines, want exactly maxLines=%d", got, n)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	a := (&ClaudeCodeAdapter{}).WithRoot(root).(*ClaudeCodeAdapter)
+	meta, err := a.Summarize(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	ended, ok := meta.Ended()
+	if !ok {
+		t.Fatalf("EndedAt %q does not parse", meta.EndedAt)
+	}
+	if !ended.Equal(contentEnd) {
+		t.Errorf("EndedAt = %s, want the timestamp in the file %s (mtime is %s)", ended.UTC(), contentEnd.UTC(), mtime.UTC())
+	}
+}
