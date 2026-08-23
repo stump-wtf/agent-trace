@@ -600,7 +600,7 @@ func (a OpenCodeAdapter) ParseSince(ctx context.Context, path string, watermark 
 		 FROM part p
 		 JOIN message m ON p.message_id = m.id
 		 WHERE p.session_id = ? AND p.time_created > ?
-		 ORDER BY m.time_created, p.time_created`, sessionID, watermark)
+		 ORDER BY p.time_created, m.time_created`, sessionID, watermark)
 	if err != nil {
 		return nil, nil, meta, 0, err
 	}
@@ -618,6 +618,16 @@ func (a OpenCodeAdapter) ParseSince(ctx context.Context, path string, watermark 
 	// Safe points: (row time, events emitted so far), recorded after each row
 	// that left nothing outstanding, rolled back at the end to the last point
 	// strictly before the earliest outstanding part's time.
+	//
+	// This rests on the rows arriving in p.time_created order, which is why
+	// the query above orders on that column rather than on m.time_created as
+	// Parse does. The watermark is a p.time_created value and the next poll
+	// filters on it, so ordering by any other key lets a row sort before one
+	// with a lower time: the safe point lands below a row already emitted and
+	// that row comes back a second time. Parse has no watermark and so is
+	// free to group by message; here the ordering key and the filter key have
+	// to be the same one. On well-ordered data the two orderings are
+	// identical.
 	type opencodeSafePoint struct {
 		t      int64
 		events int
