@@ -27,6 +27,10 @@ import (
 //
 // @joestump-agent 08/23/2026 - Made the head's byte budget a hard bound rather
 // than a post-hoc check, so one newline-free line cannot be read whole (#84).
+//
+// @joestump-agent 08/23/2026 - Report whether the final line was actually
+// delivered, so a caller cannot mistake a head timestamp for the file's last
+// activity (#85).
 
 // summaryBudget bounds how much of a session file a summary scan reads.
 type summaryBudget struct {
@@ -82,8 +86,11 @@ type summaryBudget struct {
 // tailBytes is sized for headroom rather than to the measurement: 16 KiB
 // already recovered every closing timestamp in the corpus, but a session whose
 // final line is one large tool result would lose EndedAt, so this keeps room to
-// spare. All of this is cold-scan cost only — summaryCache serves unchanged
-// files without reading them at all.
+// spare. Headroom is not a guarantee — no fixed window is, since a tool result
+// has no upper bound — so the scan reports when the window held no whole line
+// and Summarize dates the session by its mtime instead (#85). All of this is
+// cold-scan cost only — summaryCache serves unchanged files without reading
+// them at all.
 func defaultSummaryBudget() summaryBudget {
 	return summaryBudget{
 		maxLines:  64,
@@ -92,21 +99,41 @@ func defaultSummaryBudget() summaryBudget {
 	}
 }
 
+// summaryScan reports what a bounded scan actually managed to read, which is
+// not the same question as whether it errored. Both fields are ways of asking
+// "how much should the caller trust the fields it just collected".
+type summaryScan struct {
+	// Complete reports that the head consumed the whole file, so the summary
+	// is byte-identical to what a full scan would have produced.
+	Complete bool
+	// SawFinalLine reports that the file's last line reached visit — always
+	// true for a complete read, and for an elided one only when the tail
+	// window held a whole line.
+	//
+	// When it is false, every last-wins field a caller collected still holds
+	// whatever the *head* last set, which is a timestamp from the top of the
+	// file rather than the bottom. A caller that treats such a value as the
+	// session's last activity gets an answer that is not merely imprecise but
+	// wrong by the length of the session — see ClaudeCodeAdapter.Summarize,
+	// which substitutes the file's mtime rather than report it (#85).
+	SawFinalLine bool
+}
+
 // scanJSONLSummary feeds visit the head of a JSONL session file and, when the
 // file is larger than the head budget, the trailing whole lines from its tail.
-// It reports whether the file was consumed in full.
-func scanJSONLSummary(f *os.File, visit func([]byte)) (bool, error) {
+func scanJSONLSummary(f *os.File, visit func([]byte)) (summaryScan, error) {
 	return scanJSONLSummaryWith(f, defaultSummaryBudget(), visit)
 }
 
 // scanJSONLSummaryWith is scanJSONLSummary with an explicit budget, so tests can
 // exercise the oversized path without building multi-megabyte fixtures.
-func scanJSONLSummaryWith(f *os.File, b summaryBudget, visit func([]byte)) (bool, error) {
+func scanJSONLSummaryWith(f *os.File, b summaryBudget, visit func([]byte)) (summaryScan, error) {
 	headEnd, complete, err := scanSummaryHead(f, b, visit)
 	if err != nil || complete {
-		return complete, err
+		return summaryScan{Complete: complete, SawFinalLine: complete}, err
 	}
-	return false, scanSummaryTail(f, b, headEnd, visit)
+	sawFinal, err := scanSummaryTail(f, b, headEnd, visit)
+	return summaryScan{SawFinalLine: sawFinal}, err
 }
 
 // scanSummaryHead reads whole lines until a budget is reached or the file ends.
@@ -161,11 +188,18 @@ func scanSummaryHead(f *os.File, b summaryBudget, visit func([]byte)) (int64, bo
 }
 
 // scanSummaryTail delivers the whole lines at the end of an oversized file,
-// picking up no earlier than headEnd so no line is delivered twice.
-func scanSummaryTail(f *os.File, b summaryBudget, headEnd int64, visit func([]byte)) error {
+// picking up no earlier than headEnd so no line is delivered twice. It reports
+// whether it delivered anything at all.
+//
+// Delivering nothing is not an error and not rare: the window is a fixed size
+// and a session's final line is a tool result, which can be larger than it. It
+// is reported rather than swallowed because the caller cannot otherwise tell
+// that outcome from "read the tail, found nothing newer" — and the fields it
+// collected differ completely between the two.
+func scanSummaryTail(f *os.File, b summaryBudget, headEnd int64, visit func([]byte)) (bool, error) {
 	info, err := f.Stat()
 	if err != nil {
-		return err
+		return false, err
 	}
 	size := info.Size()
 
@@ -177,10 +211,10 @@ func scanSummaryTail(f *os.File, b summaryBudget, headEnd int64, visit func([]by
 		start, dropPartial = headEnd, false
 	}
 	if start >= size {
-		return nil
+		return false, nil
 	}
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		return err
+		return false, err
 	}
 
 	reader := bufio.NewReaderSize(f, 64*1024)
@@ -190,8 +224,13 @@ func scanSummaryTail(f *os.File, b summaryBudget, headEnd int64, visit func([]by
 		// record, so drop it. No newline anywhere in the window means the
 		// window holds no whole line at all.
 		if _, err := reader.ReadBytes('\n'); err != nil {
-			return nil
+			return false, nil
 		}
 	}
-	return ReadJSONLines(reader, visit)
+	delivered := false
+	err = ReadJSONLines(reader, func(data []byte) {
+		delivered = true
+		visit(data)
+	})
+	return delivered, err
 }

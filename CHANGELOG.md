@@ -54,6 +54,18 @@ breaking changes arrive in minor releases. See the note under
 
 ### Fixed
 
+- `Summarize` no longer reports a timestamp from the top of a file as a
+  session's last activity (#85). `EndedAt` is recovered from a bounded tail
+  read, and a final line larger than that window leaves the window holding no
+  whole line at all — after which `EndedAt` silently kept whatever the head had
+  last set. That is the normal shape of a transcript whose last record is a big
+  tool result, and it had two consequences once `ActiveSince` began listing on
+  `EndedAt`: a session being typed into right now fell outside a 48h activity
+  window, and the watcher's change detection saw a frozen `EndedAt` and skipped
+  the session as unchanged on every poll. When the tail delivers no whole line,
+  the session is now dated by the file's mtime — the same signal `mtimeExcludes`
+  already trusts to skip a file unread. A tail that *is* readable still supplies
+  the exact timestamp.
 - The summary head's byte budget is now a hard bound on what is read, not a
   check applied after the fact (#84). Both bounds were tested before each line,
   so a single line longer than `maxBytes` was still pulled into memory whole —

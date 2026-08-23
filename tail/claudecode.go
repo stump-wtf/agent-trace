@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/stump-wtf/agent-trace/classify"
 	"github.com/stump-wtf/agent-trace/internal/strutil"
@@ -131,6 +132,17 @@ func (a ClaudeCodeAdapter) ListSessionsFiltered(ctx context.Context, f SessionFi
 // whether a session is listed at all are unaffected: the sidechain stamp that
 // sets Auxiliary is written on the first line of every session that has one.
 //
+// EndedAt is the one field the tail read can fail to recover — a final line
+// larger than the tail window leaves the window holding no whole line at all —
+// and it is also the field ActiveSince decides listing on, so a stale one
+// removes the session from discovery entirely. When the scan reports it never
+// saw the final line, this dates the session by its mtime rather than by
+// whatever timestamp the head happened to stop on, which would be the top of
+// the file reported as its last activity. mtime is the right substitute
+// because it is the same signal mtimeExcludes already trusts to skip a file
+// unread: if it is sound enough to exclude a session without opening it, it is
+// sound enough to date one whose tail could not be read.
+//
 // The context is checked before the file is opened; the read itself runs to
 // completion, bounded by the budget, per the Adapter cancellation contract.
 func (a ClaudeCodeAdapter) Summarize(ctx context.Context, path string) (SessionMeta, error) {
@@ -144,7 +156,7 @@ func (a ClaudeCodeAdapter) Summarize(ctx context.Context, path string) (SessionM
 	defer func() { _ = f.Close() }()
 
 	recognized := false
-	_, err = scanJSONLSummary(f, func(data []byte) {
+	scan, err := scanJSONLSummary(f, func(data []byte) {
 		var line ccRawLine
 		if json.Unmarshal(data, &line) != nil {
 			return
@@ -188,6 +200,11 @@ func (a ClaudeCodeAdapter) Summarize(ctx context.Context, path string) (SessionM
 	})
 	if meta.Title == "" {
 		meta.Title = filepath.Base(path)
+	}
+	if !scan.SawFinalLine {
+		if info, statErr := f.Stat(); statErr == nil {
+			meta.EndedAt = info.ModTime().UTC().Format(time.RFC3339Nano)
+		}
 	}
 	if !recognized {
 		return SessionMeta{}, fmt.Errorf("not a Claude Code session: %s", path)
