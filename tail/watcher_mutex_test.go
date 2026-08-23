@@ -53,7 +53,8 @@ func TestLastActivityDoesNotBlockOnSlowConsumer(t *testing.T) {
 		events:  buildEvents(eventBufferSize + 64),
 		endedAt: "2026-01-01T10:30:00Z",
 	}}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// Fixed fixture timestamps; discovery scope is not what this tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 
 	scanDone := make(chan struct{})
 	go func() {
@@ -93,7 +94,8 @@ func TestLastActivityReflectsFullBatchWhileDraining(t *testing.T) {
 		events:  events,
 		endedAt: "2026-01-01T09:00:00Z", // deliberately older than the events
 	}}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// Fixed fixture timestamps; discovery scope is not what this tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 
 	scanDone := make(chan struct{})
 	go func() {
@@ -124,7 +126,8 @@ func TestSlowConsumerEventuallyReceivesEveryEvent(t *testing.T) {
 		events:  buildEvents(n),
 		endedAt: "2026-01-01T10:30:00Z",
 	}}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// Fixed fixture timestamps; discovery scope is not what this tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 
 	scanDone := make(chan struct{})
 	go func() {

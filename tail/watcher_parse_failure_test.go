@@ -62,7 +62,8 @@ func TestWatcherRetriesAfterParseFailure(t *testing.T) {
 			{Seq: 0, Timestamp: "2026-01-01T10:00:05Z", Tool: "bash", Action: classify.ActionExec, Summary: "ran tests"},
 		},
 	}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// Fixed fixture timestamps; discovery scope is not what this tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 
 	// Cycle 1: Parse fails. Nothing emitted, and nothing about this scan may
 	// be recorded as done.
@@ -100,7 +101,8 @@ func TestWatcherStillSkipsUnchangedSessions(t *testing.T) {
 			{Seq: 0, Timestamp: "2026-01-01T10:00:05Z", Tool: "bash", Action: classify.ActionExec, Summary: "ran tests"},
 		},
 	}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// Fixed fixture timestamps; discovery scope is not what this tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 
 	for i := 0; i < 3; i++ {
 		if err := w.ScanOnce(context.Background()); err != nil {

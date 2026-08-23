@@ -168,7 +168,8 @@ func TestWatcherEmitsEachCallExactlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := NewWatcherWithConfig(WatchConfig{}, []Adapter{&ClaudeCodeAdapter{Dir: dir}})
+	// Fixed fixture timestamps; discovery scope is not what this tests.
+	w := NewWatcherWithConfig(WatchConfig{MaxAge: -1}, []Adapter{&ClaudeCodeAdapter{Dir: dir}})
 	seen := map[int]int{}
 	drained := make(chan struct{})
 	go func() {

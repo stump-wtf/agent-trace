@@ -113,7 +113,10 @@ func TestWatcherMarksRideTheirSiblingEvents(t *testing.T) {
 		},
 		endedAt: "2026-01-01T10:00:02Z",
 	}}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// MaxAge: -1 disables the activity window. These fixtures carry fixed
+	// 2026-01-01 timestamps and this test is about mark/event plumbing,
+	// not discovery scope, which has its own tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +159,10 @@ func TestWatcherTrailingMarksParkUntilTheNextEvent(t *testing.T) {
 			endedAt: "2026-01-01T10:02:00Z",
 		},
 	}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// MaxAge: -1 disables the activity window. These fixtures carry fixed
+	// 2026-01-01 timestamps and this test is about mark/event plumbing,
+	// not discovery scope, which has its own tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +205,10 @@ func TestWatcherMarksDedupAcrossFullReparses(t *testing.T) {
 			endedAt: "2026-01-01T10:00:09Z",
 		},
 	}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// MaxAge: -1 disables the activity window. These fixtures carry fixed
+	// 2026-01-01 timestamps and this test is about mark/event plumbing,
+	// not discovery scope, which has its own tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 	for range 2 {
 		if err := w.ScanOnce(context.Background()); err != nil {
 			t.Fatal(err)
@@ -240,7 +249,10 @@ func TestWatcherIncrementalMarksSurviveTheWatermark(t *testing.T) {
 			watermark: 40,
 		},
 	}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// MaxAge: -1 disables the activity window. These fixtures carry fixed
+	// 2026-01-01 timestamps and this test is about mark/event plumbing,
+	// not discovery scope, which has its own tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +281,10 @@ func TestWatcherMarksFeedIdleDetection(t *testing.T) {
 		},
 		endedAt: "2026-01-01T10:00:05Z", // EndedAt is older than the mark
 	}}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// MaxAge: -1 disables the activity window. These fixtures carry fixed
+	// 2026-01-01 timestamps and this test is about mark/event plumbing,
+	// not discovery scope, which has its own tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +313,10 @@ func TestWatcherMarkNewerThanLastEventStillCountsAsActivity(t *testing.T) {
 		},
 		endedAt: "2026-01-01T10:00:30Z",
 	}}}
-	w := NewWatcher(DefaultIdleConfig(), []Adapter{a})
+	// MaxAge: -1 disables the activity window. These fixtures carry fixed
+	// 2026-01-01 timestamps and this test is about mark/event plumbing,
+	// not discovery scope, which has its own tests.
+	w := NewWatcherWithConfig(WatchConfig{IdleConfig: DefaultIdleConfig(), MaxAge: -1}, []Adapter{a})
 	if err := w.ScanOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}

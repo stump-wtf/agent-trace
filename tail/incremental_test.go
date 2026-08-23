@@ -202,6 +202,9 @@ func TestWatcherIncrementalClaudeCode(t *testing.T) {
 	w := NewWatcherWithConfig(WatchConfig{
 		IdleConfig:   IdleConfig{IdleAfter: 1 * time.Hour},
 		PollInterval: 50 * time.Millisecond,
+		// The fixture's timestamps are fixed and long past the default
+		// activity window; this test is about incremental parsing.
+		MaxAge: -1,
 	}, []Adapter{adapter})
 	defer w.Stop()
 

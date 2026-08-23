@@ -67,7 +67,17 @@ func (a CodexAdapter) WithRoot(root string) Adapter {
 
 // ListSessions walks the session directory and returns metadata for each
 // recognized Codex session file, sorted newest-first.
+// It delegates to ListSessionsFiltered with the zero filter, which is
+// documented to match every session, so the two can never disagree.
 func (a CodexAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
+	return a.ListSessionsFiltered(ctx, SessionFilter{})
+}
+
+// ListSessionsFiltered implements FilteredLister. A file whose modification
+// time already puts it outside the filter's time bounds is skipped on the stat
+// alone — see ClaudeCodeAdapter.ListSessionsFiltered and mtimeExcludes for why
+// that is exact rather than approximate.
+func (a CodexAdapter) ListSessionsFiltered(ctx context.Context, f SessionFilter) ([]SessionMeta, error) {
 	dir := a.SessionDir()
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return nil, nil
@@ -86,6 +96,9 @@ func (a CodexAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
 		}
+		if info, infoErr := entry.Info(); infoErr == nil && mtimeExcludes(info, f) {
+			return nil
+		}
 		meta, err := summarizeCached(ctx, a.cache, a.Harness(), entry, path, a.Summarize)
 		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
@@ -95,6 +108,7 @@ func (a CodexAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	if err != nil {
 		return nil, err
 	}
+	metas = filterSessions(metas, f)
 	sort.Slice(metas, func(i, j int) bool {
 		return metas[i].EndedAt > metas[j].EndedAt
 	})

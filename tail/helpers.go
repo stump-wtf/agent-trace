@@ -92,6 +92,40 @@ func homeDir(paths ...string) string {
 	return filepath.Join(append([]string{home}, paths...)...)
 }
 
+// mtimeExcludes reports that a file was last written early enough that no
+// session inside it can satisfy the filter's time bounds — so it can be skipped
+// without being opened at all. This is the whole point of pushing a time filter
+// into a file-walking adapter: the decision costs a stat, not a read and parse.
+//
+// Sound for both bounds, given that a file's contents were written at or before
+// its modification time:
+//
+//   - ActiveSince asks when the session was last touched, and mtime is exactly
+//     that signal.
+//   - Since asks when it started. If mtime precedes Since then every timestamp
+//     in the file precedes Since, so StartedAt does too and the session fails
+//     the bound regardless.
+//
+// The assumption fails only if mtime is older than the timestamps recorded
+// inside the file, which needs a backdated mtime or a clock that moved
+// backwards. The opposite skew — a restored or copied file carrying an mtime
+// newer than its contents — only over-selects, and filterSessions still applies
+// the exact predicate afterwards, so it costs a wasted read and never a wrong
+// answer.
+func mtimeExcludes(info os.FileInfo, f SessionFilter) bool {
+	if info == nil {
+		return false
+	}
+	mod := info.ModTime()
+	if !f.ActiveSince.IsZero() && mod.Before(f.ActiveSince) {
+		return true
+	}
+	if !f.Since.IsZero() && mod.Before(f.Since) {
+		return true
+	}
+	return false
+}
+
 // openJSONLSession opens a JSONL session file and returns a base SessionMeta
 // with the harness, key, and file-derived ID pre-populated. The caller is
 // responsible for closing the returned file.

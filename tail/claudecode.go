@@ -62,7 +62,22 @@ func (a ClaudeCodeAdapter) WithRoot(root string) Adapter {
 
 // ListSessions walks the session directory and returns metadata for each
 // recognized Claude Code session file, sorted newest-first.
+//
+// It delegates to ListSessionsFiltered with the zero filter, which is
+// documented to match every session, so the two can never disagree.
 func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
+	return a.ListSessionsFiltered(ctx, SessionFilter{})
+}
+
+// ListSessionsFiltered implements FilteredLister. A file whose modification
+// time already puts it outside the filter's time bounds is skipped on the stat
+// alone, so a bounded view never pays to open, read, or parse the history it is
+// excluding — which on a large archive is nearly all of it.
+//
+// filterSessions still runs over the result: the mtime check only narrows what
+// is read, and the exact predicate is applied in exactly one place, so this can
+// never disagree with ListSessions followed by in-memory filtering.
+func (a ClaudeCodeAdapter) ListSessionsFiltered(ctx context.Context, f SessionFilter) ([]SessionMeta, error) {
 	dir := a.SessionDir()
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return nil, nil
@@ -86,6 +101,9 @@ func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, err
 		if filepath.Ext(path) != ".jsonl" || strings.HasPrefix(filepath.Base(path), "agent-") {
 			return nil
 		}
+		if info, infoErr := entry.Info(); infoErr == nil && mtimeExcludes(info, f) {
+			return nil
+		}
 		meta, err := summarizeCached(ctx, a.cache, a.Harness(), entry, path, a.Summarize)
 		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
@@ -95,6 +113,7 @@ func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, err
 	if err != nil {
 		return nil, err
 	}
+	metas = filterSessions(metas, f)
 	sort.Slice(metas, func(i, j int) bool {
 		return metas[i].EndedAt > metas[j].EndedAt
 	})

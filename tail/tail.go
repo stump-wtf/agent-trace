@@ -125,13 +125,32 @@ type WatchConfig struct {
 	// these are merged with the defaults in classify.defaultVerifyPatterns.
 	// Threaded through to adapters via the OptionsSetter interface.
 	VerifyPatterns []string
+	// MaxAge bounds discovery to sessions active within this window, judged by
+	// last activity rather than start time — so a long-running session stays
+	// visible while it is still being used, however long ago it began.
+	//
+	// Zero selects DefaultMaxAge. A negative value means no bound: every
+	// session ever recorded is discovered, which is what the watcher did
+	// before this field existed.
+	//
+	// The default is not only about cost. An unbounded watcher surfaces every
+	// session that has ever existed — hundreds of dead transcripts on a
+	// long-lived machine — and a consumer showing "current sessions" has to
+	// re-filter them itself or show noise.
+	MaxAge time.Duration
 }
+
+// DefaultMaxAge is the activity window a watcher applies when WatchConfig
+// leaves MaxAge unset: two days, long enough to span a weekend gap in a piece
+// of work without carrying a machine's whole history.
+const DefaultMaxAge = 48 * time.Hour
 
 // DefaultWatchConfig returns sensible defaults for live watching.
 func DefaultWatchConfig() WatchConfig {
 	return WatchConfig{
 		IdleConfig:   DefaultIdleConfig(),
 		PollInterval: 2 * time.Second,
+		MaxAge:       DefaultMaxAge,
 	}
 }
 
@@ -154,6 +173,16 @@ type SessionFilter struct {
 	// criterion — the caller asked for a time bound and "unknown" is not
 	// within it.
 	Since time.Time
+	// ActiveSince filters sessions whose last activity is at or after this
+	// instant, judged by EndedAt. Like Since, a session with a missing or
+	// unparseable timestamp does not pass.
+	//
+	// This is a different question from Since and usually the one a live view
+	// wants. Since asks when a session began, so a session opened five days
+	// ago and still being typed into right now fails a two-day Since bound
+	// while actively in use. ActiveSince asks when it was last touched, which
+	// is what "recent sessions" almost always means.
+	ActiveSince time.Time
 }
 
 // FilteredLister is an optional interface an adapter may implement to push
@@ -200,6 +229,12 @@ func filterSessions(sessions []SessionMeta, f SessionFilter) []SessionMeta {
 			// are indistinguishable.
 			started, ok := s.Started()
 			if !ok || started.Before(f.Since) {
+				continue
+			}
+		}
+		if !f.ActiveSince.IsZero() {
+			ended, ok := s.Ended()
+			if !ok || ended.Before(f.ActiveSince) {
 				continue
 			}
 		}

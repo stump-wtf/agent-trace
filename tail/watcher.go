@@ -237,6 +237,9 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 2 * time.Second
 	}
+	if cfg.MaxAge == 0 {
+		cfg.MaxAge = DefaultMaxAge
+	}
 	if len(cfg.VerifyPatterns) > 0 {
 		for _, a := range adapters {
 			if os, ok := a.(OptionsSetter); ok {
@@ -333,6 +336,16 @@ func (w *Watcher) ScanOnce(ctx context.Context) error {
 	return nil
 }
 
+// sessionFilter builds the discovery filter for one scan. The window is
+// recomputed per scan rather than fixed at construction, so a watcher running
+// for days keeps a moving window instead of one anchored to its start.
+func (w *Watcher) sessionFilter() SessionFilter {
+	if w.cfg.MaxAge < 0 {
+		return SessionFilter{}
+	}
+	return SessionFilter{ActiveSince: time.Now().Add(-w.cfg.MaxAge)}
+}
+
 func (w *Watcher) scanOnce(ctx context.Context) {
 	// Only after a scan that ran to completion: an aborted scan has not looked
 	// up every live file, so sweeping then would evict entries that are still
@@ -351,7 +364,7 @@ func (w *Watcher) scanOnce(ctx context.Context) {
 			return
 		default:
 		}
-		sessions, err := a.ListSessions(ctx)
+		sessions, err := ListSessionsFiltered(ctx, a, w.sessionFilter())
 		if err != nil {
 			continue
 		}

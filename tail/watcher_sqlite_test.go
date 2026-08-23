@@ -35,6 +35,8 @@ func TestWatcherWithCrushAdapter(t *testing.T) {
 	w := NewWatcherWithConfig(WatchConfig{
 		IdleConfig:   IdleConfig{IdleAfter: 1 * time.Second},
 		PollInterval: 100 * time.Millisecond,
+		// Fixed fixture timestamps; discovery scope is not what this tests.
+		MaxAge: -1,
 	}, []Adapter{adapter})
 	defer w.Stop()
 
@@ -81,6 +83,8 @@ func TestWatcherCrushAdapterChangeDetection(t *testing.T) {
 	w := NewWatcherWithConfig(WatchConfig{
 		IdleConfig:   IdleConfig{IdleAfter: 1 * time.Hour},
 		PollInterval: 100 * time.Millisecond,
+		// Fixed fixture timestamps; discovery scope is not what this tests.
+		MaxAge: -1,
 	}, []Adapter{adapter})
 	defer w.Stop()
 

@@ -97,6 +97,8 @@ func TestWatcherScanOnce(t *testing.T) {
 	w := NewWatcherWithConfig(WatchConfig{
 		IdleConfig:   IdleConfig{IdleAfter: 1 * time.Second},
 		PollInterval: 100 * time.Millisecond,
+		// Fixed fixture timestamps; discovery scope is not what this tests.
+		MaxAge: -1,
 	}, []Adapter{mockAdapter{dir: dir}})
 	defer w.Stop()
 
@@ -150,6 +152,8 @@ func TestWatcherIdleFromSessionData(t *testing.T) {
 	w := NewWatcherWithConfig(WatchConfig{
 		IdleConfig:   IdleConfig{IdleAfter: 1 * time.Millisecond},
 		PollInterval: 100 * time.Millisecond,
+		// Fixed fixture timestamps; discovery scope is not what this tests.
+		MaxAge: -1,
 	}, []Adapter{mockAdapter{dir: dir}})
 
 	ctx, cancel := context.WithCancel(context.Background())
