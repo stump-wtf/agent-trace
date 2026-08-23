@@ -96,9 +96,18 @@ func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, err
 }
 
 // Summarize reads just enough of a session file to extract metadata without
-// parsing every event. The context is checked before the file is opened; the
-// read itself runs to completion, bounded by that file's size, per the
-// Adapter cancellation contract.
+// parsing every event: a bounded head plus, for a file that exceeds that
+// budget, a bounded tail for the closing timestamp. A file inside the head
+// budget is read whole, so its summary matches a full scan exactly.
+//
+// The elided middle costs at most a Title. An ai-title line past the head
+// budget is not seen and the title falls back to the file name, which is the
+// same fallback a session that never had one already gets. Fields that decide
+// whether a session is listed at all are unaffected: the sidechain stamp that
+// sets Auxiliary is written on the first line of every session that has one.
+//
+// The context is checked before the file is opened; the read itself runs to
+// completion, bounded by the budget, per the Adapter cancellation contract.
 func (a ClaudeCodeAdapter) Summarize(ctx context.Context, path string) (SessionMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return SessionMeta{}, err
@@ -110,7 +119,7 @@ func (a ClaudeCodeAdapter) Summarize(ctx context.Context, path string) (SessionM
 	defer func() { _ = f.Close() }()
 
 	recognized := false
-	err = ReadJSONLines(f, func(data []byte) {
+	_, err = scanJSONLSummary(f, func(data []byte) {
 		var line ccRawLine
 		if json.Unmarshal(data, &line) != nil {
 			return
