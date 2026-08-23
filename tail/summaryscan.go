@@ -211,7 +211,14 @@ func scanSummaryTail(f *os.File, b summaryBudget, headEnd int64, visit func([]by
 		start, dropPartial = headEnd, false
 	}
 	if start >= size {
-		return false, nil
+		// headEnd is at or past the end of the file, which only happens when
+		// the head consumed every byte and stopped on a bound rather than on
+		// EOF — a file whose line count or size lands exactly on the budget.
+		// There is nothing left to read because the head already delivered the
+		// final line, so this reports true: it is the opposite of the empty
+		// window below, and conflating them dates a perfectly readable session
+		// by its mtime.
+		return true, nil
 	}
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
 		return false, err
