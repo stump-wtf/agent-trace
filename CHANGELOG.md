@@ -11,8 +11,35 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Added
+
+- `SessionFilter.ActiveSince` bounds discovery by when a session was last
+  touched rather than when it began (#81). `Since` asks the other question, and
+  a session opened days ago but still being typed into fails a short `Since`
+  bound while actively in use — which is the wrong answer for a live view. The
+  three JSONL adapters implement `FilteredLister` and skip an excluded file on
+  its mtime without opening it; `filterSessions` still applies the exact
+  predicate afterwards, so the pushdown can only ever over-select.
+
 ### Changed
 
+- **Breaking for library consumers:** `WatchConfig.MaxAge` bounds a watcher's
+  discovery to sessions active within a window, defaulting to `DefaultMaxAge`
+  (48h) (#81). A watcher built from a zero `WatchConfig` previously discovered
+  every session that had ever existed and now applies that default. Set
+  `MaxAge: -1` for the old unbounded behavior; `MaxAge: 0` means "use the
+  default", following `PollInterval`'s convention in the same struct.
+- `Summarize` reads a bounded head, plus a bounded tail for the closing
+  timestamp on files that exceed it, instead of parsing every event (#79). One
+  discovery pass over a 215-session corpus drops from 2.3s to 0.4s. A file
+  inside the head budget is still read whole, so its summary is unchanged. The
+  one field the budget can miss is `Title`, when a session titles itself past
+  the head: it falls back to the file name, the same fallback an untitled
+  session already gets.
+- Watchers memoize session summaries across scans on `(harness, size, mtime)`,
+  so discovery re-reads only files that actually changed (#80). Steady-state
+  `ListSessions` over the same corpus drops from 2.3s to ~4ms. Adapters
+  constructed directly, without a `SummaryCache`, are unaffected.
 - `Summarize` and `AgentGraphBuilder.AgentGraph` take a `context.Context` (#72),
   closing the gap #67 left open. Both opened `context.Background()`, so a
   cancelled caller still waited on the SQLite query behind every Crush and
