@@ -47,6 +47,18 @@ breaking changes arrive in minor releases. See the note under
   The JSONL adapters check the context before opening the file; one file's read
   still runs to completion, per the Adapter cancellation contract.
 
+### Fixed
+
+- The summary head's byte budget is now a hard bound on what is read, not a
+  check applied after the fact (#84). Both bounds were tested before each line,
+  so a single line longer than `maxBytes` was still pulled into memory whole —
+  measured at 8 MiB against a 2 MiB budget. The scan runs over whatever
+  `.jsonl` files are in the trajectory directories, including foreign ones this
+  library did not write, so one newline-free file defeated the budget that
+  exists to bound exactly that. The head now reads through an
+  `io.LimitReader` and drops the truncated fragment, the same way the tail scan
+  already drops the fragment its seek lands in.
+
 ## [0.1.0] - 2026-08-15
 
 First tagged release. The library was extracted from `mindwalk` on 2026-08-09 and

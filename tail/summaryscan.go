@@ -24,6 +24,9 @@ import (
 //
 // @joestump-agent 08/23/2026 - Extracted from the adapters' Summarize methods
 // to fix the CPU burn in #79.
+//
+// @joestump-agent 08/23/2026 - Made the head's byte budget a hard bound rather
+// than a post-hoc check, so one newline-free line cannot be read whole (#84).
 
 // summaryBudget bounds how much of a session file a summary scan reads.
 type summaryBudget struct {
@@ -31,13 +34,12 @@ type summaryBudget struct {
 	// reached first ends the head. The byte bound exists so a file made of a
 	// few enormous lines cannot defeat the line bound.
 	//
-	// Both are checked BEFORE each line is read, so they bound what has
-	// already been consumed rather than what comes next: a single line longer
-	// than maxBytes is still read whole, and only then does the head stop.
-	// That is fine for the corpus this was measured against — the largest
-	// observed line is ~1.1 MiB against a 2 MiB budget — but it means the
-	// scan is not a hard memory bound on an arbitrary file. Making it one
-	// needs a limited reader plus partial-line handling; see #84.
+	// maxBytes is a hard bound on what the head reads, not just on what it
+	// has already read: the head is fed through an io.LimitReader, so a
+	// single line longer than the budget is cut off rather than grown to
+	// whatever length the file happens to contain. The truncated fragment is
+	// discarded rather than delivered — it is not valid JSON, and the head
+	// ends at the last real line boundary either way.
 	maxLines int
 	maxBytes int64
 	// tailBytes is how much of the end of an oversized file is read back to
@@ -111,14 +113,40 @@ func scanJSONLSummaryWith(f *os.File, b summaryBudget, visit func([]byte)) (bool
 // It returns the byte offset just past the last line it consumed — always a line
 // boundary, which is what lets the tail scan resume without truncating a line —
 // and whether it reached EOF.
+//
+// The reads run through an io.LimitReader so maxBytes bounds the memory this
+// can hold, not merely the point at which it stops. bufio.Reader.ReadBytes
+// grows its result until it finds the delimiter or the reader errors, so
+// without the limiter one line with no newline in it — a corrupt or foreign
+// .jsonl, which this scan is pointed at whatever the trajectory directories
+// contain — is pulled entirely into memory before the budget is consulted.
 func scanSummaryHead(f *os.File, b summaryBudget, visit func([]byte)) (int64, bool, error) {
-	reader := bufio.NewReaderSize(f, 64*1024)
+	// The limiter is given one byte of headroom past the budget so a genuine
+	// end-of-file that lands exactly on maxBytes is distinguishable from a line
+	// the limiter cut off. Without it the two are identical — err is io.EOF and
+	// the bytes in hand end at the budget either way — and the real final line
+	// gets dropped as if it were a fragment.
+	reader := bufio.NewReaderSize(io.LimitReader(f, b.maxBytes+1), 64*1024)
 	var consumed int64
 	for lines := 0; ; lines++ {
 		if lines >= b.maxLines || consumed >= b.maxBytes {
 			return consumed, false, nil
 		}
 		line, err := reader.ReadBytes('\n')
+		if errors.Is(err, io.EOF) && consumed+int64(len(line)) > b.maxBytes {
+			// The limiter cut this line off, so what is in hand is a leading
+			// fragment rather than a record — the same thing scanSummaryTail
+			// drops when its seek lands mid-line, and for the same reason:
+			// handing it to visit is indistinguishable from a corrupt record.
+			// consumed stays where it is so the returned offset remains a
+			// true line boundary and the tail scan can resume from it.
+			//
+			// A file whose real end coincides exactly with the budget does
+			// NOT take this path: the headroom byte above proves the file
+			// ended, so its final line is delivered whole and the head
+			// reports complete, exactly as a full scan would.
+			return consumed, false, nil
+		}
 		consumed += int64(len(line))
 		if trimmed := bytes.TrimRight(line, "\r\n"); len(trimmed) > 0 {
 			visit(trimmed)
