@@ -13,3 +13,7 @@ dist/
 
 # Agent worktrees
 .claude/worktrees/
+
+# Agent worktrees. Ignored here rather than in .git/info/exclude, which is
+# local to one clone: every machine and every fresh clone needs this.
+.claude/

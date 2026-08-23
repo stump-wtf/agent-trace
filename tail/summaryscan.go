@@ -30,6 +30,14 @@ type summaryBudget struct {
 	// maxLines and maxBytes bound the head scan. Both apply; whichever is
 	// reached first ends the head. The byte bound exists so a file made of a
 	// few enormous lines cannot defeat the line bound.
+	//
+	// Both are checked BEFORE each line is read, so they bound what has
+	// already been consumed rather than what comes next: a single line longer
+	// than maxBytes is still read whole, and only then does the head stop.
+	// That is fine for the corpus this was measured against — the largest
+	// observed line is ~1.1 MiB against a 2 MiB budget — but it means the
+	// scan is not a hard memory bound on an arbitrary file. Making it one
+	// needs a limited reader plus partial-line handling; see #84.
 	maxLines int
 	maxBytes int64
 	// tailBytes is how much of the end of an oversized file is read back to

@@ -2,6 +2,8 @@ package tail
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"sync"
 	"time"
@@ -146,9 +148,33 @@ func summarizeCached(
 	if infoErr == nil {
 		// A cancelled scan says nothing about the file, so caching that
 		// result would poison the entry for every later scan.
-		if ctx.Err() == nil {
+		if ctx.Err() == nil && cacheableResult(err) {
 			c.store(path, info, meta, err)
 		}
 	}
 	return meta, err
+}
+
+// cacheableResult reports whether a summarize outcome is a durable statement
+// about the file's CONTENT, and so may be memoized against its identity.
+//
+// The verdict worth caching is "not a <harness> session" — deterministic, and
+// the reason the error path is cached at all: without it every foreign .jsonl
+// in the directory is re-read in full on every scan.
+//
+// An I/O failure is a statement about the moment, not the file. Session files
+// are append-only and a finished one is frozen forever, so its (size, mtime)
+// never changes again — a transient EACCES, EMFILE or read error against one
+// would otherwise be served from cache for the life of the process, and the
+// session would vanish from discovery until a restart. Sweep does not rescue
+// it either: a live file is looked up every scan, which keeps the poisoned
+// entry alive.
+//
+// @joestump-agent 08/23/2026 - Review fix.
+func cacheableResult(err error) bool {
+	if err == nil {
+		return true
+	}
+	var pathErr *fs.PathError
+	return !errors.As(err, &pathErr)
 }
