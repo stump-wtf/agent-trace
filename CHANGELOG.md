@@ -40,6 +40,11 @@ breaking changes arrive in minor releases. See the note under
   so discovery re-reads only files that actually changed (#80). Steady-state
   `ListSessions` over the same corpus drops from 2.3s to ~4ms. Adapters
   constructed directly, without a `SummaryCache`, are unaffected.
+- Every `FilteredLister` implementation is now checked against the shared
+  oracle its contract names — identical results to `ListSessions` followed by
+  in-memory filtering (#37). Codex and Pi had no equivalence test at all, and
+  the matrix predated `ActiveSince`, so the bound the JSONL adapters actually
+  push down was untested. Test-only; no behavior change.
 - `Summarize` and `AgentGraphBuilder.AgentGraph` take a `context.Context` (#72),
   closing the gap #67 left open. Both opened `context.Background()`, so a
   cancelled caller still waited on the SQLite query behind every Crush and

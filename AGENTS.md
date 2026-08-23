@@ -56,6 +56,8 @@ Discovers and parses live agent session logs from per-harness directories, emitt
 
 **SQLite helpers** (`sqlite_helpers.go`): `openSQLite` opens a read-only SQLite database with a `sync.Map`-based connection cache to avoid per-poll open/close churn. `splitDBSessionPath` splits composite `"dbPath/sessionID"` paths. Both are generic — shared by Crush and OpenCode adapters.
 
+**Optional interfaces:** `FilteredLister` (`SessionFilter` pushdown) and `IncrementalParser` are both implemented by all five adapters, and both are *optional* — an adapter that stops implementing one keeps compiling and keeps returning correct, merely slower, results. `TestEveryDefaultAdapterImplementsFilteredLister` and `TestAllAdaptersImplementIncrementalParser` are what make that visible. Every `FilteredLister` is checked against `assertFilteredMatchesInMemory`, the shared oracle for its contract: a pushdown must produce results identical to `ListSessions` followed by in-memory filtering.
+
 **Session identification:** `sessionKey(harness, path)` produces a stable SHA-256-based key. This is intentionally NOT the agent-level session ID, because Codex resume rollouts can share an ID across multiple files. Use `sessionKey` for routing/routing keys, `SessionMeta.ID` for display only.
 
 **Injected user messages** (`helpers.go`): `injectedUserMessage()` filters harness-injected text (e.g., `# AGENTS.md instructions`, anything wrapped in `<...>`) so it doesn't inflate turn stats. When adding new harness adapters, route user messages through this filter.
