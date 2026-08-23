@@ -121,14 +121,19 @@ func scanJSONLSummaryWith(f *os.File, b summaryBudget, visit func([]byte)) (bool
 // .jsonl, which this scan is pointed at whatever the trajectory directories
 // contain — is pulled entirely into memory before the budget is consulted.
 func scanSummaryHead(f *os.File, b summaryBudget, visit func([]byte)) (int64, bool, error) {
-	reader := bufio.NewReaderSize(io.LimitReader(f, b.maxBytes), 64*1024)
+	// The limiter is given one byte of headroom past the budget so a genuine
+	// end-of-file that lands exactly on maxBytes is distinguishable from a line
+	// the limiter cut off. Without it the two are identical — err is io.EOF and
+	// the bytes in hand end at the budget either way — and the real final line
+	// gets dropped as if it were a fragment.
+	reader := bufio.NewReaderSize(io.LimitReader(f, b.maxBytes+1), 64*1024)
 	var consumed int64
 	for lines := 0; ; lines++ {
 		if lines >= b.maxLines || consumed >= b.maxBytes {
 			return consumed, false, nil
 		}
 		line, err := reader.ReadBytes('\n')
-		if errors.Is(err, io.EOF) && consumed+int64(len(line)) >= b.maxBytes {
+		if errors.Is(err, io.EOF) && consumed+int64(len(line)) > b.maxBytes {
 			// The limiter cut this line off, so what is in hand is a leading
 			// fragment rather than a record — the same thing scanSummaryTail
 			// drops when its seek lands mid-line, and for the same reason:
@@ -136,10 +141,10 @@ func scanSummaryHead(f *os.File, b summaryBudget, visit func([]byte)) (int64, bo
 			// consumed stays where it is so the returned offset remains a
 			// true line boundary and the tail scan can resume from it.
 			//
-			// A file whose real end coincides exactly with the budget takes
-			// this path too and loses nothing: the head reports incomplete,
-			// and the tail scan re-reads from that boundary and delivers the
-			// line whole.
+			// A file whose real end coincides exactly with the budget does
+			// NOT take this path: the headroom byte above proves the file
+			// ended, so its final line is delivered whole and the head
+			// reports complete, exactly as a full scan would.
 			return consumed, false, nil
 		}
 		consumed += int64(len(line))

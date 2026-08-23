@@ -269,9 +269,11 @@ func TestScanSummaryHeadStopsAtALineBoundary(t *testing.T) {
 
 // TestScanJSONLSummaryKeepsALineThatEndsExactlyAtTheBudget guards the fidelity
 // property the budget must not cost: dropping the truncated fragment must not
-// drop a *whole* line whose end happens to coincide with the limit. The head
-// cannot tell that case from a real truncation, so the tail scan is what makes
-// it whole again.
+// drop a *whole* line whose end happens to coincide with the limit. The
+// limiter's one byte of headroom is what separates the two cases, so the head
+// delivers this line itself rather than leaning on the tail scan to recover
+// it — which matters, because the tail window cannot always reach back far
+// enough to do so. See TestScanJSONLSummaryKeepsAnExactBudgetLineTooLongForTheTail.
 func TestScanJSONLSummaryKeepsALineThatEndsExactlyAtTheBudget(t *testing.T) {
 	last := `{"n":1}`
 	first := `{"n":0}` + "\n"
@@ -314,5 +316,49 @@ func TestScanJSONLSummaryTailSurvivesAnOversizedHeadLine(t *testing.T) {
 	}
 	if len(got) == 0 || got[len(got)-1] != last {
 		t.Errorf("visited %q, want the final line %q delivered", got, last)
+	}
+}
+
+// TestScanJSONLSummaryKeepsAnExactBudgetLineTooLongForTheTail pins the case the
+// tail scan cannot rescue. When a file's real end lands exactly on maxBytes and
+// its final line is longer than tailBytes, the tail window starts inside that
+// line, drops it as a leading fragment, and the record is gone — taking EndedAt
+// with it, silently, on a file that is not malformed at all.
+//
+// Recovering it is the reason scanSummaryHead reads through a limiter set one
+// byte past the budget: without that headroom a genuine EOF at maxBytes is
+// byte-for-byte indistinguishable from a line the limiter cut off.
+//
+// @joestump 08/23/2026 - Added while reviewing #87.
+func TestScanJSONLSummaryKeepsAnExactBudgetLineTooLongForTheTail(t *testing.T) {
+	const maxBytes, tailBytes = 1024, 64
+
+	first := `{"n":0}` + "\n"
+	// A final line with no trailing newline, sized so the file ends exactly on
+	// the budget and the line itself overruns the tail window.
+	last := `{"pad":"` + strings.Repeat("x", maxBytes-len(first)-len(`{"pad":""}`)) + `"}`
+	if len(first)+len(last) != maxBytes {
+		t.Fatalf("fixture is %d bytes, want exactly %d", len(first)+len(last), maxBytes)
+	}
+	if len(last) <= tailBytes {
+		t.Fatalf("final line is %d bytes, must exceed tailBytes=%d to exercise this path", len(last), tailBytes)
+	}
+
+	f := writeRaw(t, []byte(first+last))
+	got, complete, err := collect(f, summaryBudget{maxLines: 64, maxBytes: maxBytes, tailBytes: tailBytes})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if !complete {
+		t.Errorf("complete = false, want true: the file ended at the budget, it was not truncated")
+	}
+	want := []string{strings.TrimSuffix(first, "\n"), last}
+	if len(got) != len(want) {
+		t.Fatalf("visited %d lines, want %d — the final line was dropped as a fragment", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %.40q..., want %.40q...", i, got[i], want[i])
+		}
 	}
 }
