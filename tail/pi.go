@@ -20,12 +20,18 @@ type PiAdapter struct {
 	Dir string // override default session directory
 	// opts carries classify.Options from the watcher (verify patterns, etc).
 	opts *classify.Options
+	// cache memoizes summaries across scans so an unchanged session file is
+	// not re-read. When nil, every scan summarizes from scratch.
+	cache *SummaryCache
 }
 
 func (a PiAdapter) Harness() Harness { return HarnessPi }
 
 // SetOptions injects classify.Options for verify-pattern customization.
 func (a *PiAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
+
+// SetSummaryCache injects the summary cache the watcher shares across scans.
+func (a *PiAdapter) SetSummaryCache(c *SummaryCache) { a.cache = c }
 
 // Diagnostics checks whether the Pi session directory exists and is readable.
 func (a PiAdapter) Diagnostics() []DiagnosticCheck {
@@ -77,7 +83,7 @@ func (a PiAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
 		}
-		meta, err := a.Summarize(ctx, path)
+		meta, err := summarizeCached(ctx, a.cache, entry, path, a.Summarize)
 		if err == nil {
 			metas = append(metas, meta)
 		}

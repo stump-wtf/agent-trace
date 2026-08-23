@@ -24,12 +24,18 @@ type CodexAdapter struct {
 	IndexPath string // override session_index.jsonl location for title resolution
 	// opts carries classify.Options from the watcher (verify patterns, etc).
 	opts *classify.Options
+	// cache memoizes summaries across scans so an unchanged session file is
+	// not re-read. When nil, every scan summarizes from scratch.
+	cache *SummaryCache
 }
 
 func (a CodexAdapter) Harness() Harness { return HarnessCodex }
 
 // SetOptions injects classify.Options for verify-pattern customization.
 func (a *CodexAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
+
+// SetSummaryCache injects the summary cache the watcher shares across scans.
+func (a *CodexAdapter) SetSummaryCache(c *SummaryCache) { a.cache = c }
 
 // Diagnostics checks whether the Codex session directory exists and is readable.
 func (a CodexAdapter) Diagnostics() []DiagnosticCheck {
@@ -80,7 +86,7 @@ func (a CodexAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
 		}
-		meta, err := a.Summarize(ctx, path)
+		meta, err := summarizeCached(ctx, a.cache, entry, path, a.Summarize)
 		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}

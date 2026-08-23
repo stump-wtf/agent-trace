@@ -23,9 +23,12 @@ type Watcher struct {
 	pendingMarks map[string][]classify.Mark // session key → marks awaiting an event to ride on
 	fileState    map[string]string          // session key → last known EndedAt (change detection)
 	parseState   map[string]int64           // session key → incremental parse watermark (byte offset or native timestamp unit)
-	mu           sync.Mutex
-	done         chan struct{}
-	stopOnce     sync.Once
+	// summaries memoizes per-file session summaries across scans so
+	// discovery re-reads only what changed. Swept after each scan.
+	summaries *SummaryCache
+	mu        sync.Mutex
+	done      chan struct{}
+	stopOnce  sync.Once
 }
 
 // eventBufferSize is the depth of the watcher's outbound event channel. It
@@ -227,6 +230,9 @@ func NewWatcher(cfg IdleConfig, adapters []Adapter) *Watcher {
 // NewWatcherWithConfig creates a watcher with full WatchConfig control.
 // If cfg.VerifyPatterns is non-empty, the watcher injects them into each
 // adapter that implements OptionsSetter before the first scan.
+//
+// It also shares one SummaryCache across every adapter that accepts one, so
+// repeated scans re-read only the session files that actually changed.
 func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 2 * time.Second
@@ -240,9 +246,16 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 			}
 		}
 	}
+	summaries := NewSummaryCache()
+	for _, a := range adapters {
+		if sc, ok := a.(SummaryCacheSetter); ok {
+			sc.SetSummaryCache(summaries)
+		}
+	}
 	return &Watcher{
 		cfg:          cfg,
 		adapters:     adapters,
+		summaries:    summaries,
 		events:       make(chan Event, eventBufferSize),
 		lastActivity: make(map[string]time.Time),
 		lastEmitted:  make(map[string]int),
@@ -321,6 +334,15 @@ func (w *Watcher) ScanOnce(ctx context.Context) error {
 }
 
 func (w *Watcher) scanOnce(ctx context.Context) {
+	// Only after a scan that ran to completion: an aborted scan has not looked
+	// up every live file, so sweeping then would evict entries that are still
+	// current and make the next scan re-read them.
+	completed := false
+	defer func() {
+		if completed {
+			w.summaries.Sweep()
+		}
+	}()
 	for _, a := range w.adapters {
 		select {
 		case <-w.done:
@@ -344,6 +366,7 @@ func (w *Watcher) scanOnce(ctx context.Context) {
 			w.scanSession(ctx, a, meta)
 		}
 	}
+	completed = true
 }
 
 func (w *Watcher) scanSession(ctx context.Context, a Adapter, meta SessionMeta) {

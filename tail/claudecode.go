@@ -21,12 +21,18 @@ type ClaudeCodeAdapter struct {
 	// opts carries classify.Options from the watcher (verify patterns, etc).
 	// When nil, Parse falls back to osClassifyOptions.
 	opts *classify.Options
+	// cache memoizes summaries across scans so an unchanged session file is
+	// not re-read. When nil, every scan summarizes from scratch.
+	cache *SummaryCache
 }
 
 func (a ClaudeCodeAdapter) Harness() Harness { return HarnessClaudeCode }
 
 // SetOptions injects classify.Options for verify-pattern customization.
 func (a *ClaudeCodeAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
+
+// SetSummaryCache injects the summary cache the watcher shares across scans.
+func (a *ClaudeCodeAdapter) SetSummaryCache(c *SummaryCache) { a.cache = c }
 
 // Diagnostics checks whether the Claude Code session directory exists and is readable.
 func (a ClaudeCodeAdapter) Diagnostics() []DiagnosticCheck {
@@ -80,7 +86,7 @@ func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, err
 		if filepath.Ext(path) != ".jsonl" || strings.HasPrefix(filepath.Base(path), "agent-") {
 			return nil
 		}
-		meta, err := a.Summarize(ctx, path)
+		meta, err := summarizeCached(ctx, a.cache, entry, path, a.Summarize)
 		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}
