@@ -1009,3 +1009,45 @@ func TestPiParseSinceStaysCorrectWhenTheBackwardsScanGivesUp(t *testing.T) {
 		t.Fatalf("got %d events, want the one resolved call", len(events))
 	}
 }
+
+// TestOpenCodeParseSinceWatermarkSurvivesOutOfOrderPartTimes pins the pairing
+// between the incremental query's filter key and its ordering key.
+//
+// ParseSince filters on p.time_created and returns a p.time_created value as
+// the watermark, but Parse groups its rows by m.time_created. Ordering the
+// incremental query the same way lets a part sort ahead of one with a lower
+// time, so the last safe point — taken from the last row in ORDER BY order —
+// lands *below* a row that was already emitted. The next poll's strict `>`
+// then matches that row again and the event is delivered twice.
+//
+// The fixture inverts the two orderings deliberately: m1 precedes m2, but m1's
+// part was created after m2's.
+//
+// @joestump 08/23/2026 - Added while reviewing #89.
+func TestOpenCodeParseSinceWatermarkSurvivesOutOfOrderPartTimes(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+	db, dbPath := openTestOpenCodeDB(t)
+
+	insertOpenCodeMessage(t, db, "m1", "ses_1", `{"role":"assistant","content":""}`, 1784148217000)
+	insertOpenCodeMessage(t, db, "m2", "ses_1", `{"role":"assistant","content":""}`, 1784148218000)
+	insertOpenCodePart(t, db, "p1", "m1", "ses_1", `{"type":"tool","tool":"bash","callID":"call-1","state":{"status":"completed","input":{"command":"a"},"output":"ok"}}`, 1784148219000)
+	insertOpenCodePart(t, db, "p2", "m2", "ses_1", `{"type":"tool","tool":"bash","callID":"call-2","state":{"status":"completed","input":{"command":"b"},"output":"ok"}}`, 1784148218500)
+
+	a := OpenCodeAdapter{DBPath: dbPath}
+	first, _, _, watermark, err := a.ParseSince(t.Context(), dbPath+"/ses_1", 0, 0)
+	if err != nil {
+		t.Fatalf("ParseSince: %v", err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first poll gave %d events, want both rows", len(first))
+	}
+
+	again, _, _, _, err := a.ParseSince(t.Context(), dbPath+"/ses_1", watermark, len(first))
+	if err != nil {
+		t.Fatalf("ParseSince: %v", err)
+	}
+	if len(again) != 0 {
+		t.Errorf("second poll re-emitted %d event(s) the first poll already delivered; watermark %d sits below a row it covered", len(again), watermark)
+	}
+}
