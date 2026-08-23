@@ -199,3 +199,120 @@ func TestScanJSONLSummaryEmptyFile(t *testing.T) {
 		t.Errorf("visited %d lines, want 0: %q", len(got), got)
 	}
 }
+
+// writeRaw writes exact bytes to a temp file and opens it, for fixtures whose
+// point is what is *not* at a line boundary.
+func writeRaw(t *testing.T, data []byte) *os.File {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+// TestScanSummaryHeadNeverDeliversMoreThanTheByteBudget pins the bound the
+// budget is named for. A .jsonl with no newline in it is not hypothetical —
+// the scan runs over whatever the trajectory directories contain, including
+// foreign and corrupt files this library did not write — and before the head
+// read through an io.LimitReader, bufio grew such a line to its full length
+// before the budget was ever consulted.
+func TestScanSummaryHeadNeverDeliversMoreThanTheByteBudget(t *testing.T) {
+	const budget = 64 << 10
+	f := writeRaw(t, []byte(`{"pad":"`+strings.Repeat("x", 8<<20)+`"}`))
+
+	var largest int
+	_, _, err := scanSummaryHead(f, summaryBudget{maxLines: 64, maxBytes: budget, tailBytes: 1 << 10},
+		func(data []byte) {
+			if len(data) > largest {
+				largest = len(data)
+			}
+		})
+	if err != nil {
+		t.Fatalf("head scan: %v", err)
+	}
+	if largest > budget {
+		t.Errorf("head delivered a %d-byte line against a %d-byte budget", largest, budget)
+	}
+}
+
+// TestScanSummaryHeadStopsAtALineBoundary is the constraint the fragment drop
+// exists to preserve: headEnd is where the tail scan resumes, so a headEnd
+// that lands mid-line would make the tail either re-deliver a partial record
+// or truncate the next one.
+func TestScanSummaryHeadStopsAtALineBoundary(t *testing.T) {
+	const budget = 1 << 10
+	first := `{"n":0}` + "\n"
+	f := writeRaw(t, []byte(first+`{"pad":"`+strings.Repeat("x", 4*budget)+`"}`+"\n"))
+
+	var got []string
+	headEnd, complete, err := scanSummaryHead(f, summaryBudget{maxLines: 64, maxBytes: budget, tailBytes: 1 << 10},
+		func(data []byte) { got = append(got, string(data)) })
+	if err != nil {
+		t.Fatalf("head scan: %v", err)
+	}
+	if complete {
+		t.Error("complete = true, want false — the file is larger than the budget")
+	}
+	if headEnd != int64(len(first)) {
+		t.Errorf("headEnd = %d, want %d (the boundary after the only whole line)", headEnd, len(first))
+	}
+	if len(got) != 1 || got[0] != strings.TrimSuffix(first, "\n") {
+		t.Errorf("visited %q, want only the whole first line", got)
+	}
+}
+
+// TestScanJSONLSummaryKeepsALineThatEndsExactlyAtTheBudget guards the fidelity
+// property the budget must not cost: dropping the truncated fragment must not
+// drop a *whole* line whose end happens to coincide with the limit. The head
+// cannot tell that case from a real truncation, so the tail scan is what makes
+// it whole again.
+func TestScanJSONLSummaryKeepsALineThatEndsExactlyAtTheBudget(t *testing.T) {
+	last := `{"n":1}`
+	first := `{"n":0}` + "\n"
+	f := writeRaw(t, []byte(first+last))
+
+	got, _, err := collect(f, summaryBudget{
+		maxLines:  64,
+		maxBytes:  int64(len(first) + len(last)),
+		tailBytes: 1 << 10,
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	want := []string{strings.TrimSuffix(first, "\n"), last}
+	if len(got) != len(want) {
+		t.Fatalf("visited %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestScanJSONLSummaryTailSurvivesAnOversizedHeadLine is the end-to-end shape
+// the budget protects: a session whose opening line blows the byte budget must
+// still report its closing timestamp, because the head stopping early is
+// exactly what the tail scan exists to compensate for.
+func TestScanJSONLSummaryTailSurvivesAnOversizedHeadLine(t *testing.T) {
+	const budget = 1 << 10
+	last := `{"n":"last"}`
+	f := writeRaw(t, []byte(`{"pad":"`+strings.Repeat("x", 4*budget)+`"}`+"\n"+last+"\n"))
+
+	got, complete, err := collect(f, summaryBudget{maxLines: 64, maxBytes: budget, tailBytes: 1 << 10})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if complete {
+		t.Error("complete = true, want false")
+	}
+	if len(got) == 0 || got[len(got)-1] != last {
+		t.Errorf("visited %q, want the final line %q delivered", got, last)
+	}
+}
