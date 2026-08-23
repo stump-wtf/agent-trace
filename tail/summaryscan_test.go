@@ -24,11 +24,16 @@ func writeLines(t *testing.T, lines []string) *os.File {
 }
 
 func collect(f *os.File, b summaryBudget) ([]string, bool, error) {
+	got, scan, err := collectScan(f, b)
+	return got, scan.Complete, err
+}
+
+func collectScan(f *os.File, b summaryBudget) ([]string, summaryScan, error) {
 	var got []string
-	complete, err := scanJSONLSummaryWith(f, b, func(data []byte) {
+	scan, err := scanJSONLSummaryWith(f, b, func(data []byte) {
 		got = append(got, string(data))
 	})
-	return got, complete, err
+	return got, scan, err
 }
 
 func TestScanJSONLSummaryConsumesSmallFileWhole(t *testing.T) {
