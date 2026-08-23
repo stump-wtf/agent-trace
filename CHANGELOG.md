@@ -29,7 +29,9 @@ breaking changes arrive in minor releases. See the note under
   OpenCode stores the call and its result as one row that mutates in place.
   Codex additionally holds its watermark for one line after an apply_patch
   output, so the patch_apply_end that enriches it is read into the same window
-  a full Parse would have used.
+  a full Parse would have used. Pi's per-poll continuation check reads backwards
+  from the watermark under a 4 MiB cap and falls back to a full parse rather
+  than growing to fit one enormous record.
 
 ### Changed
 

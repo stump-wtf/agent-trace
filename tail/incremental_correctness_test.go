@@ -839,7 +839,8 @@ func TestWatcherOpenCodeIncremental(t *testing.T) {
 	insertOpenCodeMessage(t, db, "m1", "ses_1", `{"role":"user","content":"start"}`, 1784148216000)
 	insertOpenCodePart(t, db, "p1", "m1", "ses_1", ocCompletedWrite, 1784148217100)
 
-	w := NewWatcherWithConfig(WatchConfig{}, []Adapter{&OpenCodeAdapter{DBPath: dbPath}})
+	// Fixed fixture timestamps; discovery scope is not what this tests.
+	w := NewWatcherWithConfig(WatchConfig{MaxAge: -1}, []Adapter{&OpenCodeAdapter{DBPath: dbPath}})
 	seen := map[int]int{}
 	drained := make(chan struct{})
 	go func() {
@@ -944,5 +945,67 @@ func TestCrushParseSinceWatermarkTieHazard(t *testing.T) {
 	}
 	if wm2 != now+1000 {
 		t.Errorf("poll 2: watermark = %d, want %d", wm2, now+1000)
+	}
+}
+
+// --- Bounded backwards scan ---
+
+// TestJSONLLastLineBeforeGivesUpPastTheCap pins the bound on the Pi adapter's
+// per-poll continuation check. The scan doubles its window until it finds a
+// record boundary, and the record it is looking back at is a session's last
+// line — routinely one large tool result. Without a cap the window grows to
+// the size of that record on every single poll, which is the cost incremental
+// parsing exists to avoid.
+//
+// Giving up is safe by construction: the caller reads nil as "cannot confirm
+// a linear append" and falls back to a full parse.
+func TestJSONLLastLineBeforeGivesUpPastTheCap(t *testing.T) {
+	huge := `{"pad":"` + strings.Repeat("x", jsonlLastLineCap+(1<<20)) + `"}`
+	path := writeTempJSONL(t, "s.jsonl", huge+"\n")
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := jsonlLastLineBefore(path, info.Size()); got != nil {
+		t.Errorf("returned a %d-byte line, want nil past the %d-byte cap", len(got), jsonlLastLineCap)
+	}
+}
+
+// TestJSONLLastLineBeforeFindsARecordInsideTheCap is the other half: the cap
+// must not turn the common case into a full parse on every poll.
+func TestJSONLLastLineBeforeFindsARecordInsideTheCap(t *testing.T) {
+	want := `{"n":2}`
+	path := writeTempJSONL(t, "s.jsonl", `{"n":1}`+"\n"+want+"\n")
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(jsonlLastLineBefore(path, info.Size())); got != want {
+		t.Errorf("last line before EOF = %q, want %q", got, want)
+	}
+}
+
+// TestPiParseSinceStaysCorrectWhenTheBackwardsScanGivesUp is the cap seen from
+// the adapter: an unconfirmable continuation must degrade to a full parse, not
+// to a wrong answer or a lost event.
+func TestPiParseSinceStaysCorrectWhenTheBackwardsScanGivesUp(t *testing.T) {
+	body := `{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("x", jsonlLastLineCap+(1<<20)) + `"}]}`
+	path := writeTempJSONL(t, "s.jsonl", piHeaderLine("s1", "2026-01-01T10:00:00Z")+
+		piEntryLine("e1", "", body, "2026-01-01T10:00:01Z"))
+	a := PiAdapter{}
+	wm := a.Watermark(t.Context(), path)
+
+	appendLines(t, path,
+		piEntryLine("e2", "e1", `{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}]}`, "2026-01-01T10:00:02Z")+
+			piEntryLine("e3", "e2", `{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"ok"}]}`, "2026-01-01T10:00:03Z"))
+
+	events, _, _, _, err := a.ParseSince(t.Context(), path, wm, 0)
+	if err != nil {
+		t.Fatalf("ParseSince: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want the one resolved call", len(events))
 	}
 }

@@ -88,6 +88,13 @@ func jsonlFirstLine(path string) []byte {
 // The read is a bounded backwards scan, not a stream from the start: this
 // runs on every poll in the Pi adapter's continuation check, and the record
 // it wants is at the tail.
+//
+// The window doubles until it finds a record boundary and then stops at
+// jsonlLastLineCap. Without the cap the growth is the file's own size, so one
+// enormous record — a big tool result, the ordinary shape of a transcript's
+// last line — is pulled whole into memory on every poll. Giving up returns
+// nil, which the caller reads as "cannot confirm this is a linear append" and
+// answers with a full parse: slower on that poll, never wrong.
 func jsonlLastLineBefore(path string, offset int64) []byte {
 	if offset <= 0 {
 		return nil
@@ -99,6 +106,9 @@ func jsonlLastLineBefore(path string, offset int64) []byte {
 	defer func() { _ = f.Close() }()
 	window := int64(8192)
 	for {
+		if window > jsonlLastLineCap {
+			return nil
+		}
 		start := offset - window
 		if start < 0 {
 			start = 0
@@ -122,3 +132,10 @@ func jsonlLastLineBefore(path string, offset int64) []byte {
 		window *= 2
 	}
 }
+
+// jsonlLastLineCap bounds jsonlLastLineBefore's backwards scan. It is sized
+// well past a normal record and well below a pathological one: the largest
+// line in the measured Claude Code corpus is ~1.1 MiB (see
+// defaultSummaryBudget), so a real record is found long before this, and a
+// record that is not is one no per-poll read should be growing to fit.
+const jsonlLastLineCap = 4 << 20
