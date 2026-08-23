@@ -35,7 +35,7 @@ func TestSummarizeCachedDoesNotCacheIOErrors(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		if _, err := summarizeCached(context.Background(), c, entry, path, ioFail); err == nil {
+		if _, err := summarizeCached(context.Background(), c, HarnessClaudeCode, entry, path, ioFail); err == nil {
 			t.Fatal("expected the I/O error to be returned")
 		}
 	}
@@ -65,7 +65,7 @@ func TestSummarizeCachedStillCachesNotASessionVerdict(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		if _, err := summarizeCached(context.Background(), c, entry, path, verdict); err == nil {
+		if _, err := summarizeCached(context.Background(), c, HarnessClaudeCode, entry, path, verdict); err == nil {
 			t.Fatal("expected the verdict to be returned")
 		}
 	}

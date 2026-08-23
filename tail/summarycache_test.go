@@ -230,3 +230,45 @@ func TestWatcherInstallsSummaryCache(t *testing.T) {
 		t.Errorf("cache installed on %d adapters, want 3 (claude-code, codex, pi)", installed)
 	}
 }
+
+// One SummaryCache is shared across every adapter the watcher owns, so its key
+// has to carry the harness as well as the path. Two adapters pointed at one
+// directory through their Dir override is a legal use of the public API, and
+// when the key was the path alone the first adapter's verdict was served to the
+// second: Codex cached "not a Codex session" against the file and the Claude
+// Code adapter then dropped a session it recognizes perfectly well.
+//
+// @joestump-agent 08/23/2026 - Review fix; fails against a path-only key.
+func TestSummaryCacheDoesNotLeakVerdictsBetweenAdapters(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s1.jsonl")
+	body := `{"type":"user","timestamp":"2026-01-01T10:00:00Z","sessionId":"s1","cwd":"/w",` +
+		`"message":{"role":"user","content":"hi"}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	shared := NewSummaryCache()
+	cc := &ClaudeCodeAdapter{Dir: dir}
+	cx := &CodexAdapter{Dir: dir}
+	cc.SetSummaryCache(shared)
+	cx.SetSummaryCache(shared)
+
+	// Codex goes first and rejects the file, which is a cacheable verdict.
+	if got, err := cx.ListSessions(context.Background()); err != nil {
+		t.Fatalf("codex ListSessions: %v", err)
+	} else if len(got) != 0 {
+		t.Fatalf("codex listed %d sessions, want 0", len(got))
+	}
+
+	got, err := cc.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("claude code ListSessions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("claude code listed %d sessions, want 1 — Codex's verdict leaked across the cache key", len(got))
+	}
+	if got[0].ID != "s1" {
+		t.Fatalf("listed session ID = %q, want %q", got[0].ID, "s1")
+	}
+}

@@ -64,32 +64,46 @@ type SummaryCacheSetter interface {
 	SetSummaryCache(c *SummaryCache)
 }
 
+// summaryKey scopes a cache entry to the adapter that produced it.
+//
+// One cache is shared across every adapter the watcher owns, and a SessionMeta
+// is only meaningful to the harness that parsed it — as is the "not a <harness>
+// session" verdict, which is the error the cache exists to memoize. Two
+// adapters can legitimately be pointed at one directory via their Dir override,
+// and keying on the path alone then serves the first adapter's verdict to the
+// second: the file is either dropped from discovery entirely or listed under
+// the wrong harness. The NUL separator cannot occur in either component, so
+// distinct (harness, path) pairs cannot collide.
+func summaryKey(h Harness, path string) string {
+	return string(h) + "\x00" + path
+}
+
 // lookup returns a cached entry when one was taken from a file with the same
 // size and modification time. A nil cache never hits.
-func (c *SummaryCache) lookup(path string, info os.FileInfo) (summaryEntry, bool) {
+func (c *SummaryCache) lookup(key string, info os.FileInfo) (summaryEntry, bool) {
 	if c == nil || info == nil {
 		return summaryEntry{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.entries[path]
+	e, ok := c.entries[key]
 	if !ok || e.size != info.Size() || !e.modTime.Equal(info.ModTime()) {
 		return summaryEntry{}, false
 	}
 	e.generation = c.generation
-	c.entries[path] = e
+	c.entries[key] = e
 	return e, true
 }
 
 // store records a summary against the file identity it was taken from. A nil
 // cache discards it.
-func (c *SummaryCache) store(path string, info os.FileInfo, meta SessionMeta, err error) {
+func (c *SummaryCache) store(key string, info os.FileInfo, meta SessionMeta, err error) {
 	if c == nil || info == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[path] = summaryEntry{
+	c.entries[key] = summaryEntry{
 		size:       info.Size(),
 		modTime:    info.ModTime(),
 		meta:       meta,
@@ -107,9 +121,9 @@ func (c *SummaryCache) Sweep() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for path, e := range c.entries {
+	for key, e := range c.entries {
 		if e.generation != c.generation {
-			delete(c.entries, path)
+			delete(c.entries, key)
 		}
 	}
 	c.generation++
@@ -134,13 +148,15 @@ func (c *SummaryCache) Len() int {
 func summarizeCached(
 	ctx context.Context,
 	c *SummaryCache,
+	h Harness,
 	entry os.DirEntry,
 	path string,
 	summarize func(context.Context, string) (SessionMeta, error),
 ) (SessionMeta, error) {
+	key := summaryKey(h, path)
 	info, infoErr := entry.Info()
 	if infoErr == nil {
-		if e, ok := c.lookup(path, info); ok {
+		if e, ok := c.lookup(key, info); ok {
 			return e.meta, e.err
 		}
 	}
@@ -149,7 +165,7 @@ func summarizeCached(
 		// A cancelled scan says nothing about the file, so caching that
 		// result would poison the entry for every later scan.
 		if ctx.Err() == nil && cacheableResult(err) {
-			c.store(path, info, meta, err)
+			c.store(key, info, meta, err)
 		}
 	}
 	return meta, err

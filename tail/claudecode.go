@@ -86,7 +86,7 @@ func (a ClaudeCodeAdapter) ListSessions(ctx context.Context) ([]SessionMeta, err
 		if filepath.Ext(path) != ".jsonl" || strings.HasPrefix(filepath.Base(path), "agent-") {
 			return nil
 		}
-		meta, err := summarizeCached(ctx, a.cache, entry, path, a.Summarize)
+		meta, err := summarizeCached(ctx, a.cache, a.Harness(), entry, path, a.Summarize)
 		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}

@@ -86,7 +86,7 @@ func (a CodexAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
 		}
-		meta, err := summarizeCached(ctx, a.cache, entry, path, a.Summarize)
+		meta, err := summarizeCached(ctx, a.cache, a.Harness(), entry, path, a.Summarize)
 		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}
