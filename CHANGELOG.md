@@ -11,6 +11,17 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-24
+
+A performance and correctness release for `tail`. Every adapter now parses
+incrementally, discovery is bounded by an activity window and memoized across
+scans, and `Summarize` reads a bounded head and tail instead of the whole file:
+one pass over a 215-session corpus drops from 2.3s to 0.4s, and the steady state
+to ~4ms.
+
+One change is breaking for library consumers — `WatchConfig.MaxAge` now defaults
+to 48h — and is called out under Changed.
+
 ### Added
 
 - `SessionFilter.ActiveSince` bounds discovery by when a session was last
@@ -154,13 +165,15 @@ Bugs worth calling out because they produced wrong output rather than errors:
 
 ## Versioning
 
-`v0.x` means the API is still moving. Two breaking changes landed in the run-up to
-this release and issue #72 proposes another, so treat every minor bump as
-potentially breaking and pin exactly.
+`v0.x` means the API is still moving, and this project's minor bumps carry
+breaking changes rather than deferring them to a major: v0.1.0 shipped two and
+v0.2.0 ships another. Treat every minor bump as potentially breaking and pin
+exactly.
 
 The module path lives on the GitHub mirror because Go resolves versions there.
 Tags are created on Gitea and reach GitHub through the push mirror — never tag the
 mirror directly, as the next sync prunes refs the source does not have.
 
-[Unreleased]: https://gitea.stump.rocks/stump.wtf/agent-trace/compare/v0.1.0...HEAD
+[Unreleased]: https://gitea.stump.rocks/stump.wtf/agent-trace/compare/v0.2.0...HEAD
+[0.2.0]: https://gitea.stump.rocks/stump.wtf/agent-trace/releases/tag/v0.2.0
 [0.1.0]: https://gitea.stump.rocks/stump.wtf/agent-trace/releases/tag/v0.1.0
