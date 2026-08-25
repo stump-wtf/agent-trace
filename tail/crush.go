@@ -159,15 +159,38 @@ type crushProjectsFile struct {
 	Projects []crushProjectEntry `json:"projects"`
 }
 
-func (a CrushAdapter) dbPaths() []struct {
+// crushDB is a project database and the working directory that owns it.
+type crushDB struct {
 	dbPath string
 	cwd    string
-} {
+}
+
+// dbPaths resolves projects.json into the set of databases to scan, one entry
+// per database.
+//
+// Crush registers a project keyed on its working directory, not on its data
+// directory, so two entries can name the same data_dir — the same crush.db
+// reached from two spellings of a path, or two working directories configured
+// to share one store. Every caller here loops over the result and appends what
+// it finds, and nothing downstream dedupes: ListSessionsFiltered's sessions
+// carry identical Keys through the sort, and AgentGraph gains a second copy of
+// every node. So a registry with three entries pointing at one store listed
+// each of its sessions three times.
+//
+// Deduping on the joined path rather than the raw data_dir string also folds
+// together the spellings filepath.Join normalizes ("/p/.crush", "/p/./crush/.."
+// and a trailing slash all clean to the same file). Symlinked stores are still
+// two entries; resolving those would cost a syscall per registry entry to close
+// a case Crush has no way to produce.
+//
+// The winner is the entry with the newest last_accessed, because its Path is
+// the working directory the sessions in that store were most recently written
+// from — and Cwd is what Parse hands classify as the base for resolving every
+// relative path in the session. Entries whose timestamp does not parse sort
+// oldest, so a malformed one never displaces a good one.
+func (a CrushAdapter) dbPaths() []crushDB {
 	if a.DBPath != "" {
-		return []struct {
-			dbPath string
-			cwd    string
-		}{{a.DBPath, a.Cwd}}
+		return []crushDB{{a.DBPath, a.Cwd}}
 	}
 	data, err := os.ReadFile(a.projectsPath())
 	if err != nil {
@@ -177,17 +200,28 @@ func (a CrushAdapter) dbPaths() []struct {
 	if json.Unmarshal(data, &pf) != nil {
 		return nil
 	}
-	var result []struct {
-		dbPath string
-		cwd    string
-	}
+	var result []crushDB
+	at := map[string]int{}         // dbPath -> index in result
+	best := map[string]time.Time{} // dbPath -> last_accessed of the winning entry
 	for _, p := range pf.Projects {
 		dbPath := filepath.Join(p.DataDir, "crush.db")
-		if _, err := os.Stat(dbPath); err == nil {
-			result = append(result, struct {
-				dbPath string
-				cwd    string
-			}{dbPath, p.Path})
+		if _, err := os.Stat(dbPath); err != nil {
+			continue
+		}
+		accessed, _ := time.Parse(time.RFC3339Nano, p.LastAccess)
+		i, seen := at[dbPath]
+		if !seen {
+			at[dbPath] = len(result)
+			best[dbPath] = accessed
+			result = append(result, crushDB{dbPath, p.Path})
+			continue
+		}
+		// Position is held by the first entry: the scan order of a registry
+		// Crush keeps sorted by recency is worth preserving even when a later
+		// duplicate wins the cwd.
+		if accessed.After(best[dbPath]) {
+			best[dbPath] = accessed
+			result[i].cwd = p.Path
 		}
 	}
 	return result
@@ -383,9 +417,25 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 		meta.Auxiliary = true
 	}
 
-	// Read messages in order.
+	// Read messages in insertion order.
+	//
+	// created_at is the wrong sort key and was the sort key: it holds Unix
+	// SECONDS, and a tool call and its result are separate rows written well
+	// inside one second. Across live Crush databases roughly half of all
+	// messages sit in a same-second group, and in one 4086-message project 1787
+	// of those groups hold both an assistant row and its tool row. SQLite leaves
+	// the order of tied keys unspecified, so a tool_result iterated ahead of its
+	// tool_call finds no pending call, hits the `continue` below, and the call
+	// is flushed at the end with an empty result: the event survives, its output
+	// does not.
+	//
+	// rowid is the insertion counter, so it is the order Crush wrote the rows —
+	// the real conversational order that created_at only approximates. Verified
+	// monotonic against created_at on live databases (zero inversions in 4086
+	// messages). It requires messages to be an ordinary rowid table, which it
+	// has been since Crush's initial migration.
 	rows, err := db.QueryContext(ctx,
-		`SELECT id, role, parts, model, created_at FROM messages WHERE session_id = ? ORDER BY created_at`, sessionID)
+		`SELECT id, role, parts, model, created_at FROM messages WHERE session_id = ? ORDER BY rowid`, sessionID)
 	if err != nil {
 		return nil, nil, meta, err
 	}
@@ -490,9 +540,16 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 	return events, marks, meta, nil
 }
 
-// Watermark returns the latest message timestamp for the session, in the
-// units messages.created_at natively stores (Unix seconds for Crush), used
-// as an incremental watermark for SQLite-backed adapters.
+// Watermark returns the rowid of the session's last message, the cursor
+// ParseSince resumes from.
+//
+// It is a rowid and not MAX(created_at) for the reason Parse's query
+// documents: created_at is second-resolution, so the value it returns names a
+// second that is very often still being written to. The next poll's strict
+// `created_at > watermark` then skipped every further message landing in that
+// same second — permanently, since the watermark only moves forward. A rowid
+// is unique and monotonic, so "the row after this one" is exact and a full
+// Parse followed by Watermark can neither skip a row nor repeat one.
 func (a CrushAdapter) Watermark(ctx context.Context, path string) int64 {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
@@ -502,17 +559,17 @@ func (a CrushAdapter) Watermark(ctx context.Context, path string) int64 {
 	if err != nil {
 		return 0
 	}
-	var maxTS sql.NullInt64
+	var maxRow sql.NullInt64
 	err = db.QueryRowContext(ctx,
-		`SELECT MAX(created_at) FROM messages WHERE session_id = ?`, sessionID).Scan(&maxTS)
-	if err != nil || !maxTS.Valid {
+		`SELECT MAX(rowid) FROM messages WHERE session_id = ?`, sessionID).Scan(&maxRow)
+	if err != nil || !maxRow.Valid {
 		return 0
 	}
-	return maxTS.Int64
+	return maxRow.Int64
 }
 
-// ParseSince reads only messages with created_at > watermark, returning events
-// and marks with seq continuing from startSeq. This avoids re-querying and
+// ParseSince reads only messages with rowid > watermark, returning events and
+// marks with seq continuing from startSeq. This avoids re-querying and
 // re-parsing the entire message history on every watcher poll.
 func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
 	dbPath, sessionID := splitDBSessionPath(path)
@@ -558,7 +615,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 		meta.Title = filepath.Base(cwd) + " — " + sessionID[:min(8, len(sessionID))]
 	}
 
-	query := `SELECT id, role, parts, model, created_at FROM messages WHERE session_id = ? AND created_at > ? ORDER BY created_at`
+	query := `SELECT rowid, id, role, parts, model, created_at FROM messages WHERE session_id = ? AND rowid > ? ORDER BY rowid`
 	rows, err := db.QueryContext(ctx, query, sessionID, watermark)
 	if err != nil {
 		return nil, nil, meta, 0, err
@@ -573,37 +630,34 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	var marks []classify.Mark
 	seq := startSeq
 	pendingCalls := map[string]classify.ToolCall{}
-	// callTimes remembers the created_at of each still-unresolved call, so
-	// the safe point can be kept strictly below it.
-	callTimes := map[string]int64{}
+	// callRows remembers the rowid of each still-unresolved call, so the safe
+	// point can be kept strictly below it.
+	callRows := map[string]int64{}
 
-	// Watermark and result counts as of the last message that left no tool
-	// call outstanding. A Crush tool_call and its tool_result are separate
-	// message rows written seconds apart, so without this the poll that sees
-	// the call advances past it and the next poll drops the orphaned result —
-	// see the ClaudeCodeAdapter.ParseSince note for the full shape of that
-	// failure.
+	// Cursor and result counts as of the last message that left no tool call
+	// outstanding. A Crush tool_call and its tool_result are separate message
+	// rows written seconds apart, so without this the poll that sees the call
+	// advances past it and the next poll drops the orphaned result — see the
+	// ClaudeCodeAdapter.ParseSince note for the full shape of that failure.
 	//
-	// Safe points are a stack, not three scalars, because of timestamp ties.
-	// messages.created_at has second resolution, so a resolved call and a
-	// still-open call routinely share a timestamp. A safe point AT that
-	// shared second would put the watermark equal to the open call's time,
-	// and the next poll's strict `created_at > watermark` would then exclude
-	// that call — and the result that eventually lands for it — forever. The
-	// stack is rolled back to the last point strictly below the earliest
-	// unresolved call before returning.
+	// Safe points are a stack, not three scalars, because an unresolved call
+	// can be followed by rows that resolve their own calls: the stack is
+	// rolled back to the last point strictly below the earliest unresolved
+	// call before returning, cutting those later rows out of this poll and
+	// leaving them to be re-read by the next one.
 	type crushSafePoint struct {
-		t      int64
+		row    int64
 		events int
 		marks  int
 	}
 	safe := []crushSafePoint{{watermark, 0, 0}}
 
 	for rows.Next() {
+		var msgRow int64
 		var msgID, role, partsJSON string
 		var model sql.NullString
 		var msgCreatedAt int64
-		if err := rows.Scan(&msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
+		if err := rows.Scan(&msgRow, &msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
 			continue
 		}
 		ts := secToRFC3339(msgCreatedAt)
@@ -650,7 +704,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 					Timestamp: ts,
 				}
 				pendingCalls[callID] = call
-				callTimes[callID] = msgCreatedAt
+				callRows[callID] = msgRow
 			case "tool_result":
 				callID := part.Data.ToolCallID
 				call, ok := pendingCalls[callID]
@@ -658,22 +712,23 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 					continue
 				}
 				delete(pendingCalls, callID)
-				delete(callTimes, callID)
+				delete(callRows, callID)
 				result := classify.ToolResult{Content: part.Data.Content}
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
 				seq++
 			}
 		}
 		if len(pendingCalls) == 0 {
-			safe = append(safe, crushSafePoint{msgCreatedAt, len(events), len(marks)})
+			safe = append(safe, crushSafePoint{msgRow, len(events), len(marks)})
 		}
 	}
 
-	// The watermark is a messages.created_at value because that is the column
-	// the query filters on. Returning sessions.updated_at, as this did, mixes
-	// two clocks: the session row is touched after its messages are inserted,
-	// so the next poll's `created_at > watermark` skips any message written in
-	// the gap between them, and skips it permanently.
+	// The watermark is a messages.rowid because that is the column the query
+	// filters on. It was sessions.updated_at once, which mixed two clocks and
+	// skipped messages written between them, and then messages.created_at,
+	// which resumed past a second that was still being written to. A rowid is
+	// the column the ORDER BY and the WHERE now agree on, and it admits no
+	// ties, so "resume after this row" means exactly that.
 	//
 	// An iteration error is returned rather than swallowed: truncating here
 	// would advance nothing — the watcher only stores newWatermark on success —
@@ -682,19 +737,19 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	if err := rows.Err(); err != nil {
 		return nil, nil, meta, watermark, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
 	}
-	if len(callTimes) > 0 {
+	if len(callRows) > 0 {
 		earliest := int64(0)
-		for _, t := range callTimes {
-			if earliest == 0 || t < earliest {
-				earliest = t
+		for _, r := range callRows {
+			if earliest == 0 || r < earliest {
+				earliest = r
 			}
 		}
-		for len(safe) > 1 && safe[len(safe)-1].t >= earliest {
+		for len(safe) > 1 && safe[len(safe)-1].row >= earliest {
 			safe = safe[:len(safe)-1]
 		}
 	}
 	sp := safe[len(safe)-1]
-	return events[:sp.events], marks[:sp.marks], meta, sp.t, nil
+	return events[:sp.events], marks[:sp.marks], meta, sp.row, nil
 }
 
 type crushPart struct {

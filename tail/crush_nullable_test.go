@@ -163,3 +163,67 @@ func TestCrushParseKeepsMessagesWithNullModel(t *testing.T) {
 		t.Errorf("model = %q, want sonnet", meta.Model)
 	}
 }
+
+// TestCrushDedupesProjectsSharingADataDir covers a registry that names one
+// crush.db from more than one entry. Crush keys a project on its working
+// directory, so nothing stops two entries resolving to the same store — and
+// the scan loop appends what each entry finds, with no downstream dedupe: the
+// duplicated sessions carry identical Keys straight through the sort and out
+// to the caller.
+func TestCrushDedupesProjectsSharingADataDir(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	dbPath := filepath.Join(dataDir, "crush.db")
+	createTestCrushDB(t, dbPath)
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		`INSERT INTO sessions (id, parent_session_id, title, created_at, updated_at)
+		 VALUES ('s1', NULL, 'only session', 1000, 1000)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Three spellings of one store: a stale entry, the current one, and a path
+	// that only differs in the ways filepath.Join normalizes away.
+	oldCwd := filepath.Join(dir, "old-checkout")
+	newCwd := filepath.Join(dir, "current-checkout")
+	data, err := json.Marshal(crushProjectsFile{Projects: []crushProjectEntry{
+		{Path: oldCwd, DataDir: dataDir, LastAccess: "2026-01-01T00:00:00Z"},
+		{Path: newCwd, DataDir: dataDir, LastAccess: "2026-06-01T00:00:00Z"},
+		{Path: filepath.Join(dir, "third"), DataDir: dataDir + "/", LastAccess: "2025-01-01T00:00:00Z"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := filepath.Join(dir, "projects.json")
+	if err := os.WriteFile(projects, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := CrushAdapter{ProjectsPath: projects}
+
+	metas, err := a.ListSessions(t.Context())
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("got %d sessions, want 1 — one database registered three times is still one database", len(metas))
+	}
+	// The cwd of the winning entry is the one every event in the session gets
+	// classified against, so it must be the most recently accessed, not
+	// whichever spelling happened to be listed first.
+	if metas[0].Cwd != newCwd {
+		t.Errorf("Cwd = %q, want %q (the entry with the newest last_accessed)", metas[0].Cwd, newCwd)
+	}
+
+	graph, err := a.AgentGraph(t.Context())
+	if err != nil {
+		t.Fatalf("AgentGraph: %v", err)
+	}
+	if len(graph.Roots) != 1 {
+		t.Errorf("got %d graph roots, want 1 — the duplicate entries doubled the tree", len(graph.Roots))
+	}
+}
