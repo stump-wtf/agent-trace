@@ -258,10 +258,12 @@ func TestCrushParseSinceNullParent(t *testing.T) {
 	}
 }
 
-// TestCrushParseSinceWatermarkIsMessageTime covers the watermark being taken
-// from sessions.updated_at while the query filters on messages.created_at: any
-// message written between the two clocks was skipped permanently.
-func TestCrushParseSinceWatermarkIsMessageTime(t *testing.T) {
+// TestCrushParseSinceWatermarkIsAMessageCursor covers the watermark being
+// taken from sessions.updated_at while the query filters on the messages
+// table: any message written between the two clocks was skipped permanently.
+// The cursor is now messages.rowid, so the mismatch cannot recur — the column
+// the WHERE filters on and the column the watermark reports are the same one.
+func TestCrushParseSinceWatermarkIsAMessageCursor(t *testing.T) {
 	resetDBCache()
 	t.Cleanup(resetDBCache)
 
@@ -293,8 +295,10 @@ func TestCrushParseSinceWatermarkIsMessageTime(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("first pass: got %d events, want 1", len(events))
 	}
-	if wm != now+2000 {
-		t.Fatalf("watermark = %d, want %d (the last message's created_at, not the session's updated_at)", wm, now+2000)
+	// m2 is the second message inserted, so rowid 2 — not the session's
+	// updated_at, and not a timestamp of any kind.
+	if wm != 2 {
+		t.Fatalf("watermark = %d, want 2 (the last message's rowid, not the session's updated_at)", wm)
 	}
 
 	// A later message that still predates sessions.updated_at must be seen.
@@ -883,12 +887,15 @@ func TestAllAdaptersImplementIncrementalParser(t *testing.T) {
 	}
 }
 
-// TestCrushParseSinceWatermarkTieHazard is the Crush case of the rule the
-// OpenCode adapter above states in full: messages.created_at has second
-// resolution, so a resolved call and a still-open call routinely share a
-// timestamp, and a safe point AT that second puts the watermark equal to the
-// open call — excluded forever by the strict `created_at > watermark`.
-func TestCrushParseSinceWatermarkTieHazard(t *testing.T) {
+// TestCrushParseSinceSameSecondCallsEmittedOnce covers what used to be a
+// timestamp-tie hazard: messages.created_at has second resolution, so a
+// resolved call and a still-open call routinely share a timestamp, and a
+// safe point AT that second put the watermark equal to the open call —
+// excluded forever by the strict `created_at > watermark`. The cursor is a
+// rowid now, which cannot tie, so the resolved call no longer has to be
+// withheld along with its same-second neighbour. What the tie must never do,
+// then or now, is lose a call or emit one twice.
+func TestCrushParseSinceSameSecondCallsEmittedOnce(t *testing.T) {
 	resetDBCache()
 	t.Cleanup(resetDBCache)
 
@@ -917,11 +924,13 @@ func TestCrushParseSinceWatermarkTieHazard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
-	if len(events) != 0 {
-		t.Fatalf("poll 1: got %d events, want 0 — the tie withholds the whole window", len(events))
+	if len(events) != 1 {
+		t.Fatalf("poll 1: got %d events, want 1 — m1 resolves its own call and no longer waits on its same-second neighbour", len(events))
 	}
-	if wm >= now {
-		t.Fatalf("poll 1: watermark = %d, want strictly below the tied second %d", wm, now)
+	// m1 is rowid 1 and m2 — the row holding the open call — is rowid 2. The
+	// watermark must stop below m2 so the next poll re-reads it.
+	if wm != 1 {
+		t.Fatalf("poll 1: watermark = %d, want 1 — strictly below the row holding the open call", wm)
 	}
 
 	// The result lands a second later; both calls must come out, exactly once.
@@ -940,11 +949,11 @@ func TestCrushParseSinceWatermarkTieHazard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("poll 2: got %d events, want 2 — both tied-second calls emitted exactly once", len(events))
+	if len(events) != 1 {
+		t.Fatalf("poll 2: got %d events, want 1 — the second tied-second call, emitted exactly once across both polls", len(events))
 	}
-	if wm2 != now+1000 {
-		t.Errorf("poll 2: watermark = %d, want %d", wm2, now+1000)
+	if wm2 != 3 {
+		t.Errorf("poll 2: watermark = %d, want 3 (m3's rowid)", wm2)
 	}
 }
 
@@ -1049,5 +1058,117 @@ func TestOpenCodeParseSinceWatermarkSurvivesOutOfOrderPartTimes(t *testing.T) {
 	}
 	if len(again) != 0 {
 		t.Errorf("second poll re-emitted %d event(s) the first poll already delivered; watermark %d sits below a row it covered", len(again), watermark)
+	}
+}
+
+// TestCrushParseSinceSeesLaterSameSecondMessage is the message-loss half of
+// the second-resolution problem, and the reason the cursor is a rowid.
+//
+// The watermark advances to the last message that left nothing outstanding.
+// When that message's created_at names the second the harness is still
+// writing into — the watcher polls every 2s, so this is the common case, not
+// the corner one — the next poll's strict `created_at > watermark` excludes
+// every later message stamped with that same second. The watermark only moves
+// forward, so those messages are never read again: a whole tool call and its
+// result, gone, with the session still appearing to update.
+func TestCrushParseSinceSeesLaterSameSecondMessage(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "crush.db")
+	createTestCrushDB(t, dbPath)
+	now := time.Now().Unix()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertCrushRow(t, db, "s1", nil, now, now)
+	insertCrushMsg(t, db, "m1", "s1", "assistant",
+		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}}]`, now)
+	insertCrushMsg(t, db, "m2", "s1", "tool",
+		`[{"type":"tool_result","data":{"tool_call_id":"c1","content":"package a"}}]`, now)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a := CrushAdapter{DBPath: dbPath, Cwd: dir}
+	events, _, _, wm, err := a.ParseSince(t.Context(), dbPath+"/s1", 0, 0)
+	if err != nil {
+		t.Fatalf("poll 1: ParseSince: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("poll 1: got %d events, want 1", len(events))
+	}
+
+	// The next turn lands inside the same second the watermark named.
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertCrushMsg(t, db, "m3", "s1", "assistant",
+		`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"b.go\"}"}}]`, now)
+	insertCrushMsg(t, db, "m4", "s1", "tool",
+		`[{"type":"tool_result","data":{"tool_call_id":"c2","content":"package b"}}]`, now)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resetDBCache()
+
+	events, _, _, _, err = a.ParseSince(t.Context(), dbPath+"/s1", wm, 1)
+	if err != nil {
+		t.Fatalf("poll 2: ParseSince: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("poll 2: got %d events, want 1 — a message sharing the watermark's second was skipped", len(events))
+	}
+}
+
+// TestCrushParseSameSecondCallAndResult pins the ordering half of the same
+// problem on the full-parse path. A tool_call and its tool_result are separate
+// rows routinely written inside one second, and `ORDER BY created_at` alone
+// leaves their relative order unspecified: SQLite is free to return tied keys
+// in any order, and a result iterated ahead of its call finds no pending call,
+// is dropped, and leaves the call to be flushed as an orphan with no output —
+// downstream, a tool that returned nothing.
+//
+// This is a hardening test, not a repaired failure: it passes on the old query
+// too, because the plan SQLite happens to pick for these tables walks the tied
+// rows in rowid order anyway. That is luck, not a guarantee, and it is the
+// kind of luck an added index or a query-planner change withdraws silently.
+// ORDER BY rowid asks for the order the code depends on.
+func TestCrushParseSameSecondCallAndResult(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "crush.db")
+	createTestCrushDB(t, dbPath)
+	now := time.Now().Unix()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertCrushRow(t, db, "s1", nil, now, now)
+	insertCrushMsg(t, db, "m1", "s1", "assistant",
+		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}}]`, now)
+	insertCrushMsg(t, db, "m2", "s1", "tool",
+		`[{"type":"tool_result","data":{"tool_call_id":"c1","content":"package a"}}]`, now)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a := CrushAdapter{DBPath: dbPath, Cwd: dir}
+	events, _, _, err := a.Parse(t.Context(), dbPath+"/s1")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].ResultBytes == 0 {
+		t.Error("the tool result was dropped and the call flushed as an orphan: same-second rows must still pair")
 	}
 }

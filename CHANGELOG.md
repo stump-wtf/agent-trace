@@ -11,6 +11,29 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Fixed
+
+Both reported on the GitHub mirror by [@LarsArtmann](https://github.com/LarsArtmann),
+in [issue #22](https://github.com/stump-wtf/agent-trace/issues/22).
+
+- The Crush adapter no longer double-counts a database that `projects.json`
+  registers more than once. Crush keys a project on its working
+  directory, so several entries can resolve to one `crush.db`; every scan loop
+  appended what each entry found and nothing downstream deduped, so those
+  sessions were listed once per entry and `AgentGraph` gained a copy of every
+  node per entry. Discovery now folds entries by their resolved database path,
+  with the newest `last_accessed` supplying the working directory.
+- Crush incremental parsing no longer loses messages that share the watermark's
+  second. `messages.created_at` is second-resolution and the watermark
+  was a value from it, so once a poll resumed at second T the strict
+  `created_at > T` excluded every later message stamped T — permanently, since
+  the watermark only moves forward. `Watermark` and `ParseSince` now use
+  `messages.rowid`, which is unique, monotonic, and the insertion order Crush
+  actually wrote the rows in. `Parse` orders by it too: a tool call and its
+  result routinely tie on `created_at`, and SQLite leaves tied rows in an
+  unspecified order, which would drop the result and flush the call with no
+  output.
+
 ## [0.2.0] - 2026-08-24
 
 A performance and correctness release for `tail`. Every adapter now parses

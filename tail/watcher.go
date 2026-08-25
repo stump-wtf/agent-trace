@@ -137,9 +137,10 @@ type AgentGraphBuilder interface {
 
 // IncrementalParser is an optional interface adapters implement to avoid
 // re-reading and re-parsing the entire session on every poll. The watcher
-// tracks a per-session watermark (byte offset for JSONL, the storage's
-// native timestamp unit for SQLite — seconds for Crush, milliseconds for
-// OpenCode) and passes it to ParseSince along with the seq to continue from.
+// tracks a per-session watermark (byte offset for JSONL; for SQLite, whatever
+// cursor that adapter's query filters on — messages.rowid for Crush,
+// time_created milliseconds for OpenCode) and passes it to ParseSince along
+// with the seq to continue from.
 //
 // Implementations return only events/marks discovered after the watermark,
 // with seq numbers continuing from startSeq. The returned newWatermark is
@@ -158,10 +159,11 @@ type IncrementalParser interface {
 	// Watermark returns the current high-water mark for the session at path.
 	// For JSONL adapters this is the offset past the last complete line — not
 	// the file size, which can land inside a record a harness is still
-	// writing. For SQLite adapters it is the latest message timestamp in the
-	// column's native unit (seconds for Crush, milliseconds for OpenCode).
-	// Called after a full Parse to establish the initial
-	// watermark.
+	// writing. For SQLite adapters it is the cursor that adapter's ParseSince
+	// filters on: the last message's rowid for Crush, the latest time_created
+	// in milliseconds for OpenCode. The value is opaque to the watcher, which
+	// only stores it and hands it back. Called after a full Parse to establish
+	// the initial watermark.
 	Watermark(ctx context.Context, path string) int64
 }
 
