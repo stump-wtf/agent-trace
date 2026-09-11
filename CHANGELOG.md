@@ -34,6 +34,9 @@ breaking changes arrive in minor releases. See the note under
   strictly below a last row that is an assistant message with no `finish`
   part. Only the last row is held: a Crush killed mid-stream leaves a row that
   never finishes, and anything written after it means that turn is over.
+  `Watermark` holds only while that row carries no tool call yet, because
+  `Parse` has already flushed such a call as an event, and re-reading it would
+  emit it twice.
 
 - The Crush adapter no longer discovers zero sessions when `projects.json`
   carries trailing bytes after its JSON document. Crush writes the registry

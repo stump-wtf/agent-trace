@@ -107,6 +107,45 @@ func TestCrushWatermarkHoldsBelowStreamingRow(t *testing.T) {
 	}
 }
 
+// TestCrushFirstScanDoesNotDuplicateAFlushedCall is the watcher's first scan
+// landing while the last assistant row holds a tool call whose result is not
+// written yet. Parse flushes that orphaned call as an event with no output, so
+// Watermark must NOT hold below the row: the next ParseSince would read the
+// call again and emit it a second time once its result arrives.
+func TestCrushFirstScanDoesNotDuplicateAFlushedCall(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+
+	now := time.Now().Unix()
+	dbPath := newCrushSession(t, "flushed", now)
+	insertCrushMessages(t, dbPath, "flushed", now, []string{"user", "assistant"}, []string{
+		`[{"type":"text","data":{"text":"read a.go"}}]`,
+		`[{"type":"tool_call","data":{"id":"call-1","name":"view","input":"{\"file_path\":\"a.go\"}","finished":true}}]`,
+	})
+	a := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
+	path := dbPath + "/flushed"
+
+	events, _, _, err := a.Parse(t.Context(), path)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("first-scan Parse = %d events, %v; want the orphaned call flushed once", len(events), err)
+	}
+	wm := a.Watermark(t.Context(), path)
+
+	updateCrushParts(t, dbPath, fmt.Sprintf("flushed-%d-1", now),
+		`[{"type":"tool_call","data":{"id":"call-1","name":"view","input":"{\"file_path\":\"a.go\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`)
+	insertCrushMessages(t, dbPath, "flushed", now+5, []string{"tool"}, []string{
+		`[{"type":"tool_result","data":{"tool_call_id":"call-1","name":"view","content":"package a"}}]`,
+	})
+
+	events, _, _, _, err = a.ParseSince(t.Context(), path, wm, 1)
+	if err != nil {
+		t.Fatalf("ParseSince: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("ParseSince after the first scan = %d events, want 0: Parse already emitted call-1", len(events))
+	}
+}
+
 // TestCrushParseSinceRereadsToolCallStreamedIntoRow is the same shape for a
 // tool call: the call part lands in the assistant row after a poll already
 // read it empty, and the result follows in a row of its own.

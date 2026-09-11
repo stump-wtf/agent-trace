@@ -627,7 +627,10 @@ func (a CrushAdapter) Watermark(ctx context.Context, path string) int64 {
 	}
 	// The watcher takes this cursor after a full Parse, so it holds back from a
 	// last row still being streamed into for the same reason ParseSince does:
-	// the finish part and any tool calls land in that row later.
+	// the finish part and any tool calls land in that row later. It holds only
+	// when that row carries no tool call yet. Parse flushes a call with no
+	// result as an event, and re-reading the row would emit it a second time
+	// once the result arrived.
 	rows, err := db.QueryContext(ctx,
 		`SELECT rowid, role, parts FROM messages WHERE session_id = ? ORDER BY rowid DESC LIMIT 2`, sessionID)
 	if err != nil {
@@ -642,7 +645,10 @@ func (a CrushAdapter) Watermark(ctx context.Context, path string) int64 {
 			return 0
 		}
 		mark = row
-		if n > 0 || role != "assistant" || crushPartsFinished(parts) {
+		if n > 0 || role != "assistant" {
+			break
+		}
+		if finished, hasCall := crushPartsFinished(parts); finished || hasCall {
 			break
 		}
 		// The last row is still streaming: resume after the row before it,
@@ -759,8 +765,10 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 			continue
 		}
 		streamingRow = 0
-		if role == "assistant" && !crushPartsFinished(partsJSON) {
-			streamingRow = msgRow
+		if role == "assistant" {
+			if finished, _ := crushPartsFinished(partsJSON); !finished {
+				streamingRow = msgRow
+			}
 		}
 		ts := secToRFC3339(msgCreatedAt)
 		if model.Valid && model.String != "" && meta.Model == "" {
@@ -902,20 +910,24 @@ func crushFinishTimestamp(d crushPartData, rowTS string) string {
 	return rowTS
 }
 
-// crushPartsFinished reports whether a message's parts include a finish part.
-// Crush appends one when a turn ends for any reason — stop, tool use, error,
-// cancellation — so an assistant row without one is still being streamed into.
-func crushPartsFinished(partsJSON string) bool {
+// crushPartsFinished reports whether a message's parts include a finish part,
+// and whether they include a tool call. Crush appends a finish part when a turn
+// ends for any reason — stop, tool use, error, cancellation — so an assistant
+// row without one is still being streamed into.
+func crushPartsFinished(partsJSON string) (finished, hasCall bool) {
 	var parts []crushPart
 	if json.Unmarshal([]byte(partsJSON), &parts) != nil {
-		return false
+		return false, false
 	}
 	for _, p := range parts {
-		if p.Type == "finish" {
-			return true
+		switch p.Type {
+		case "finish":
+			finished = true
+		case "tool_call":
+			hasCall = true
 		}
 	}
-	return false
+	return finished, hasCall
 }
 
 // crushFinishErrorNote renders a failed finish part as one note: the message
