@@ -22,6 +22,22 @@ breaking changes arrive in minor releases. See the note under
 
 ### Fixed
 
+- The Crush adapter no longer discovers zero sessions when `projects.json`
+  carries trailing bytes after its JSON document. Crush writes the registry
+  with `os.WriteFile` under an in-process lock only, so two Crush processes
+  registering at once leave a complete document followed by the tail of a
+  longer one; a live host's registry ended in `}}`. A strict decode rejected
+  the whole file, silently. Discovery now reads the first document, and
+  `Diagnostics` warns about a registry that has trailing bytes or does not
+  parse instead of reporting it `ok` because it exists.
+
+### Changed
+
+- `CrushAdapter` and `DefaultAdapters` now document that `CRUSH_GLOBAL_DATA`
+  relocates `projects.json`, so a supervised Crush needs its own adapter with
+  `ProjectsPath`, and that `DBPath` plus `Cwd` is a supported single-project
+  mode rather than a test hook.
+
 Both reported on the GitHub mirror by [@LarsArtmann](https://github.com/LarsArtmann),
 in [issue #22](https://github.com/stump-wtf/agent-trace/issues/22).
 

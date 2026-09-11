@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -18,12 +19,31 @@ const HarnessCrush Harness = "crush"
 // CrushAdapter discovers and parses Crush session data from SQLite databases.
 // Unlike the JSONL adapters, Crush stores sessions in crush.db files discovered
 // via ~/.local/share/crush/projects.json.
+//
+// That default is only where an unconfigured Crush keeps its registry. Crush
+// resolves its global data directory from $CRUSH_GLOBAL_DATA, then
+// $XDG_DATA_HOME/crush, then ~/.local/share/crush, and projects.json lives in
+// whichever wins. Supervised instances routinely set CRUSH_GLOBAL_DATA so each
+// can hold its own model pins and history, which means a consumer scanning a
+// host with several of them finds only the interactive instance unless it
+// constructs one CrushAdapter per instance with ProjectsPath set to
+// $CRUSH_GLOBAL_DATA/projects.json.
+//
+// A consumer that already knows the working directory can skip the registry
+// entirely: DBPath plus Cwd scans exactly one project. Crush's default data
+// directory is <cwd>/.crush, so the database is <cwd>/.crush/crush.db unless
+// the project's crush.json moves options.data_directory. The registry is not
+// always trustworthy — see dbPaths — so this mode is also the robust one.
 type CrushAdapter struct {
-	// ProjectsPath overrides the projects.json location (default: ~/.local/share/crush/projects.json).
+	// ProjectsPath overrides the projects.json location (default:
+	// ~/.local/share/crush/projects.json). Set it per instance for a Crush
+	// launched with CRUSH_GLOBAL_DATA.
 	ProjectsPath string
-	// DBPath overrides the database path for a single-project scan (testing).
+	// DBPath scans a single project's database instead of the registry. It is
+	// a supported mode, not a test hook: pair it with Cwd.
 	DBPath string
-	// Cwd overrides the working directory (testing).
+	// Cwd is the working directory that owns DBPath. It is the base classify
+	// resolves every relative path in the session against.
 	Cwd string
 	// opts carries classify.Options from the watcher (verify patterns, etc).
 	opts *classify.Options
@@ -46,10 +66,20 @@ func (a CrushAdapter) Diagnostics() []DiagnosticCheck {
 		}
 	} else {
 		pp := a.projectsPath()
-		if _, err := os.Stat(pp); err != nil {
+		data, err := os.ReadFile(pp)
+		switch {
+		case err != nil:
 			checks = append(checks, DiagnosticCheck{Name: "projects-json", Status: "warn", Detail: "projects.json not found: " + pp})
-		} else {
-			checks = append(checks, DiagnosticCheck{Name: "projects-json", Status: "ok", Detail: pp})
+		default:
+			// Existence alone said "ok" for a registry discovery could not
+			// read, and discovery then returned nothing without a word.
+			if _, trailing, derr := decodeCrushProjects(data); derr != nil {
+				checks = append(checks, DiagnosticCheck{Name: "projects-json", Status: "warn", Detail: "projects.json does not parse: " + pp + ": " + derr.Error()})
+			} else if trailing {
+				checks = append(checks, DiagnosticCheck{Name: "projects-json", Status: "warn", Detail: "projects.json has trailing bytes after its JSON document (a concurrent-write artifact; Crush itself can no longer load it): " + pp})
+			} else {
+				checks = append(checks, DiagnosticCheck{Name: "projects-json", Status: "ok", Detail: pp})
+			}
 		}
 	}
 	return checks
@@ -159,6 +189,28 @@ type crushProjectsFile struct {
 	Projects []crushProjectEntry `json:"projects"`
 }
 
+// decodeCrushProjects parses a projects.json registry, reading the FIRST JSON
+// document and reporting whether non-whitespace bytes follow it.
+//
+// Trailing bytes are tolerated because Crush produces them. Its projects.Save
+// is an os.WriteFile guarded by an in-process mutex only, so two Crush
+// processes registering at once each truncate the file and write their own
+// copy from offset zero. Whichever finishes last leaves its complete document
+// followed by the tail of the other's longer one — a live registry was found
+// ending in "}}". A strict json.Unmarshal rejects that whole file, and Crush's
+// own Load does too, so Crush never rewrites it and discovery silently returned
+// no sessions for every project it listed. The race can only ever leave a
+// valid document followed by a suffix, so the first document is the registry.
+func decodeCrushProjects(data []byte) (crushProjectsFile, bool, error) {
+	var pf crushProjectsFile
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&pf); err != nil {
+		return crushProjectsFile{}, false, err
+	}
+	rest := data[dec.InputOffset():]
+	return pf, len(bytes.TrimSpace(rest)) > 0, nil
+}
+
 // crushDB is a project database and the working directory that owns it.
 type crushDB struct {
 	dbPath string
@@ -196,8 +248,8 @@ func (a CrushAdapter) dbPaths() []crushDB {
 	if err != nil {
 		return nil
 	}
-	var pf crushProjectsFile
-	if json.Unmarshal(data, &pf) != nil {
+	pf, _, err := decodeCrushProjects(data)
+	if err != nil {
 		return nil
 	}
 	var result []crushDB

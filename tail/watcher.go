@@ -193,6 +193,12 @@ func jsonlCompleteOffset(path string) int64 {
 // OpenCode) is included: both treat a missing or unreadable database as an
 // empty result rather than an error, so a machine without those tools
 // installed simply contributes no sessions.
+//
+// Every adapter here reads its tool's DEFAULT location. For Crush that is the
+// registry at ~/.local/share/crush/projects.json, so a Crush launched with
+// CRUSH_GLOBAL_DATA — the norm for supervised instances — is invisible to this
+// set. Construct a CrushAdapter per instance with ProjectsPath (or DBPath and
+// Cwd) for those; see CrushAdapter.
 func DefaultAdapters() []Adapter {
 	return []Adapter{
 		&ClaudeCodeAdapter{},
