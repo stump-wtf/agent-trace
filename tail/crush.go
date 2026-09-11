@@ -484,6 +484,20 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 						})
 					}
 				}
+			case "finish":
+				// A turn Crush could not complete ends in a finish part with
+				// reason "error", carrying the provider's message and details.
+				// For a run that died it is usually the only record of why —
+				// a context-window overflow, a rejected request — and the
+				// tool calls before it say nothing about it.
+				if part.Data.Reason == "error" {
+					marks = append(marks, classify.Mark{
+						Seq:       seq,
+						Timestamp: ts,
+						Type:      "error",
+						Note:      crushFinishErrorNote(part.Data),
+					})
+				}
 			case "tool_call":
 				callID := part.Data.ID
 				name := part.Data.Name
@@ -681,6 +695,20 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 						})
 					}
 				}
+			case "finish":
+				// A turn Crush could not complete ends in a finish part with
+				// reason "error", carrying the provider's message and details.
+				// For a run that died it is usually the only record of why —
+				// a context-window overflow, a rejected request — and the
+				// tool calls before it say nothing about it.
+				if part.Data.Reason == "error" {
+					marks = append(marks, classify.Mark{
+						Seq:       seq,
+						Timestamp: ts,
+						Type:      "error",
+						Note:      crushFinishErrorNote(part.Data),
+					})
+				}
 			case "tool_call":
 				callID := part.Data.ID
 				name := part.Data.Name
@@ -765,6 +793,27 @@ type crushPartData struct {
 	ToolCallID string `json:"tool_call_id"`
 	Content    string `json:"content"`
 	Text       string `json:"text"`
+	// Reason, Message and Details are a finish part's fields. Reason is
+	// "error" for a turn the provider rejected or that failed mid-stream.
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+	Details string `json:"details"`
+}
+
+// crushFinishErrorNote renders a failed finish part as one note: the message
+// and the details joined, either half omitted when Crush left it empty, and a
+// fixed fallback when it left both empty so the mark still says something.
+func crushFinishErrorNote(d crushPartData) string {
+	var halves []string
+	for _, s := range []string{d.Message, d.Details} {
+		if s = strings.TrimSpace(s); s != "" {
+			halves = append(halves, s)
+		}
+	}
+	if len(halves) == 0 {
+		return "agent turn finished with an error"
+	}
+	return strutil.TruncateRunes(strings.Join(halves, ": "), 2000, "…")
 }
 
 // secToRFC3339 renders a Crush timestamp as RFC 3339. Crush stores Unix

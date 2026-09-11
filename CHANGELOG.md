@@ -11,6 +11,15 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Added
+
+- The Crush adapter emits a `classify.Mark` of type `error` for a turn that
+  ended in a `finish` part with reason `error`, from both `Parse` and
+  `ParseSince`. The note carries the provider's message and details — for a
+  run that died of a context-window overflow or a rejected request, the one
+  fact that says why, which previously never left the database. `otel` has no
+  span for the type and passes it over.
+
 ### Fixed
 
 Both reported on the GitHub mirror by [@LarsArtmann](https://github.com/LarsArtmann),
