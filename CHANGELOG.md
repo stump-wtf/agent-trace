@@ -22,6 +22,16 @@ breaking changes arrive in minor releases. See the note under
 
 ### Fixed
 
+- The Crush adapter's incremental cursor no longer skips a turn that is still
+  being streamed. Crush inserts an assistant row when a turn starts and writes
+  its tool calls and its `finish` part into that same row as the stream
+  progresses, so a poll that read the row mid-stream moved `ParseSince` (and,
+  on a watcher's first scan, `Watermark`) past it, and the finish error and
+  any tool call recorded afterwards were never read. The cursor now holds
+  strictly below a last row that is an assistant message with no `finish`
+  part. Only the last row is held: a Crush killed mid-stream leaves a row that
+  never finishes, and anything written after it means that turn is over.
+
 - The Crush adapter no longer discovers zero sessions when `projects.json`
   carries trailing bytes after its JSON document. Crush writes the registry
   with `os.WriteFile` under an in-process lock only, so two Crush processes

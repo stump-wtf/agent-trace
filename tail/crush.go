@@ -625,13 +625,34 @@ func (a CrushAdapter) Watermark(ctx context.Context, path string) int64 {
 	if err != nil {
 		return 0
 	}
-	var maxRow sql.NullInt64
-	err = db.QueryRowContext(ctx,
-		`SELECT MAX(rowid) FROM messages WHERE session_id = ?`, sessionID).Scan(&maxRow)
-	if err != nil || !maxRow.Valid {
+	// The watcher takes this cursor after a full Parse, so it holds back from a
+	// last row still being streamed into for the same reason ParseSince does:
+	// the finish part and any tool calls land in that row later.
+	rows, err := db.QueryContext(ctx,
+		`SELECT rowid, role, parts FROM messages WHERE session_id = ? ORDER BY rowid DESC LIMIT 2`, sessionID)
+	if err != nil {
 		return 0
 	}
-	return maxRow.Int64
+	defer func() { _ = rows.Close() }()
+	var mark int64
+	for n := 0; rows.Next(); n++ {
+		var row int64
+		var role, parts string
+		if rows.Scan(&row, &role, &parts) != nil {
+			return 0
+		}
+		mark = row
+		if n > 0 || role != "assistant" || crushPartsFinished(parts) {
+			break
+		}
+		// The last row is still streaming: resume after the row before it,
+		// or from the start when it is the session's only row.
+		mark = 0
+	}
+	if rows.Err() != nil {
+		return 0
+	}
+	return mark
 }
 
 // ParseSince reads only messages with rowid > watermark, returning events and
@@ -718,6 +739,17 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	}
 	safe := []crushSafePoint{{watermark, 0, 0}}
 
+	// streamingRow is the rowid of the last row read when that row is an
+	// assistant message with no finish part yet. Crush inserts an assistant row
+	// when a turn begins and rewrites its parts in place as the stream
+	// progresses, so the turn's tool calls and its finish part — including a
+	// provider error — land in that row AFTER a poll may already have read it.
+	// Advancing past it would mean never reading them. Only the last row counts:
+	// anything written after a turn means that turn is over, and a Crush killed
+	// mid-stream leaves a row that never finishes, which must not hold the
+	// cursor back forever.
+	var streamingRow int64
+
 	for rows.Next() {
 		var msgRow int64
 		var msgID, role, partsJSON string
@@ -725,6 +757,10 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 		var msgCreatedAt int64
 		if err := rows.Scan(&msgRow, &msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
 			continue
+		}
+		streamingRow = 0
+		if role == "assistant" && !crushPartsFinished(partsJSON) {
+			streamingRow = msgRow
 		}
 		ts := secToRFC3339(msgCreatedAt)
 		if model.Valid && model.String != "" && meta.Model == "" {
@@ -817,14 +853,14 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	if err := rows.Err(); err != nil {
 		return nil, nil, meta, watermark, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
 	}
-	if len(callRows) > 0 {
-		earliest := int64(0)
-		for _, r := range callRows {
-			if earliest == 0 || r < earliest {
-				earliest = r
-			}
+	hold := streamingRow
+	for _, r := range callRows {
+		if hold == 0 || r < hold {
+			hold = r
 		}
-		for len(safe) > 1 && safe[len(safe)-1].row >= earliest {
+	}
+	if hold > 0 {
+		for len(safe) > 1 && safe[len(safe)-1].row >= hold {
 			safe = safe[:len(safe)-1]
 		}
 	}
@@ -850,6 +886,22 @@ type crushPartData struct {
 	Reason  string `json:"reason"`
 	Message string `json:"message"`
 	Details string `json:"details"`
+}
+
+// crushPartsFinished reports whether a message's parts include a finish part.
+// Crush appends one when a turn ends for any reason — stop, tool use, error,
+// cancellation — so an assistant row without one is still being streamed into.
+func crushPartsFinished(partsJSON string) bool {
+	var parts []crushPart
+	if json.Unmarshal([]byte(partsJSON), &parts) != nil {
+		return false
+	}
+	for _, p := range parts {
+		if p.Type == "finish" {
+			return true
+		}
+	}
+	return false
 }
 
 // crushFinishErrorNote renders a failed finish part as one note: the message
