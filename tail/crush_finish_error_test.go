@@ -92,8 +92,19 @@ func TestCrushParseEmitsFinishErrorMark(t *testing.T) {
 	if !strings.HasPrefix(errs[0].Note, "Bad Request: litellm.ContextWindowExceededError") {
 		t.Errorf("note = %q, want message then details", errs[0].Note)
 	}
-	if want := secToRFC3339(now + 4); errs[0].Timestamp != want {
-		t.Errorf("timestamp = %q, want the failing message's %q", errs[0].Timestamp, want)
+	if want := secToRFC3339(1789127781); errs[0].Timestamp != want {
+		t.Errorf("timestamp = %q, want the finish part's own time %q, not the row's", errs[0].Timestamp, want)
+	}
+}
+
+// TestCrushFinishTimestamp: a finish part with no time keeps the row's.
+func TestCrushFinishTimestamp(t *testing.T) {
+	row := secToRFC3339(1789127000)
+	if got := crushFinishTimestamp(crushPartData{Time: 1789127300}, row); got != secToRFC3339(1789127300) {
+		t.Errorf("with time = %q, want the part's", got)
+	}
+	if got := crushFinishTimestamp(crushPartData{}, row); got != row {
+		t.Errorf("without time = %q, want the row's %q", got, row)
 	}
 }
 

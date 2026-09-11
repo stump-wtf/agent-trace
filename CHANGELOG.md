@@ -18,7 +18,10 @@ breaking changes arrive in minor releases. See the note under
   `ParseSince`. The note carries the provider's message and details — for a
   run that died of a context-window overflow or a rejected request, the one
   fact that says why, which previously never left the database. `otel` has no
-  span for the type and passes it over.
+  span for the type and passes it over. The mark is dated by the finish part's
+  own `time`, not by its message row, which Crush creates when the turn begins
+  — a live store held a turn that timed out 300 seconds after its row was
+  written.
 
 ### Fixed
 

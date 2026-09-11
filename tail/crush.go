@@ -545,7 +545,7 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 				if part.Data.Reason == "error" {
 					marks = append(marks, classify.Mark{
 						Seq:       seq,
-						Timestamp: ts,
+						Timestamp: crushFinishTimestamp(part.Data, ts),
 						Type:      "error",
 						Note:      crushFinishErrorNote(part.Data),
 					})
@@ -792,7 +792,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 				if part.Data.Reason == "error" {
 					marks = append(marks, classify.Mark{
 						Seq:       seq,
-						Timestamp: ts,
+						Timestamp: crushFinishTimestamp(part.Data, ts),
 						Type:      "error",
 						Note:      crushFinishErrorNote(part.Data),
 					})
@@ -881,11 +881,25 @@ type crushPartData struct {
 	ToolCallID string `json:"tool_call_id"`
 	Content    string `json:"content"`
 	Text       string `json:"text"`
-	// Reason, Message and Details are a finish part's fields. Reason is
-	// "error" for a turn the provider rejected or that failed mid-stream.
+	// Reason, Message, Details and Time are a finish part's fields. Reason is
+	// "error" for a turn the provider rejected or that failed mid-stream; Time
+	// is when the turn ended, in Unix seconds.
 	Reason  string `json:"reason"`
 	Message string `json:"message"`
 	Details string `json:"details"`
+	Time    int64  `json:"time"`
+}
+
+// crushFinishTimestamp dates a finish part by its own time, falling back to
+// the row's. The row is created when the turn BEGINS, and a turn can stream
+// for minutes before the provider fails it — a live store held one that timed
+// out 300s after its row was created — so the row's time put the error
+// before everything the agent did while waiting on it.
+func crushFinishTimestamp(d crushPartData, rowTS string) string {
+	if d.Time > 0 {
+		return secToRFC3339(d.Time)
+	}
+	return rowTS
 }
 
 // crushPartsFinished reports whether a message's parts include a finish part.
