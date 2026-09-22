@@ -29,7 +29,7 @@ type OpenCodeAdapter struct {
 
 func (a OpenCodeAdapter) Harness() Harness { return HarnessOpenCode }
 
-// SetOptions injects classify.Options for verify-pattern customization.
+// SetOptions injects classify.Options for verify patterns and error excerpts.
 func (a *OpenCodeAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 // Diagnostics checks whether the OpenCode database exists.

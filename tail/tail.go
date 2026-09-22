@@ -125,6 +125,16 @@ type WatchConfig struct {
 	// these are merged with the defaults in classify.defaultVerifyPatterns.
 	// Threaded through to adapters via the OptionsSetter interface.
 	VerifyPatterns []string
+	// ErrorExcerptBytes, when positive, keeps up to that many bytes of each
+	// errored tool result's text on Event.Classified.ErrorExcerpt. Zero (the
+	// default) keeps none. Threaded through to adapters via OptionsSetter,
+	// like VerifyPatterns; see classify.Options.ErrorExcerptBytes for the
+	// excerpt's shape.
+	ErrorExcerptBytes int
+	// Redact, when set, rewrites error text before an excerpt is cut from it
+	// and stored, so no Event carries the raw text. Ignored while
+	// ErrorExcerptBytes is zero. See classify.Options.Redact.
+	Redact func(string) string
 	// MaxAge bounds discovery to sessions active within this window, judged by
 	// last activity rather than start time — so a long-running session stays
 	// visible while it is still being used, however long ago it began.

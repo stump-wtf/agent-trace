@@ -51,7 +51,7 @@ type CrushAdapter struct {
 
 func (a CrushAdapter) Harness() Harness { return HarnessCrush }
 
-// SetOptions injects classify.Options for verify-pattern customization.
+// SetOptions injects classify.Options for verify patterns and error excerpts.
 func (a *CrushAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 // Diagnostics checks the Crush backing store: projects.json existence and
