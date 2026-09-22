@@ -28,7 +28,7 @@ tail (parse JSONL/SQLite)  →  classify (ToolCall+ToolResult → Event)  →  o
 
 Stateless core with one opt-in I/O surface: the `Options` struct supplies a `FileExists` func and home/tmp dirs for weak-target filtering and outside-scope detection. Pass nil Options to keep all weak targets.
 
-**Key types:** `ToolCall`, `ToolResult` (normalized input from any harness) → `Event` (classified output with `Action`, `Targets`, `Outside`, `Summary`), `Mark` (non-tool timeline annotations: user messages, compactions, subagent launches).
+**Key types:** `ToolCall`, `ToolResult` (normalized input from any harness) → `Event` (classified output with `Action`, `Targets`, `Outside`, `Summary`), `Mark` (non-tool timeline annotations: user messages, compactions, subagent launches, and `error` marks for a failed model call — Crush and Claude Code).
 
 **Entry point:** `BuildEvent(seq, cwd, call, result) Event` — classifies a single tool call/result pair. Composes `ActionFor` + `TargetsFor` + `SummarizeTool`. `BuildEventWith(opts, …)` threads `Options` for I/O-aware classification and custom verify patterns.
 
@@ -63,6 +63,8 @@ Discovers and parses live agent session logs from per-harness directories, emitt
 **Injected user messages** (`helpers.go`): `injectedUserMessage()` filters harness-injected text (e.g., `# AGENTS.md instructions`, anything wrapped in `<...>`) so it doesn't inflate turn stats. When adding new harness adapters, route user messages through this filter.
 
 **Orphaned tool calls:** Both Claude Code and Pi adapters flush pending tool calls that never received a result, emitting them with zero-value `ToolResult`.
+
+**Claude Code API errors:** a failed API call is a synthetic assistant record flagged `isApiErrorMessage`; `isCCAPIError` detects it on the flag alone (never the text) and `ccAPIErrorNote` renders the mark as `<code> (<status>): <text>`, dropping ` (<status>)` when there was no HTTP response. harness's Prometheus exporter matches that front, so treat the format as a contract. The record's top-level `error` is a string there but an object on the per-retry `system`/`api_error` records, which is why `ccRawLine` keeps it raw.
 
 **Codex error inference:** Codex doesn't set an explicit error flag, so `commandOutputFailed()` pattern-matches output text for `exit code 1`, `error:`, `fatal:`, etc.
 

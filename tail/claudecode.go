@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/stump-wtf/agent-trace/classify"
 	"github.com/stump-wtf/agent-trace/internal/strutil"
@@ -189,7 +191,8 @@ func (a ClaudeCodeAdapter) Summarize(ctx context.Context, path string) (SessionM
 		if line.AgentID != "" && meta.AgentID == "" {
 			meta.AgentID = line.AgentID
 		}
-		if len(line.Message) > 0 {
+		// A failed API call's "<synthetic>" model is not the session's.
+		if len(line.Message) > 0 && !isCCAPIError(line) {
 			var msg ccMessage
 			if json.Unmarshal(line.Message, &msg) == nil {
 				if msg.Model != "" && meta.Model == "" {
@@ -268,6 +271,12 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 		}
 		if isCCCompaction(line) {
 			marks = append(marks, classify.Mark{Seq: seq, Type: "compaction"})
+		}
+		if isCCAPIError(line) {
+			// A failed call is not a model turn: it holds no tool calls, and
+			// its "<synthetic>" model must not become the session's model.
+			marks = append(marks, ccAPIErrorMark(line, seq))
+			return
 		}
 		if len(line.Message) == 0 {
 			return
@@ -465,6 +474,12 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 		if isCCCompaction(line) {
 			marks = append(marks, classify.Mark{Seq: seq, Type: "compaction"})
 		}
+		if isCCAPIError(line) {
+			// A failed call is not a model turn: it holds no tool calls, and
+			// its "<synthetic>" model must not become the session's model.
+			marks = append(marks, ccAPIErrorMark(line, seq))
+			return
+		}
 		if len(line.Message) == 0 {
 			return
 		}
@@ -534,6 +549,17 @@ type ccRawLine struct {
 	Message     json.RawMessage `json:"message"`
 	AITitle     string          `json:"aiTitle"`
 	Subtype     string          `json:"subtype"`
+
+	// The three fields below describe a failed API call; see isCCAPIError.
+	// APIError and APIErrorStatus stay raw because they are not one type
+	// across record kinds: "error" is a string code on the synthetic
+	// assistant record, but an object on the system records Claude Code
+	// writes for each retry (subtype "api_error"). Typed as a string, every
+	// one of those retry lines would fail to decode and be dropped whole —
+	// its timestamp, session ID and all.
+	IsAPIErrorMessage bool            `json:"isApiErrorMessage"`
+	APIError          json.RawMessage `json:"error"`
+	APIErrorStatus    json.RawMessage `json:"apiErrorStatus"`
 }
 
 type ccMessage struct {
@@ -582,6 +608,93 @@ func isCCLine(line ccRawLine) bool {
 
 func isCCCompaction(line ccRawLine) bool {
 	return line.Type == "system" && strings.Contains(strings.ToLower(line.Subtype), "compact")
+}
+
+// isCCAPIError reports whether a record is the one Claude Code writes when an
+// API call finally fails: a synthetic assistant message (model "<synthetic>")
+// flagged isApiErrorMessage, carrying an error code, the HTTP status when
+// there was one, and the text Claude Code shows the user. For a run that
+// stalled on quota, auth or an outage it is the only record of why.
+//
+// Detection is on the flag alone, never on the text. The text is not a
+// reliable signal — quota and auth messages do not start with "API Error:"
+// at all — and matching it would also misfire on an agent that merely
+// quotes one. Claude Code versions that predate the flag therefore produce
+// no error marks, which is the honest result: they did not say.
+//
+// The per-attempt system records (subtype "api_error", with retryAttempt
+// and maxRetries) are deliberately not errors here: a retry that later
+// succeeds is not a failed call, and a call that exhausts its retries still
+// ends in one of these assistant records.
+func isCCAPIError(line ccRawLine) bool {
+	return line.Type == "assistant" && line.IsAPIErrorMessage
+}
+
+// ccAPIErrorMark renders a failed API call as an "error" mark: at the given
+// seq (the shared seq space every Claude Code mark uses — the seq of the
+// next tool event), dated by the record's own timestamp, noted by
+// ccAPIErrorNote.
+func ccAPIErrorMark(line ccRawLine, seq int) classify.Mark {
+	var msg ccMessage
+	// A message that is missing or fails to decode still leaves the code and
+	// status, which are the parts consumers classify on, so it is not a
+	// reason to drop the mark.
+	_ = json.Unmarshal(line.Message, &msg)
+	var code string
+	_ = json.Unmarshal(line.APIError, &code)
+	var status int
+	_ = json.Unmarshal(line.APIErrorStatus, &status)
+	return classify.Mark{
+		Seq:       seq,
+		Timestamp: line.Timestamp,
+		Type:      "error",
+		// ccUserMessageText only joins the text items; nothing in it is
+		// specific to user messages.
+		Note: ccAPIErrorNote(code, status, ccUserMessageText(msg.Content)),
+	}
+}
+
+// ccAPIErrorNote formats a failed API call's note so that its front is
+// machine-readable and its tail is Claude Code's own message:
+//
+//	<code> (<status>): <text>    rate_limit (429): You've hit your session limit
+//	<code>: <text>               server_error: API Error: Unable to connect to API
+//
+// <code> is the record's "error" field (server_error, rate_limit,
+// authentication_failed, unknown, ...), or "unknown" when the record has
+// none. It never contains whitespace, a colon or a parenthesis — any such
+// rune is replaced with "_" — so the first space or colon always ends it.
+// " (<status>)" is present only when Claude Code got an HTTP response;
+// connection failures have no status and omit it. ": <text>" is omitted when
+// the record carries no text.
+//
+// This shape is a contract, not presentation: harness's Prometheus exporter
+// sorts error marks into quota, auth, timeout, transport and other by
+// matching the code and status at the front, so change it only together with
+// that classifier. The note is truncated to 2000 runes, as the Crush reader's
+// error note is; the front is never what gets cut.
+func ccAPIErrorNote(code string, status int, text string) string {
+	code = strings.Map(func(r rune) rune {
+		switch r {
+		case ':', '(', ')':
+			return '_'
+		}
+		if unicode.IsSpace(r) {
+			return '_'
+		}
+		return r
+	}, strings.TrimSpace(code))
+	if code == "" {
+		code = "unknown"
+	}
+	note := code
+	if status > 0 {
+		note += " (" + strconv.Itoa(status) + ")"
+	}
+	if text = strings.TrimSpace(text); text != "" {
+		note += ": " + text
+	}
+	return strutil.TruncateRunes(note, 2000, "…")
 }
 
 func hasCCUserMessage(content ccContentList) bool {

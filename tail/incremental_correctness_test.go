@@ -200,6 +200,60 @@ func TestWatcherEmitsEachCallExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestParseSinceAPIErrorsMatchFullParse feeds each API-error fixture to
+// ParseSince one record per poll, the way a live session grows, and checks the
+// accumulated result against a full Parse of the finished file: every event
+// and every mark exactly once, at the same seq, and each error mark with the
+// same timestamp and note.
+func TestParseSinceAPIErrorsMatchFullParse(t *testing.T) {
+	a := ClaudeCodeAdapter{}
+	for _, fx := range ccAPIErrorFixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", fx.file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Each element keeps its newline: a record without one is
+			// incomplete, and ParseSince rightly leaves it for the next poll.
+			lines := strings.SplitAfter(string(raw), "\n")
+			lines = lines[:len(lines)-1] // the empty string after the last newline
+			path := writeTempJSONL(t, "s.jsonl", lines[0])
+
+			var events []classify.Event
+			var marks []classify.Mark
+			var wm int64
+			for i := 0; i < len(lines); i++ {
+				if i > 0 {
+					appendLines(t, path, lines[i])
+				}
+				ev, mk, _, next, err := a.ParseSince(t.Context(), path, wm, len(events))
+				if err != nil {
+					t.Fatalf("poll %d: ParseSince: %v", i, err)
+				}
+				events, marks, wm = append(events, ev...), append(marks, mk...), next
+			}
+
+			wantEvents, wantMarks, _, err := a.Parse(t.Context(), path)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if len(events) != len(wantEvents) {
+				t.Fatalf("events: incremental gave %d, Parse gave %d", len(events), len(wantEvents))
+			}
+			for i := range events {
+				if events[i].Seq != wantEvents[i].Seq || events[i].Tool != wantEvents[i].Tool {
+					t.Errorf("event %d: incremental gave seq=%d tool=%q, Parse gave seq=%d tool=%q",
+						i, events[i].Seq, events[i].Tool, wantEvents[i].Seq, wantEvents[i].Tool)
+				}
+			}
+			if len(errorMarksIn(wantMarks)) == 0 {
+				t.Fatal("Parse produced no error marks; this comparison would prove nothing")
+			}
+			assertCCMarks(t, marks, wantMarks)
+		})
+	}
+}
+
 // --- Crush ---
 
 func insertCrushRow(t *testing.T, db *sql.DB, id string, parent any, created, updated int64) {

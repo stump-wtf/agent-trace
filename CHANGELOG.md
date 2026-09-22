@@ -23,6 +23,23 @@ breaking changes arrive in minor releases. See the note under
   — a live store held a turn that timed out 300 seconds after its row was
   written.
 
+- The Claude Code adapter emits a `classify.Mark` of type `error` for a failed
+  API call, from both `Parse` and `ParseSince`. Claude Code records the
+  failure as a synthetic assistant message flagged `isApiErrorMessage`, and
+  until now the adapter read past it, so an agent stalled on a rate limit, a
+  rejected key or an outage looked merely quiet. The mark is dated by that
+  record and shares the seq space of the other marks. Its note leads with the
+  error code and, when Claude Code got an HTTP response, the status —
+  `rate_limit (429): You've hit your session limit`, or
+  `server_error: API Error: Unable to connect to API` for a connection failure
+  with no status — because the message text alone does not name the failure:
+  quota messages do not start with `API Error:` at all. Detection is on the
+  flag only; versions of Claude Code that predate it stay silent rather than
+  being guessed at from text. The failed call's `<synthetic>` model no longer
+  becomes the session's model, which it did for a session whose first
+  assistant record was a failure. Retries (the `system` records with subtype
+  `api_error`) are not marks: a retry that succeeds is not a failed call.
+
 ### Fixed
 
 - The Crush adapter's incremental cursor no longer skips a turn that is still
