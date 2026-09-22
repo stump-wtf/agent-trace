@@ -29,6 +29,10 @@ type Event struct {
 	ResultBytes int            `json:"resultBytes"`
 	IsError     bool           `json:"isError"`
 	Summary     string         `json:"summary"`
+	// ErrorExcerpt is a bounded, cleaned piece of an errored result's text.
+	// It is empty unless Options.ErrorExcerptBytes is positive and IsError is
+	// true; see Options.ErrorExcerptBytes for its shape.
+	ErrorExcerpt string `json:"errorExcerpt,omitempty"`
 }
 
 // Target is a repo file touched by a tool call, with the deepest interaction
@@ -86,6 +90,21 @@ type Options struct {
 	// classify as ActionVerify instead of ActionExec. Empty or whitespace-only
 	// entries are ignored — they would match every command.
 	VerifyPatterns []string
+	// ErrorExcerptBytes, when positive, keeps up to that many bytes of an
+	// errored result's text on Event.ErrorExcerpt, so a consumer can match on
+	// the literal error an agent hit. Zero (the default) keeps none. The text
+	// has terminal escape sequences stripped and surrounding whitespace
+	// trimmed, and is never cut inside a UTF-8 rune. Text over the budget
+	// keeps its head and tail joined by ErrorExcerptElision, because errors
+	// tend to lead and summaries like "FAIL pkg" tend to close. Results with
+	// IsError false never carry an excerpt.
+	ErrorExcerptBytes int
+	// Redact, when set, rewrites the error text before an excerpt is cut
+	// from it and stored, so a consumer that supplies one never holds the raw
+	// text on an Event. It sees the whole cleaned result rather than the cut
+	// excerpt, so a secret straddling the elision point is still whole when
+	// it is matched. It is ignored while ErrorExcerptBytes is zero.
+	Redact func(string) string
 }
 
 // Touch constants used in Target.Touch. Ranked by RankTouch: edit > read > hit.
