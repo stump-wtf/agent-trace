@@ -28,6 +28,14 @@ breaking changes arrive in minor releases. See the note under
   window is emitted early with an empty result, and its result, landing
   afterwards, is dropped. Below the threshold the in-flight hold is untouched.
 
+- The Crush adapter reads the `is_error` flag Crush writes on a `tool_result`
+  part, from both `Parse` and `ParseSince`. Every Crush event previously had
+  `IsError` false, so a failed view or edit read as a success in its summary
+  and in the span `otel` builds from it. This changes `IsError`, `Summary` and
+  span status for Crush tool calls that Crush itself recorded as errors. A
+  shell command that exits non-zero is still not an error: Crush records it as
+  an ordinary result whose text ends `Exit code N`.
+
 ### Added
 
 - `classify.Options.ErrorExcerptBytes` keeps up to that many bytes of an
@@ -52,16 +60,6 @@ breaking changes arrive in minor releases. See the note under
   `VerifyPatterns` already takes, so events from both `Parse` and `ParseSince`
   carry the excerpt. The watcher injects `Options` only when `VerifyPatterns`
   or `ErrorExcerptBytes` is set; with neither, adapters keep their defaults.
-
-### Fixed
-
-- The Crush adapter reads the `is_error` flag Crush writes on a `tool_result`
-  part, from both `Parse` and `ParseSince`. Every Crush event previously had
-  `IsError` false, so a failed view or edit read as a success in its summary
-  and in the span `otel` builds from it. This changes `IsError`, `Summary` and
-  span status for Crush tool calls that Crush itself recorded as errors. A
-  shell command that exits non-zero is still not an error: Crush records it as
-  an ordinary result whose text ends `Exit code N`.
 
 ## [0.3.0] - 2026-09-22
 
