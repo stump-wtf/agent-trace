@@ -218,3 +218,98 @@ func TestWatcherResumesAfterOrphanedCall(t *testing.T) {
 		t.Errorf("the resumed turn's user message was delivered %d times, want once", len(resumed))
 	}
 }
+
+// TestCodexParseSinceReleasesOrphanedCall is the Codex shape of #103: a
+// rollout whose process died mid-call, then resumed with a new turn. The
+// orphan keeps its call-order seq — where Parse has always put it — with no
+// output, and everything after it is delivered.
+func TestCodexParseSinceReleasesOrphanedCall(t *testing.T) {
+	path := writeTempJSONL(t, "s.jsonl", codexSessionMetaLine("2026-01-01T10:00:00Z")+
+		codexTurnStart("t1", "2026-01-01T10:00:01Z")+
+		codexUserLine("run it", "2026-01-01T10:00:01Z")+
+		codexExec("c1", "echo c1", "2026-01-01T10:00:02Z")+
+		codexOutputLine("c1", `"ok"`, "2026-01-01T10:00:03Z"))
+	a := CodexAdapter{}
+	preOrphan := a.Watermark(t.Context(), path)
+
+	appendLines(t, path, codexExec("c2", "echo orphan", "2026-01-01T10:00:04Z"))
+	events, marks, _, wm, err := a.ParseSince(t.Context(), path, preOrphan, 1)
+	if err != nil {
+		t.Fatalf("poll 1: ParseSince: %v", err)
+	}
+	if len(events) != 0 || len(marks) != 0 || wm != preOrphan {
+		t.Fatalf("poll 1: %d events, %d marks, watermark %d; want 0, 0, %d — nothing yet says c2 is dead", len(events), len(marks), wm, preOrphan)
+	}
+
+	appendLines(t, path, codexTurnStart("t2", "2026-01-01T11:00:00Z")+
+		codexUserLine("resumed", "2026-01-01T11:00:01Z")+
+		codexExec("c3", "echo c3", "2026-01-01T11:00:02Z")+
+		codexOutputLine("c3", `"ok"`, "2026-01-01T11:00:03Z"))
+	events, marks, _, wm, err = a.ParseSince(t.Context(), path, wm, 1)
+	if err != nil {
+		t.Fatalf("poll 2: ParseSince: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("poll 2: got %d events, want the orphan and c3", len(events))
+	}
+	if events[0].Seq != 1 || events[0].ResultBytes != 0 || events[0].Summary != orphanSummary {
+		t.Errorf("poll 2: event 0 = %+v, want the orphan at seq 1 with no output", events[0])
+	}
+	if events[1].Seq != 2 || events[1].ResultBytes == 0 {
+		t.Errorf("poll 2: event 1 = %+v, want c3 at seq 2 with its output", events[1])
+	}
+	if len(marks) != 1 || marks[0].Note != "resumed" || marks[0].Seq != 2 {
+		t.Errorf("poll 2: marks = %+v, want the resumed turn's message at seq 2", marks)
+	}
+	if end := jsonlCompleteOffset(path); wm != end {
+		t.Errorf("poll 2: watermark = %d, want %d", wm, end)
+	}
+
+	events, marks, _, _, err = a.ParseSince(t.Context(), path, wm, 3)
+	if err != nil {
+		t.Fatalf("poll 3: ParseSince: %v", err)
+	}
+	if len(events) != 0 || len(marks) != 0 {
+		t.Errorf("poll 3: %d events, %d marks; want none", len(events), len(marks))
+	}
+}
+
+// TestCodexParseSinceHoldsSlowCall is the in-flight contract for Codex.
+// Records written while a call runs — its sibling's output, reasoning, the
+// model's own message, token counts, injected context — do not release it.
+func TestCodexParseSinceHoldsSlowCall(t *testing.T) {
+	path := writeTempJSONL(t, "s.jsonl", codexSessionMetaLine("2026-01-01T10:00:00Z")+
+		codexTurnStart("t1", "2026-01-01T10:00:01Z")+
+		codexUserLine("build it", "2026-01-01T10:00:01Z"))
+	a := CodexAdapter{}
+	start := a.Watermark(t.Context(), path)
+
+	appendLines(t, path, codexExec("c1", "sleep 600", "2026-01-01T10:00:02Z")+
+		codexExec("c2", "echo c2", "2026-01-01T10:00:02Z")+
+		codexOutputLine("c2", `"ok"`, "2026-01-01T10:00:03Z")+
+		`{"type":"response_item","timestamp":"2026-01-01T10:00:04Z","payload":{"type":"reasoning","summary":[]}}`+"\n"+
+		`{"type":"response_item","timestamp":"2026-01-01T10:00:05Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"waiting on the build"}]}}`+"\n"+
+		`{"type":"event_msg","timestamp":"2026-01-01T10:00:06Z","payload":{"type":"token_count","info":null}}`+"\n"+
+		codexUserLine("<environment_context>cwd</environment_context>", "2026-01-01T10:00:07Z"))
+	events, _, _, wm, err := a.ParseSince(t.Context(), path, start, 0)
+	if err != nil {
+		t.Fatalf("poll 1: ParseSince: %v", err)
+	}
+	if len(events) != 0 || wm != start {
+		t.Fatalf("poll 1: %d events, watermark %d; want 0 and %d — c1 is still running", len(events), wm, start)
+	}
+
+	appendLines(t, path, codexOutputLine("c1", `"built"`, "2026-01-01T10:10:00Z"))
+	events, _, _, _, err = a.ParseSince(t.Context(), path, wm, 0)
+	if err != nil {
+		t.Fatalf("poll 2: ParseSince: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("poll 2: got %d events, want c1 and c2", len(events))
+	}
+	for _, ev := range events {
+		if ev.ResultBytes == 0 {
+			t.Errorf("event %d (%s) has no output: released while it was still running", ev.Seq, ev.Summary)
+		}
+	}
+}

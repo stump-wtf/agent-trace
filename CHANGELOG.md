@@ -44,6 +44,16 @@ breaking changes arrive in minor releases. See the note under
   with nothing after it that proves it dead is still held, and `Parse` still
   flushes it last.
 
+- The Codex adapter's incremental cursor no longer stalls for good behind a
+  call that never gets an output, the same failure in a rollout. A call still
+  open when a new turn begins (a `task_started` event or a `turn_context`
+  record) or when the user sends a message is now settled with a zero-value
+  `ToolResult`: Codex writes a round's tool outputs before any of those, and
+  drops an aborted turn's task, so nothing can answer the call afterwards.
+  `Parse` settles it at the same records, so its seq, which follows call
+  order, is unchanged, and both paths now ignore an output that arrives after
+  its call was settled.
+
 - The Crush adapter's incremental cursor no longer skips a turn that is still
   being streamed. Crush inserts an assistant row when a turn starts and writes
   its tool calls and its `finish` part into that same row as the stream

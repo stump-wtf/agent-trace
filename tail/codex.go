@@ -246,6 +246,7 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 			}
 		case "turn_context":
 			recognized = true
+			codexReleaseOpenCalls(calls, results, callOrder)
 			var payload codexTurnContext
 			if json.Unmarshal(line.Payload, &payload) == nil {
 				if payload.Cwd != "" && meta.Cwd == "" {
@@ -296,6 +297,7 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 			if payload.Type == "message" && payload.Role == "user" && payload.Content.HasText() {
 				text := payload.Content.Text()
 				if !injectedUserMessage(text) {
+					codexReleaseOpenCalls(calls, results, callOrder)
 					marks = append(marks, classify.Mark{
 						Seq:       len(callOrder),
 						Timestamp: line.Timestamp,
@@ -312,6 +314,7 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 			if line.Role == "user" && line.Content.HasText() {
 				text := line.Content.Text()
 				if !injectedUserMessage(text) {
+					codexReleaseOpenCalls(calls, results, callOrder)
 					marks = append(marks, classify.Mark{
 						Seq:       len(callOrder),
 						Timestamp: line.Timestamp,
@@ -325,6 +328,9 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 			var payload codexEventMsg
 			if json.Unmarshal(line.Payload, &payload) != nil {
 				return
+			}
+			if payload.Type == "task_started" || payload.Type == "turn_started" {
+				codexReleaseOpenCalls(calls, results, callOrder)
 			}
 			if payload.Type == "context_compacted" {
 				marks = append(marks, classify.Mark{
@@ -499,6 +505,7 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 				}
 			}
 		case "turn_context":
+			codexReleaseOpenCalls(calls, results, callOrder)
 			var payload codexTurnContext
 			if json.Unmarshal(line.Payload, &payload) == nil {
 				if payload.Cwd != "" && meta.Cwd == "" {
@@ -551,6 +558,7 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 			if payload.Type == "message" && payload.Role == "user" && payload.Content.HasText() {
 				text := payload.Content.Text()
 				if !injectedUserMessage(text) {
+					codexReleaseOpenCalls(calls, results, callOrder)
 					marks = append(marks, classify.Mark{
 						Seq:       startSeq + len(callOrder),
 						Timestamp: line.Timestamp,
@@ -566,6 +574,7 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 			if line.Role == "user" && line.Content.HasText() {
 				text := line.Content.Text()
 				if !injectedUserMessage(text) {
+					codexReleaseOpenCalls(calls, results, callOrder)
 					marks = append(marks, classify.Mark{
 						Seq:       startSeq + len(callOrder),
 						Timestamp: line.Timestamp,
@@ -578,6 +587,9 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 			var payload codexEventMsg
 			if json.Unmarshal(line.Payload, &payload) != nil {
 				return
+			}
+			if payload.Type == "task_started" || payload.Type == "turn_started" {
+				codexReleaseOpenCalls(calls, results, callOrder)
 			}
 			if payload.Type == "context_compacted" {
 				marks = append(marks, classify.Mark{
@@ -625,6 +637,36 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 	}
 
 	return events[:safeEvents], marks[:safeMarks], meta, safeOffset, err
+}
+
+// codexReleaseOpenCalls settles every call still waiting on its output with a
+// zero ToolResult. It runs at a record that begins a new turn — a
+// task_started event or a turn_context — or carries a message the user typed.
+//
+// Codex writes a sampling round's tool outputs before any of those records.
+// A message the user sends mid-turn, and the turn_context a mid-turn
+// compaction re-records, are written only after the round and its tools have
+// finished. A new turn starts only once the old one has finished or been
+// aborted, and an aborted turn's task is dropped, so nothing it was still
+// running can write an output afterwards. A call still open at one of these
+// records will never be answered — typically the process died mid-call and
+// the session was resumed — and holding the watermark for it held the whole
+// session forever (#103).
+//
+// Parse settles calls at the same records, so both paths emit an orphan with
+// an empty result in call order, the position Parse always gave it, and both
+// ignore an output that turns up after its call was settled. A call that is
+// merely slow is untouched: none of these records is written while its turn
+// is still running.
+func codexReleaseOpenCalls(calls map[string]classify.ToolCall, results map[string]classify.ToolResult, order []string) {
+	if len(results) == len(calls) {
+		return
+	}
+	for _, id := range order {
+		if _, ok := results[id]; !ok {
+			results[id] = classify.ToolResult{}
+		}
+	}
 }
 
 // Codex-specific types.

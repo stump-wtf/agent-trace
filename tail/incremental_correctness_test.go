@@ -1392,13 +1392,28 @@ func TestClaudeCodeIncrementalMatchesFull(t *testing.T) {
 	}
 }
 
+// codexExec is a function_call running one shell command through
+// exec_command, whose summary names the command.
+func codexExec(callID, cmd, ts string) string {
+	return codexCallLine(callID, "exec_command", `"{\"cmd\":\"`+cmd+`\"}"`, ts)
+}
+
+// codexTurnStart is what Codex writes when a turn begins: a task_started
+// event, then the turn's context.
+func codexTurnStart(turnID, ts string) string {
+	return `{"type":"event_msg","timestamp":"` + ts + `","payload":{"type":"task_started","turn_id":"` + turnID + `","model_context_window":272000}}` + "\n" +
+		`{"type":"turn_context","timestamp":"` + ts + `","payload":{"cwd":"/tmp","model":"gpt-5-codex"}}` + "\n"
+}
+
 // TestCodexIncrementalMatchesFull runs the incremental==full oracle over the
-// shapes a live Codex rollout takes across poll boundaries.
+// shapes a live Codex rollout takes across poll boundaries — including a call
+// that never gets an output, which used to hold the watermark forever (#103).
 func TestCodexIncrementalMatchesFull(t *testing.T) {
 	head := codexSessionMetaLine("2026-01-01T10:00:00Z")
 	tests := []struct {
-		name  string
-		steps [][]string
+		name    string
+		steps   [][]string
+		orphans []string
 	}{
 		{
 			name: "calls resolving in later polls",
@@ -1409,6 +1424,54 @@ func TestCodexIncrementalMatchesFull(t *testing.T) {
 				{codexOutputLine("c3", `"ok"`, "2026-01-01T10:00:05Z")},
 				{codexOutputLine("c2", `"ok"`, "2026-01-01T10:00:06Z")},
 			},
+		},
+		{
+			name: "killed mid-call, then resumed",
+			steps: [][]string{
+				{codexTurnStart("t1", "2026-01-01T10:00:01Z"), codexUserLine("run it", "2026-01-01T10:00:01Z"), codexExec("c1", "echo c1", "2026-01-01T10:00:02Z")},
+				{codexOutputLine("c1", `"ok"`, "2026-01-01T10:00:03Z")},
+				{codexExec("c2", "echo orphan", "2026-01-01T10:00:04Z")},
+				{codexTurnStart("t2", "2026-01-01T11:00:00Z")},
+				{codexUserLine("resumed", "2026-01-01T11:00:01Z"), codexExec("c3", "echo c3", "2026-01-01T11:00:02Z")},
+				{codexOutputLine("c3", `"ok"`, "2026-01-01T11:00:03Z")},
+			},
+			orphans: []string{"echo orphan"},
+		},
+		{
+			name: "a message the user sends releases an open call",
+			steps: [][]string{
+				{codexExec("c1", "echo orphan", "2026-01-01T10:00:01Z")},
+				{codexUserLine("are you still there", "2026-01-01T10:30:00Z"), codexExec("c2", "echo c2", "2026-01-01T10:30:01Z")},
+				{codexOutputLine("c2", `"ok"`, "2026-01-01T10:30:02Z")},
+			},
+			orphans: []string{"echo orphan"},
+		},
+		{
+			name: "one parallel sibling orphaned, then a new turn",
+			steps: [][]string{
+				{codexExec("c1", "echo c1", "2026-01-01T10:00:01Z"), codexExec("c2", "echo orphan", "2026-01-01T10:00:01Z"), codexExec("c3", "echo c3", "2026-01-01T10:00:01Z")},
+				{codexOutputLine("c3", `"ok"`, "2026-01-01T10:00:02Z"), codexOutputLine("c1", `"ok"`, "2026-01-01T10:00:03Z")},
+				{codexTurnStart("t2", "2026-01-01T11:00:00Z"), codexUserLine("again", "2026-01-01T11:00:01Z")},
+				{codexExec("c4", "echo c4", "2026-01-01T11:00:02Z"), codexOutputLine("c4", `"ok"`, "2026-01-01T11:00:03Z")},
+			},
+			orphans: []string{"echo orphan"},
+		},
+		{
+			name: "injected context releases nothing",
+			steps: [][]string{
+				{codexExec("c1", "echo c1", "2026-01-01T10:00:01Z")},
+				{codexUserLine("<environment_context>cwd</environment_context>", "2026-01-01T10:00:02Z")},
+				{codexOutputLine("c1", `"ok"`, "2026-01-01T10:00:03Z")},
+			},
+		},
+		{
+			name: "an output after its call was settled is ignored by both paths",
+			steps: [][]string{
+				{codexExec("c1", "echo orphan", "2026-01-01T10:00:01Z")},
+				{codexTurnStart("t2", "2026-01-01T11:00:00Z")},
+				{codexOutputLine("c1", `"late"`, "2026-01-01T11:00:01Z")},
+			},
+			orphans: []string{"echo orphan"},
 		},
 	}
 	for _, tt := range tests {
@@ -1422,6 +1485,11 @@ func TestCodexIncrementalMatchesFull(t *testing.T) {
 			if end := jsonlCompleteOffset(path); wm != end {
 				t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
 			}
+			events, _, _, err := CodexAdapter{}.Parse(t.Context(), path)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			assertOrphans(t, events, tt.orphans...)
 		})
 	}
 }
