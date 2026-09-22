@@ -40,7 +40,6 @@ consecutive unchanged scans the watcher re-reads it in full and delivers
 everything the incremental polls had withheld.
 
 ### Fixed
-
 - A transcript whose writer died mid-call no longer stalls the watcher's
   cursor forever. `ParseSince` holds an unresolved call below its watermark by
   design, and a daemon restart's trailing records — a `bridge-session`, a
@@ -56,6 +55,14 @@ everything the incremental polls had withheld.
   of the file. The trade is explicit: a tool call that genuinely outlasts the
   window is emitted early with an empty result, and its result, landing
   afterwards, is dropped. Below the threshold the in-flight hold is untouched.
+
+- The Crush adapter reads the `is_error` flag Crush writes on a `tool_result`
+  part, from both `Parse` and `ParseSince`. Every Crush event previously had
+  `IsError` false, so a failed view or edit read as a success in its summary
+  and in the span `otel` builds from it. This changes `IsError`, `Summary` and
+  span status for Crush tool calls that Crush itself recorded as errors. A
+  shell command that exits non-zero is still not an error: Crush records it as
+  an ordinary result whose text ends `Exit code N`.
 
 - `ParseSince` in the Crush adapter holds its watermark below every unfinished
   assistant row read in a poll, not only the last. Crush inserts an assistant
@@ -76,6 +83,29 @@ everything the incremental polls had withheld.
   `exception.message`; a mark outside any turn roots a zero-length standalone
   span. The reason a turn failed was already classified by `tail` and was
   dropped at export, so a trace showed a turn that simply stopped.
+
+- `classify.Options.ErrorExcerptBytes` keeps up to that many bytes of an
+  errored tool result's text on the new `classify.Event.ErrorExcerpt`
+  (`errorExcerpt` in JSON, omitted when empty). Until now an `Event` kept a
+  result's size and error flag but none of its text, so the literal error an
+  agent hit — `undefined: foo`, `401 Unauthorized` — never survived parsing,
+  and a consumer matching on symptoms had nothing to match. The excerpt has
+  terminal escape sequences stripped and surrounding whitespace trimmed, never
+  splits a UTF-8 rune, and keeps the head and tail of longer text joined by
+  `classify.ErrorExcerptElision`, each cut snapping to a nearby line break.
+  It is off by default: zero keeps nothing, and a result whose `IsError` is
+  false never carries one.
+
+- `classify.Options.Redact` rewrites the text before an excerpt is cut from it
+  and stored, so a consumer that supplies one never holds raw text on an
+  `Event`. It runs over the whole cleaned result rather than the cut excerpt,
+  so a secret straddling the cut is still whole when it is matched.
+
+- `tail.WatchConfig.ErrorExcerptBytes` and `tail.WatchConfig.Redact` carry the
+  two settings to every adapter through `OptionsSetter`, the path
+  `VerifyPatterns` already takes, so events from both `Parse` and `ParseSince`
+  carry the excerpt. The watcher injects `Options` only when `VerifyPatterns`
+  or `ErrorExcerptBytes` is set; with neither, adapters keep their defaults.
 
 ## [0.3.0] - 2026-09-22
 
