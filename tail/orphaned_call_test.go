@@ -26,8 +26,8 @@ import (
 //
 // @joestump-agent 09/22/2026 - Review: pinned that the Claude Code release
 // stays inside one conversation — parallel inline subagents, and a
-// subagent's own file — and that a line carrying a tool_result never counts
-// as a message the user typed.
+// subagent's own file — and that a line carrying a tool_result, no text, or
+// text opening with a tag never counts as a message the user typed.
 
 // TestClaudeCodeParseSinceReleasesOrphanedCall is the shape #103 reports: an
 // agent killed mid-call and then resumed. The resumed turn must be delivered,
@@ -258,6 +258,39 @@ func TestClaudeCodeResultLineDoesNotSupersede(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1", len(events))
+	}
+	assertOrphans(t, events)
+}
+
+// TestClaudeCodeTaggedUserTextDoesNotSupersede: text that opens with a tag is
+// Claude Code's or a harness's, not the user's, even when something trails the
+// closing tag — which injectedUserMessage alone does not recognize. Claude
+// Code writes task notifications between the results of one parallel batch,
+// so such a line must not release a sibling still running; nor must a user
+// line with no text at all.
+func TestClaudeCodeTaggedUserTextDoesNotSupersede(t *testing.T) {
+	imageOnly := `{"type":"user","timestamp":"2026-01-01T10:00:04Z","sessionId":"s1","cwd":"/tmp","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]}}` + "\n"
+	path := writeTempJSONL(t, "s.jsonl", ccUserText("start", "2026-01-01T10:00:00Z")+
+		ccCall("m1", "c1", "sleep 60", "2026-01-01T10:00:01Z")+
+		ccCall("m1", "c2", "echo c2", "2026-01-01T10:00:01Z")+
+		ccToolResult("c2", "2026-01-01T10:00:02Z")+
+		ccUserText(`<task-notification><status>completed</status></task-notification>\nRead the output file to retrieve the result.`, "2026-01-01T10:00:03Z")+
+		imageOnly)
+	a := ClaudeCodeAdapter{}
+	events, _, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
+	if err != nil {
+		t.Fatalf("poll 1: ParseSince: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("poll 1: got %d events, want 0 — c1 is still running", len(events))
+	}
+	appendLines(t, path, ccToolResult("c1", "2026-01-01T10:01:01Z"))
+	events, _, _, _, err = a.ParseSince(t.Context(), path, wm, 0)
+	if err != nil {
+		t.Fatalf("poll 2: ParseSince: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("poll 2: got %d events, want c2 and c1", len(events))
 	}
 	assertOrphans(t, events)
 }

@@ -587,10 +587,15 @@ type ccPendingCall struct {
 // in 1,774 local sessions, no tool_result was ever written after either
 // record — only after an isMeta line, nine times. A user line that carries a
 // tool_result never counts, even with text ahead of it: its own results are
-// paired after the release runs, so counting it would drop them.
+// paired after the release runs, so counting it would drop them. Nor does one
+// with no text, or whose text opens with a tag. Claude Code writes task
+// notifications between the results of one parallel batch, and
+// injectedUserMessage recognizes them only while nothing trails the closing
+// tag; a typed message that opens with a system reminder is still followed by
+// the response it asks for, and that response releases the call instead.
 //
-// Both facts hold only within one conversation, so a line from another one
-// never counts. The parent and its subagents are separate conversations —
+// Either record proves this only within its own conversation, so a line from
+// another one never counts. The parent and its subagents are separate conversations —
 // isSidechain tells the parent's lines from a subagent's, and agentId tells
 // one subagent's from another's. Older transcripts interleave subagents'
 // lines with the parent's, marked isSidechain but with no agentId; parallel
@@ -608,8 +613,11 @@ func ccSupersedes(line ccRawLine, msg ccMessage, p ccPendingCall) bool {
 	case "assistant":
 		return msg.ID != "" && p.messageID != "" && msg.ID != p.messageID
 	case "user":
-		return !line.IsMeta && !ccHasToolResult(msg.Content) && hasCCUserMessage(msg.Content) &&
-			!injectedUserMessage(ccUserMessageText(msg.Content))
+		if line.IsMeta || ccHasToolResult(msg.Content) || !hasCCUserMessage(msg.Content) {
+			return false
+		}
+		text := strings.TrimSpace(ccUserMessageText(msg.Content))
+		return text != "" && !strings.HasPrefix(text, "<") && !injectedUserMessage(text)
 	}
 	return false
 }

@@ -34,7 +34,8 @@ breaking changes arrive in minor releases. See the note under
   `ParseSince` or a `Watcher`. A pending call is now released by the first
   record that proves no result can follow: an assistant line from a different
   API response, or a message the user typed, including the interrupt marker.
-  A loaded skill's `isMeta` body and harness-injected text do not count; they
+  A loaded skill's `isMeta` body, harness-injected text and any text that
+  opens with a tag (a task notification, a system reminder) do not count; they
   land between the results of one parallel batch. Nor does a line from
   another conversation: the parent and each subagent are told apart by
   `isSidechain` and `agentId`, and an older transcript's inline subagent line,
