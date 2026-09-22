@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -134,5 +135,77 @@ func TestReleaseNotesTrimsSurroundingBlankLines(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, "First release.") {
 		t.Errorf("notes should open with the section's first line, got:\n%q", out)
+	}
+}
+
+// The real CHANGELOG, the way the release workflow sees it. #126: a promotion
+// that loses entries, or lands a second "### Fixed" under the newest version,
+// publishes wrong notes under a tag that cannot be recut — and a bad merge of
+// two promotions reports no conflict while doing it. Nothing else in the repo
+// looks at the real file, so the failure ships green. This is the cheap guard
+// from #126 option 1: newest section parses, has one heading per type, and the
+// script the release workflow runs exits 0 for it.
+func TestRepoChangelogNewestSectionIsReleasable(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "CHANGELOG.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(raw), "\n")
+
+	unreleased := false
+	for _, line := range lines {
+		if line == "## [Unreleased]" {
+			unreleased = true
+			break
+		}
+	}
+	if !unreleased {
+		t.Fatal("no [Unreleased] heading in the repo CHANGELOG — promotions land by rewriting it, so it must always exist")
+	}
+
+	versionRe := regexp.MustCompile(`^## \[(\d+\.\d+\.\d+)\]`)
+	newest := ""
+	var section []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "## ") && line != "## [Unreleased]" {
+			if newest != "" {
+				break
+			}
+			m := versionRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("heading after [Unreleased] is not a version section: %q", line)
+			}
+			newest = m[1]
+			continue
+		}
+		if newest != "" {
+			section = append(section, line)
+		}
+	}
+	if newest == "" {
+		t.Fatal("no version section after [Unreleased] — nothing is releasable")
+	}
+	if strings.TrimSpace(strings.Join(section, "\n")) == "" {
+		t.Fatalf("## [%s] section is empty", newest)
+	}
+
+	seen := map[string]int{}
+	for _, line := range section {
+		if strings.HasPrefix(line, "### ") {
+			seen[line]++
+		}
+	}
+	for heading, n := range seen {
+		if n > 1 {
+			t.Errorf("duplicate %q heading in the [%s] section — the release notes would render it twice", heading, newest)
+		}
+	}
+
+	out, stderr, err := runScript(t, string(raw), newest)
+	if err != nil {
+		t.Fatalf("release-notes.sh %s failed on the repo CHANGELOG: %v (%s)", newest, err, stderr)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Errorf("release-notes.sh %s printed nothing for a non-empty section", newest)
 	}
 }
