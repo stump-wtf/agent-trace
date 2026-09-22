@@ -35,7 +35,11 @@ breaking changes arrive in minor releases. See the note under
   record that proves no result can follow: an assistant line from a different
   API response, or a message the user typed, including the interrupt marker.
   A loaded skill's `isMeta` body and harness-injected text do not count; they
-  land between the results of one parallel batch. Across 107,525 resolved
+  land between the results of one parallel batch. Nor does a line from
+  another conversation: the parent and each subagent are told apart by
+  `isSidechain` and `agentId`, and an older transcript's inline subagent line,
+  which has no `agentId` and so cannot be told from a parallel sibling's,
+  releases nothing. Across 107,525 resolved
   calls in 1,774 local transcripts, no result was ever written after either
   record. The released call is emitted at that record with a zero-value
   `ToolResult`, by `Parse` and `ParseSince` alike, where `Parse` used to

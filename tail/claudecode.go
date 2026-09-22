@@ -306,7 +306,7 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 				if call.Name == "Task" || call.Name == "Agent" {
 					marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: call.Name})
 				}
-				pending.put(call.ID, ccPendingCall{call: call, messageID: msg.ID, sidechain: line.IsSidechain})
+				pending.put(call.ID, ccPendingCall{call: call, messageID: msg.ID, sidechain: line.IsSidechain, agentID: line.AgentID})
 			case "tool_result":
 				p, ok := pending.take(item.ToolUseID)
 				if !ok {
@@ -510,7 +510,7 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 				if call.Name == "Task" || call.Name == "Agent" {
 					marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: call.Name})
 				}
-				pending.put(item.ID, ccPendingCall{call: call, messageID: msg.ID, sidechain: line.IsSidechain})
+				pending.put(item.ID, ccPendingCall{call: call, messageID: msg.ID, sidechain: line.IsSidechain, agentID: line.AgentID})
 			case "tool_result":
 				p, ok := pending.take(item.ToolUseID)
 				if !ok {
@@ -565,6 +565,7 @@ type ccPendingCall struct {
 	call      classify.ToolCall
 	messageID string // the API response that issued the call
 	sidechain bool
+	agentID   string // the subagent whose conversation issued it, if any
 }
 
 // ccSupersedes reports whether line, read after a pending call, proves the
@@ -584,19 +585,41 @@ type ccPendingCall struct {
 //
 // Both were checked against real transcripts: across 107,525 resolved calls
 // in 1,774 local sessions, no tool_result was ever written after either
-// record — only after an isMeta line, nine times. A line on the other side of
-// the sidechain boundary never counts, for transcripts that interleave a
-// subagent's lines with its parent's.
+// record — only after an isMeta line, nine times. A user line that carries a
+// tool_result never counts, even with text ahead of it: its own results are
+// paired after the release runs, so counting it would drop them.
+//
+// Both facts hold only within one conversation, so a line from another one
+// never counts. The parent and its subagents are separate conversations —
+// isSidechain tells the parent's lines from a subagent's, and agentId tells
+// one subagent's from another's. Older transcripts interleave subagents'
+// lines with the parent's, marked isSidechain but with no agentId; parallel
+// subagents' lines then interleave with each other too, and nothing tells
+// them apart. Such a line releases nothing, so a call it issued holds as it
+// always did rather than being released by a sibling subagent's response.
 func ccSupersedes(line ccRawLine, msg ccMessage, p ccPendingCall) bool {
-	if line.IsSidechain != p.sidechain {
+	if line.IsSidechain != p.sidechain || line.AgentID != p.agentID {
+		return false
+	}
+	if line.IsSidechain && line.AgentID == "" {
 		return false
 	}
 	switch line.Type {
 	case "assistant":
 		return msg.ID != "" && p.messageID != "" && msg.ID != p.messageID
 	case "user":
-		return !line.IsMeta && hasCCUserMessage(msg.Content) &&
+		return !line.IsMeta && !ccHasToolResult(msg.Content) && hasCCUserMessage(msg.Content) &&
 			!injectedUserMessage(ccUserMessageText(msg.Content))
+	}
+	return false
+}
+
+// ccHasToolResult reports whether content carries any tool_result block.
+func ccHasToolResult(content ccContentList) bool {
+	for _, item := range content.Items {
+		if item.Type == "tool_result" {
+			return true
+		}
 	}
 	return false
 }

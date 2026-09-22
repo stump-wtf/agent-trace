@@ -23,6 +23,11 @@ import (
 // that is merely slow is still held.
 //
 // @joestump-agent 09/22/2026 - Added for #103.
+//
+// @joestump-agent 09/22/2026 - Review: pinned that the Claude Code release
+// stays inside one conversation — parallel inline subagents, and a
+// subagent's own file — and that a line carrying a tool_result never counts
+// as a message the user typed.
 
 // TestClaudeCodeParseSinceReleasesOrphanedCall is the shape #103 reports: an
 // agent killed mid-call and then resumed. The resumed turn must be delivered,
@@ -156,6 +161,105 @@ func TestClaudeCodeSidechainLineDoesNotSupersede(t *testing.T) {
 	if len(events) != 1 || events[0].ResultBytes == 0 {
 		t.Errorf("events = %+v, want the Task call once, with its result", events)
 	}
+}
+
+// sidechain marks a Claude Code line as a subagent's, with agentID naming the
+// subagent when it is not empty. Older transcripts wrote subagents' lines
+// inline in the parent's file with no agentId; newer ones give each subagent
+// a file of its own, every line carrying its agentId.
+func sidechain(agentID, line string) string {
+	fields := `"isSidechain":true,`
+	if agentID != "" {
+		fields += `"agentId":"` + agentID + `",`
+	}
+	return strings.Replace(line, `"timestamp"`, fields+`"timestamp"`, 1)
+}
+
+// TestClaudeCodeParallelInlineSubagentsReleaseNothing: two subagents launched
+// in parallel, their lines interleaved inline with no agentId to tell them
+// apart. Subagent B's response is a different API response from subagent A's
+// call, on the same side of the sidechain boundary — and says nothing about
+// A's call, which is still running. It must hold, then pair with its result.
+func TestClaudeCodeParallelInlineSubagentsReleaseNothing(t *testing.T) {
+	path := writeTempJSONL(t, "s.jsonl", ccUserText("start", "2026-01-01T10:00:00Z"))
+	steps := []func(t *testing.T){
+		appendStep(path),
+		appendStep(path,
+			ccCall("m1", "task1", "echo task1", "2026-01-01T10:00:01Z"),
+			ccCall("m1", "task2", "echo task2", "2026-01-01T10:00:01Z"),
+			sidechain("", ccUserText("subagent A prompt", "2026-01-01T10:00:02Z")),
+			sidechain("", ccCall("sa1", "a1", "echo a1", "2026-01-01T10:00:03Z")),
+			sidechain("", ccUserText("subagent B prompt", "2026-01-01T10:00:03Z")),
+			sidechain("", ccCall("sb1", "b1", "echo b1", "2026-01-01T10:00:04Z"))),
+		appendStep(path,
+			sidechain("", ccToolResult("b1", "2026-01-01T10:00:05Z")),
+			sidechain("", ccText("sb2", "B done", "2026-01-01T10:00:06Z"))),
+		appendStep(path,
+			sidechain("", ccToolResult("a1", "2026-01-01T10:00:07Z")),
+			sidechain("", ccText("sa2", "A done", "2026-01-01T10:00:08Z")),
+			ccToolResult("task1", "2026-01-01T10:00:09Z"),
+			ccToolResult("task2", "2026-01-01T10:00:10Z"),
+			ccText("m2", "all done", "2026-01-01T10:00:11Z")),
+	}
+	wm := assertIncrementalMatchesFull(t, &ClaudeCodeAdapter{}, path, steps)
+	if end := jsonlCompleteOffset(path); wm != end {
+		t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
+	}
+	events, _, _, err := ClaudeCodeAdapter{}.Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	assertOrphans(t, events)
+}
+
+// TestClaudeCodeSubagentFileReleasesOrphanedCall: a subagent's own file, every
+// line carrying its agentId, is one conversation, so a response that stopped
+// short of running its call is released there exactly as in the parent — by
+// the same subagent's next response, and by nothing another subagent wrote.
+func TestClaudeCodeSubagentFileReleasesOrphanedCall(t *testing.T) {
+	path := writeTempJSONL(t, "agent-a.jsonl", sidechain("a", ccUserText("subagent prompt", "2026-01-01T10:00:00Z")))
+	steps := []func(t *testing.T){
+		appendStep(path),
+		appendStep(path, sidechain("a", ccCall("s1", "c1", "sleep 60", "2026-01-01T10:00:01Z"))),
+		// Lines another subagent wrote prove nothing about c1, still running.
+		appendStep(path, sidechain("b", ccText("x1", "elsewhere", "2026-01-01T10:00:02Z")),
+			sidechain("b", ccUserText("another prompt", "2026-01-01T10:00:02Z"))),
+		appendStep(path, sidechain("a", ccToolResult("c1", "2026-01-01T10:01:01Z"))),
+		appendStep(path, sidechain("a", ccCall("s2", "c2", "echo orphan", "2026-01-01T10:01:02Z"))),
+		appendStep(path, sidechain("a", ccText("s3", "Let me try that differently.", "2026-01-01T10:01:03Z")),
+			sidechain("a", ccCall("s3", "c3", "echo c3", "2026-01-01T10:01:03Z"))),
+		appendStep(path, sidechain("a", ccToolResult("c3", "2026-01-01T10:01:04Z"))),
+	}
+	wm := assertIncrementalMatchesFull(t, &ClaudeCodeAdapter{}, path, steps)
+	if end := jsonlCompleteOffset(path); wm != end {
+		t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
+	}
+	events, _, _, err := ClaudeCodeAdapter{}.Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3", len(events))
+	}
+	assertOrphans(t, events, "echo orphan")
+}
+
+// TestClaudeCodeResultLineDoesNotSupersede: a user line carrying a
+// tool_result is never a message the user typed, even with text ahead of the
+// result. The release runs before a line's own results are paired, so
+// counting it would drop the very result it carries.
+func TestClaudeCodeResultLineDoesNotSupersede(t *testing.T) {
+	line := `{"type":"user","timestamp":"2026-01-01T10:00:02Z","sessionId":"s1","cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"note"},{"type":"tool_result","tool_use_id":"c1","content":"package main"}]}}` + "\n"
+	path := writeTempJSONL(t, "s.jsonl", ccUserText("start", "2026-01-01T10:00:00Z")+
+		ccCall("m1", "c1", "echo c1", "2026-01-01T10:00:01Z")+line)
+	events, _, _, err := ClaudeCodeAdapter{}.Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	assertOrphans(t, events)
 }
 
 // TestWatcherResumesAfterOrphanedCall drives the watcher, which inherits the
