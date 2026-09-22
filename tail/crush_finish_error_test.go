@@ -133,7 +133,20 @@ func TestCrushParseSinceEmitsFinishErrorOnce(t *testing.T) {
 		t.Fatalf("error mark before any failure was written: %+v", errs)
 	}
 
-	insertCrushMessages(t, dbPath, "incr", now+10, []string{"assistant"}, []string{finishErrorParts})
+	// The finish-error is written into the turn's own row, not a new one —
+	// that is how Crush records it, and the shape #108 describes.
+	db2, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db2.Exec(`UPDATE messages SET parts = ? WHERE id = ?`,
+		`[{"type":"tool_call","data":{"id":"call-1","name":"view","input":"{\"file_path\":\"a.go\"}","finished":true}},{"type":"finish","data":{"reason":"error","time":1789127781}}]`, fmt.Sprintf("incr-%d-1", now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resetDBCache()
 
 	_, marks2, _, wm2, err := a.ParseSince(t.Context(), path, wm, len(events))
 	if err != nil {

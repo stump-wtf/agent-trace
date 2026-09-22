@@ -182,11 +182,13 @@ func TestCrushParseSinceRereadsToolCallStreamedIntoRow(t *testing.T) {
 	}
 }
 
-// TestCrushParseSinceUnfinishedRowDoesNotStall bounds the rule above. A Crush
-// killed mid-stream leaves an assistant row with no finish part forever; once
-// anything follows it, that turn is over, and holding the cursor below it would
-// withhold every later event from the watcher for good.
-func TestCrushParseSinceUnfinishedRowDoesNotStall(t *testing.T) {
+// TestCrushParseSinceUnfinishedRowHolds pins the #108 rule: an assistant row
+// with no finish part holds the watermark, even when later rows follow it —
+// with turns running concurrently, turn B finishing says nothing about turn A.
+// A Crush killed mid-stream leaves such a row forever; the bound is the
+// watcher's stalled-session reconciliation, pinned at the watcher level by
+// TestWatcherReconcilesStalledOrphanCrush below.
+func TestCrushParseSinceUnfinishedRowHolds(t *testing.T) {
 	resetDBCache()
 	t.Cleanup(resetDBCache)
 
@@ -196,21 +198,24 @@ func TestCrushParseSinceUnfinishedRowDoesNotStall(t *testing.T) {
 		`[{"type":"text","data":{"text":"first try"}}]`,
 		`[{"type":"text","data":{"text":"killed mid-stream"}}]`,
 		`[{"type":"text","data":{"text":"second try"}}]`,
-		`[{"type":"tool_call","data":{"id":"call-1","name":"view","input":"{\"file_path\":\"a.go\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
+		`[{"type":"tool_call","data":{"id":"call-1","name":"view","input":"{"file_path":"a.go"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
 		`[{"type":"tool_result","data":{"tool_call_id":"call-1","name":"view","content":"package a"}}]`,
 		finishErrorParts,
 	})
 	a := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
 	path := dbPath + "/resumed"
 
-	events, marks, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
+	events, _, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
 	if err != nil {
 		t.Fatalf("ParseSince: %v", err)
 	}
-	if len(events) != 1 || len(errorMarksIn(marks)) != 1 {
-		t.Errorf("events = %d, error marks = %d (%+v); want 1 and 1 — the dead turn must not hold back what followed it", len(events), len(errorMarksIn(marks)), marks)
+	// The killed mid-stream row (row 2) holds: the first poll delivers only
+	// the first user message's mark. The full turn that followed it is
+	// withheld, not lost — the watcher's reconciliation delivers it.
+	if len(events) != 0 {
+		t.Errorf("events = %d, want 0 — the unfinished row holds", len(events))
 	}
-	if full := a.Watermark(t.Context(), path); wm != full {
-		t.Errorf("watermark = %d, want %d: every row is complete, so the cursor reaches the end", wm, full)
+	if full := a.Watermark(t.Context(), path); wm >= full {
+		t.Errorf("watermark = %d, want < %d — below the killed row", wm, full)
 	}
 }

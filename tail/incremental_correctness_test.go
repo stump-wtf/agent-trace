@@ -293,7 +293,7 @@ func TestCrushParseSinceNullParent(t *testing.T) {
 	}
 	insertCrushRow(t, db, "s1", nil, now, now) // NULL, as real Crush writes
 	insertCrushMsg(t, db, "m1", "s1", "assistant",
-		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}}]`, now+1000)
+		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}},{"type":"finish","data":{"reason":"tool_use"}}]`, now+1000)
 	insertCrushMsg(t, db, "m2", "s1", "tool",
 		`[{"type":"tool_result","data":{"tool_call_id":"c1","content":"package a"}}]`, now+2000)
 	if err := db.Close(); err != nil {
@@ -335,7 +335,7 @@ func TestCrushParseSinceWatermarkIsAMessageCursor(t *testing.T) {
 	// a live harness does.
 	insertCrushRow(t, db, "s1", nil, now, now+60_000)
 	insertCrushMsg(t, db, "m1", "s1", "assistant",
-		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}}]`, now+1000)
+		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}},{"type":"finish","data":{"reason":"tool_use"}}]`, now+1000)
 	insertCrushMsg(t, db, "m2", "s1", "tool",
 		`[{"type":"tool_result","data":{"tool_call_id":"c1","content":"package a"}}]`, now+2000)
 	if err := db.Close(); err != nil {
@@ -362,7 +362,7 @@ func TestCrushParseSinceWatermarkIsAMessageCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertCrushMsg(t, db, "m3", "s1", "assistant",
-		`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"b.go\"}"}}]`, now+3000)
+		`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"b.go\"}"}},{"type":"finish","data":{"reason":"tool_use"}}]`, now+3000)
 	insertCrushMsg(t, db, "m4", "s1", "tool",
 		`[{"type":"tool_result","data":{"tool_call_id":"c2","content":"package b"}}]`, now+4000)
 	if err := db.Close(); err != nil {
@@ -396,7 +396,7 @@ func TestCrushParseSinceHoldsUnresolvedCall(t *testing.T) {
 	}
 	insertCrushRow(t, db, "s1", nil, now, now)
 	insertCrushMsg(t, db, "m1", "s1", "assistant",
-		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}}]`, now+1000)
+		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}},{"type":"finish","data":{"reason":"tool_use"}}]`, now+1000)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -965,9 +965,11 @@ func TestCrushParseSinceSameSecondCallsEmittedOnce(t *testing.T) {
 	}
 	insertCrushRow(t, db, "s1", nil, now, now)
 	// Two tool calls in the same second: one resolved within the message,
-	// one left open.
+	// one left open. m1 carries its finish: since #108 every unfinished
+	// assistant row holds the watermark, and a real Crush session writes the
+	// finish into the row when the step ends.
 	insertCrushMsg(t, db, "m1", "s1", "assistant",
-		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}},{"type":"tool_result","data":{"tool_call_id":"c1","content":"ok"}}]`, now)
+		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}},{"type":"tool_result","data":{"tool_call_id":"c1","content":"ok"}},{"type":"finish","data":{"reason":"tool_use"}}]`, now)
 	insertCrushMsg(t, db, "m2", "s1", "assistant",
 		`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"b.go\"}"}}]`, now)
 	if err := db.Close(); err != nil {
@@ -988,13 +990,19 @@ func TestCrushParseSinceSameSecondCallsEmittedOnce(t *testing.T) {
 		t.Fatalf("poll 1: watermark = %d, want 1 — strictly below the row holding the open call", wm)
 	}
 
-	// The result lands a second later; both calls must come out, exactly once.
+	// The result lands a second later, and m2's step ends — its finish is
+	// written into the row. Both calls must come out, exactly once. (Since
+	// #108 the unfinished m2 holds the watermark until that finish lands.)
 	db, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	insertCrushMsg(t, db, "m3", "s1", "tool",
 		`[{"type":"tool_result","data":{"tool_call_id":"c2","content":"ok"}}]`, now+1000)
+	if _, err := db.Exec(`UPDATE messages SET parts = ? WHERE id = ?`,
+		`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"b.go\"}"}},{"type":"finish","data":{"reason":"tool_use"}}]`, "m2"); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1141,7 +1149,7 @@ func TestCrushParseSinceSeesLaterSameSecondMessage(t *testing.T) {
 	}
 	insertCrushRow(t, db, "s1", nil, now, now)
 	insertCrushMsg(t, db, "m1", "s1", "assistant",
-		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}}]`, now)
+		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}"}},{"type":"finish","data":{"reason":"tool_use"}}]`, now)
 	insertCrushMsg(t, db, "m2", "s1", "tool",
 		`[{"type":"tool_result","data":{"tool_call_id":"c1","content":"package a"}}]`, now)
 	if err := db.Close(); err != nil {
@@ -1157,13 +1165,16 @@ func TestCrushParseSinceSeesLaterSameSecondMessage(t *testing.T) {
 		t.Fatalf("poll 1: got %d events, want 1", len(events))
 	}
 
-	// The next turn lands inside the same second the watermark named.
+	// The next turn lands inside the same second the watermark named. m3
+	// carries its finish: since #108 every unfinished assistant row holds the
+	// watermark, and a real Crush session writes the finish into the row when
+	// the step ends.
 	db, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	insertCrushMsg(t, db, "m3", "s1", "assistant",
-		`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"b.go\"}"}}]`, now)
+		`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"b.go\"}"}},{"type":"finish","data":{"reason":"tool_use"}}]`, now)
 	insertCrushMsg(t, db, "m4", "s1", "tool",
 		`[{"type":"tool_result","data":{"tool_call_id":"c2","content":"package b"}}]`, now)
 	if err := db.Close(); err != nil {
