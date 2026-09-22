@@ -11,6 +11,20 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-22
+
+A correctness release for `tail`: the incremental readers stop going silent,
+and a failed model call becomes something an operator can see and classify.
+
+`ParseSince` no longer pins its watermark forever behind a tool call that will
+never get a result, so a session killed mid-call and resumed keeps being
+delivered instead of stalling. Claude Code joins Crush in emitting an `error`
+mark for a failed model call — the signal harness classifies into quota, auth,
+timeout and transport, which stayed empty for every claude-code agent until now.
+
+One change shifts sequence numbers for consumers that key on them, and is
+called out under Changed.
+
 ### Added
 
 - The Crush adapter emits a `classify.Mark` of type `error` for a turn that
@@ -131,6 +145,7 @@ in [issue #22](https://github.com/stump-wtf/agent-trace/issues/22).
   sessions were listed once per entry and `AgentGraph` gained a copy of every
   node per entry. Discovery now folds entries by their resolved database path,
   with the newest `last_accessed` supplying the working directory.
+
 - Crush incremental parsing no longer loses messages that share the watermark's
   second. `messages.created_at` is second-resolution and the watermark
   was a value from it, so once a poll resumed at second T the strict
@@ -297,14 +312,15 @@ Bugs worth calling out because they produced wrong output rather than errors:
 ## Versioning
 
 `v0.x` means the API is still moving, and this project's minor bumps carry
-breaking changes rather than deferring them to a major: v0.1.0 shipped two and
-v0.2.0 ships another. Treat every minor bump as potentially breaking and pin
-exactly.
+breaking changes rather than deferring them to a major: v0.1.0 shipped two,
+v0.2.0 another, and v0.3.0 one. Treat every minor bump as potentially breaking
+and pin exactly.
 
 The module path lives on the GitHub mirror because Go resolves versions there.
 Tags are created on Gitea and reach GitHub through the push mirror — never tag the
 mirror directly, as the next sync prunes refs the source does not have.
 
-[Unreleased]: https://gitea.stump.rocks/stump.wtf/agent-trace/compare/v0.2.0...HEAD
+[Unreleased]: https://gitea.stump.rocks/stump.wtf/agent-trace/compare/v0.3.0...HEAD
+[0.3.0]: https://gitea.stump.rocks/stump.wtf/agent-trace/releases/tag/v0.3.0
 [0.2.0]: https://gitea.stump.rocks/stump.wtf/agent-trace/releases/tag/v0.2.0
 [0.1.0]: https://gitea.stump.rocks/stump.wtf/agent-trace/releases/tag/v0.1.0
