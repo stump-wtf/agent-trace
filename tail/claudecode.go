@@ -663,7 +663,8 @@ func ccAPIErrorMark(line ccRawLine, seq int) classify.Mark {
 // <code> is the record's "error" field (server_error, rate_limit,
 // authentication_failed, unknown, ...), or "unknown" when the record has
 // none. It never contains whitespace, a colon or a parenthesis — any such
-// rune is replaced with "_" — so the first space or colon always ends it.
+// rune is replaced with "_" — so the first space or colon always ends it,
+// and it is capped at 64 runes so the front always fits in the note.
 // " (<status>)" is present only when Claude Code got an HTTP response;
 // connection failures have no status and omit it. ": <text>" is omitted when
 // the record carries no text.
@@ -684,6 +685,7 @@ func ccAPIErrorNote(code string, status int, text string) string {
 		}
 		return r
 	}, strings.TrimSpace(code))
+	code = strutil.TruncateRunes(code, 64, "…")
 	if code == "" {
 		code = "unknown"
 	}

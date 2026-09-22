@@ -366,6 +366,7 @@ func TestCCAPIErrorNote(t *testing.T) {
 		{"no text", "server_error", 529, "  ", "server_error (529)"},
 		{"text trimmed", "unknown", 0, "\n  API Error: Connection reset \n", "unknown: API Error: Connection reset"},
 		{"code cannot break the front", " rate limit:(x) ", 429, "t", "rate_limit__x_ (429): t"},
+		{"code capped so the status survives truncation", strings.Repeat("c", 3000), 529, "t", strings.Repeat("c", 63) + "… (529): t"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
