@@ -11,6 +11,35 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-22
+
+A correctness release for `tail` and `otel`: a failed model call reaches the
+exported trace, an errored tool result can keep its text, and two cursor bugs
+stop losing events on a session that runs turns concurrently or goes quiet
+mid-call.
+
+`otel` now renders an `error` mark on the trace instead of dropping it. Inside a
+turn the mark lands on that turn's span as an exception event plus an ERROR
+status; outside any turn it roots a zero-length standalone span. Before this the
+reason a turn failed — a provider error, a quota, an auth failure, an overload —
+was classified by `tail` and then discarded at export, so a trace showed a turn
+that simply stopped.
+
+`ParseSince` in the Crush adapter holds its watermark below **every** unfinished
+assistant row, not only the last one. Crush rewrites an assistant row in place as
+a turn streams, so a turn's finish part — including one recording a provider
+error — can land in a row a poll already read. Holding below the last unfinished
+row was enough while turns ran one at a time; with turns running concurrently in
+one session, turn B finishing says nothing about turn A, so A's error mark was
+lost. A row a killed Crush never finishes now holds the cursor on its own, which
+the watcher's stalled-session reconciliation bounds.
+
+The watcher also reconciles a stalled session rather than re-reading it forever.
+A transcript whose writer died mid-call could not be proved dead or finished by
+anything in the file, so every poll returned the same offset; after `StallScans`
+consecutive unchanged scans the watcher re-reads it in full and delivers
+everything the incremental polls had withheld.
+
 ### Fixed
 - A transcript whose writer died mid-call no longer stalls the watcher's
   cursor forever. `ParseSince` holds an unresolved call below its watermark by
@@ -36,7 +65,25 @@ breaking changes arrive in minor releases. See the note under
   shell command that exits non-zero is still not an error: Crush records it as
   an ordinary result whose text ends `Exit code N`.
 
+- `ParseSince` in the Crush adapter holds its watermark below every unfinished
+  assistant row read in a poll, not only the last. Crush inserts an assistant
+  row when a turn begins and rewrites its parts in place, so the turn's tool
+  calls and its finish part — including one recording a provider error — can
+  land in a row a poll already read. Holding below only the last unfinished row
+  assumed that anything written after a turn means that turn is over, which
+  stops being true when Crush runs turns concurrently in one session: turn B
+  finishing says nothing about turn A, so A's finish was written before the
+  cursor and its error mark was lost. A row a killed Crush never finishes holds
+  the cursor on its own; the watcher's stalled-session reconciliation bounds it.
+
 ### Added
+
+- `otel.BuildTrace` renders an `error` mark on the exported trace. A mark
+  inside a turn sets that turn's span to an ERROR status, records the note as
+  its status message, and adds an `exception` span event carrying
+  `exception.message`; a mark outside any turn roots a zero-length standalone
+  span. The reason a turn failed was already classified by `tail` and was
+  dropped at export, so a trace showed a turn that simply stopped.
 
 - `classify.Options.ErrorExcerptBytes` keeps up to that many bytes of an
   errored tool result's text on the new `classify.Event.ErrorExcerpt`
