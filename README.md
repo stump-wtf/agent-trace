@@ -10,7 +10,7 @@ This module covers mindwalk's trace parsing, classification, and event/mark emis
 
 ### `classify`
 
-Pure classification of agent tool calls into semantic actions (`search`, `read`, `edit`, `exec`, `verify`) and file targets. No I/O — the `Options` struct lets callers inject a `FileExists` func and home/tmp dirs for weak-target filtering and outside-scope detection, plus `VerifyPatterns` to extend the built-in verify command list (`just test`, `bun test`, …). Pass nil Options to keep all weak targets and the default verify patterns.
+Pure classification of agent tool calls into semantic actions (`search`, `read`, `edit`, `exec`, `verify`) and file targets. No I/O — the `Options` struct lets callers inject a `FileExists` func and home/tmp dirs for weak-target filtering and outside-scope detection, `VerifyPatterns` to extend the built-in verify command list (`just test`, `bun test`, …), and `ErrorExcerptBytes` / `Redact` to keep the text of failed tool calls. Pass nil Options to keep all weak targets, the default verify patterns, and no result text.
 
 ```go
 import "github.com/stump-wtf/agent-trace/classify"
@@ -29,6 +29,23 @@ opts := &classify.Options{
 }
 event := classify.BuildEventWith(opts, seq, cwd, call, result)
 ```
+
+An `Event` keeps a result's size and error flag but not its text. To keep the literal error an agent hit — `undefined: foo`, `401 Unauthorized` — opt in with `ErrorExcerptBytes`:
+
+```go
+opts := &classify.Options{
+    ErrorExcerptBytes: 512,
+    Redact:            redactSecrets, // optional func(string) string
+}
+event := classify.BuildEventWith(opts, seq, cwd, call, result)
+// event.ErrorExcerpt == "./main.go:3:2: undefined: foo" when result.IsError
+```
+
+- **Off by default.** Zero keeps nothing, and a result with `IsError` false never carries an excerpt. Tool output can hold secrets and costs memory to keep, so nothing changes until you ask for it; the `errorExcerpt` JSON key is omitted when empty.
+- **Shape.** Terminal escape sequences are stripped, surrounding whitespace is trimmed, and the excerpt is at most `ErrorExcerptBytes` bytes without splitting a UTF-8 rune. Longer text keeps its head and tail joined by `classify.ErrorExcerptElision`, because errors tend to lead and verdicts like `FAIL pkg` tend to close; each cut snaps to a nearby line break.
+- **`Redact` runs before anything is stored**, over the whole cleaned text rather than the cut excerpt, so a secret straddling the cut is still whole when your redactor sees it, and a redactor that lengthens its input cannot push the excerpt past the budget.
+
+In `tail`, set the same two fields on `WatchConfig` and the watcher hands them to every adapter. An excerpt only appears where the adapter knows the call failed: Claude Code and Pi record their own flag, Codex's is inferred from the exit code in the output, OpenCode's comes from a part in the `error` state, and Crush's from the `tool_result` part's `is_error`. Crush records a shell command that exits non-zero as an ordinary result, and OpenCode appears to as well (the adapter does not read the exit code it keeps), so those carry no excerpt yet.
 
 ### `tail`
 
