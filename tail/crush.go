@@ -630,6 +630,14 @@ func (a CrushAdapter) Watermark(ctx context.Context, path string) int64 {
 	// when that row carries no tool call yet. Parse flushes a call with no
 	// result as an event, and re-reading the row would emit it a second time
 	// once the result arrived.
+	//
+	// A concurrent turn mid-flight at attach time has the same loss shape as
+	// ParseSince's (#108) — an earlier unfinished row's finish written after a
+	// later finished row would sit before this cursor — but the cursor cannot
+	// move below that row without re-emitting the events between it and the
+	// end, which the full Parse already delivered. ParseSince's own hold
+	// covers every poll that starts from offset 0; the attach-time gap needs
+	// cross-call state and is tracked with #110's revisit.
 	rows, err := db.QueryContext(ctx,
 		`SELECT rowid, role, parts FROM messages WHERE session_id = ? ORDER BY rowid DESC LIMIT 2`, sessionID)
 	if err != nil {
@@ -757,22 +765,30 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	}
 	safe := []crushSafePoint{{watermark, 0, 0}}
 
-	// streamingRow is the rowid of the last row read when that row is an
-	// assistant message with no finish part yet. Crush inserts an assistant row
-	// when a turn begins and rewrites its parts in place as the stream
-	// progresses, so the turn's tool calls and its finish part — including a
-	// provider error — land in that row AFTER a poll may already have read it.
-	// Advancing past it would mean never reading them. Only the last row counts:
-	// anything written after a turn means that turn is over, and a Crush killed
-	// mid-stream leaves a row that never finishes, which must not hold the
-	// cursor back forever.
-	var streamingRow int64
+	// earliestStreaming is the rowid of the earliest assistant row read this
+	// poll that has no finish part yet. Crush inserts an assistant row when a
+	// turn begins and rewrites its parts in place as the stream progresses, so
+	// the turn's tool calls and its finish part — including a provider error —
+	// land in that row AFTER a poll may already have read it. Advancing past
+	// such a row would mean never reading them.
+	//
+	// Every unfinished row holds, not only the last. The old read — only the
+	// last row counts, because anything written after a turn means that turn is
+	// over — is false when Crush runs turns concurrently in one session: turn B
+	// finishing says nothing about turn A, so A's finish part (reason "error")
+	// written after B's rows were read landed before the cursor and its error
+	// mark was lost. A row killed mid-stream never gains a finish and would
+	// hold the cursor on its own forever; the watcher's stalled-session
+	// reconciliation is the bound there — once the session goes silent for
+	// StallScans scans, a full Parse re-reads everything the hold withheld.
+	earliestStreaming := int64(0)
 
 	for _, m := range msgs {
 		msgRow, role := m.row, m.role
-		streamingRow = 0
 		if role == "assistant" && !m.finished {
-			streamingRow = msgRow
+			if earliestStreaming == 0 || msgRow < earliestStreaming {
+				earliestStreaming = msgRow
+			}
 		}
 		ts := secToRFC3339(m.createdAt)
 		if m.model.Valid && m.model.String != "" && meta.Model == "" {
@@ -860,7 +876,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	// which resumed past a second that was still being written to. A rowid is
 	// the column the ORDER BY and the WHERE now agree on, and it admits no
 	// ties, so "resume after this row" means exactly that.
-	hold := streamingRow
+	hold := earliestStreaming
 	for _, p := range pending.all() {
 		if hold == 0 || p.row < hold {
 			hold = p.row

@@ -147,7 +147,10 @@ func TestCrushParseSince(t *testing.T) {
 		t.Fatal(err)
 	}
 	userParts2 := `[{"type":"text","data":{"text":"second message"}}]`
-	assistantParts2 := `[{"type":"tool_call","data":{"id":"call-2","name":"view","input":"{\"file_path\":\"b.go\"}","finished":true}}]`
+	// The finish part is required: since #108 every unfinished assistant row
+	// holds the watermark, and a real Crush session writes the finish into the
+	// row when the step ends.
+	assistantParts2 := `[{"type":"tool_call","data":{"id":"call-2","name":"view","input":"{\"file_path\":\"b.go\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`
 	toolParts2 := `[{"type":"tool_result","data":{"tool_call_id":"call-2","name":"view","content":"package b"}}]`
 	baseMs := wm + 10000
 	for i, parts := range []string{userParts2, assistantParts2, toolParts2} {
