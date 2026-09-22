@@ -25,6 +25,25 @@ breaking changes arrive in minor releases. See the note under
 
 ### Fixed
 
+- The Claude Code adapter's incremental cursor no longer stalls for good
+  behind a tool call that never gets a result. `ParseSince` held its
+  watermark below any call still waiting on its result, which is right for a
+  call in flight and permanent for one whose agent was killed mid-call and
+  then resumed: every later poll re-read the same point, and nothing after the
+  orphan — the resumed turn's user message, its tool calls — ever reached
+  `ParseSince` or a `Watcher`. A pending call is now released by the first
+  record that proves no result can follow: an assistant line from a different
+  API response, or a message the user typed, including the interrupt marker.
+  A loaded skill's `isMeta` body and harness-injected text do not count; they
+  land between the results of one parallel batch. Across 107,525 resolved
+  calls in 1,774 local transcripts, no result was ever written after either
+  record. The released call is emitted at that record with a zero-value
+  `ToolResult`, by `Parse` and `ParseSince` alike, where `Parse` used to
+  append it after every other event — so every event and mark after it now
+  carries a seq one higher, per orphan, than `Parse` gave it before. A call
+  with nothing after it that proves it dead is still held, and `Parse` still
+  flushes it last.
+
 - The Crush adapter's incremental cursor no longer skips a turn that is still
   being streamed. Crush inserts an assistant row when a turn starts and writes
   its tool calls and its `finish` part into that same row as the stream

@@ -1275,13 +1275,45 @@ func ccUserText(text, ts string) string {
 	return `{"type":"user","timestamp":"` + ts + `","sessionId":"s1","cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
 }
 
+// ccMetaText is an isMeta user line: text Claude Code writes into the
+// conversation itself, such as a loaded skill's body, between the results of
+// one batch of parallel calls.
+func ccMetaText(text, ts string) string {
+	return `{"type":"user","isMeta":true,"timestamp":"` + ts + `","sessionId":"s1","cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
+}
+
+// assertOrphans checks which events came out with no result: exactly those
+// whose summary names one of orphans. Every other call must carry its result —
+// a call released early loses its output, and incremental==full alone cannot
+// see that, because Parse and ParseSince apply the same rule.
+func assertOrphans(t *testing.T, events []classify.Event, orphans ...string) {
+	t.Helper()
+	for _, ev := range events {
+		orphan := false
+		for _, o := range orphans {
+			if strings.HasPrefix(ev.Summary, o+" ") {
+				orphan = true
+			}
+		}
+		if orphan && ev.ResultBytes != 0 {
+			t.Errorf("event %d (%s) carries a result, want it emitted as an orphan", ev.Seq, ev.Summary)
+		}
+		if !orphan && ev.ResultBytes == 0 {
+			t.Errorf("event %d (%s) has no result: released before its result arrived", ev.Seq, ev.Summary)
+		}
+	}
+}
+
 // TestClaudeCodeIncrementalMatchesFull runs the incremental==full oracle over
-// the shapes a live Claude Code transcript takes across poll boundaries.
+// the shapes a live Claude Code transcript takes across poll boundaries —
+// including a call that never gets a result, which used to hold the watermark
+// forever and so failed this oracle outright (#103).
 func TestClaudeCodeIncrementalMatchesFull(t *testing.T) {
 	head := ccUserText("start", "2026-01-01T10:00:00Z")
 	tests := []struct {
-		name  string
-		steps [][]string
+		name    string
+		steps   [][]string
+		orphans []string
 	}{
 		{
 			name: "calls resolving in later polls",
@@ -1300,6 +1332,45 @@ func TestClaudeCodeIncrementalMatchesFull(t *testing.T) {
 				{ccToolResult("c1", "2026-01-01T10:00:03Z"), ccText("m2", "done", "2026-01-01T10:00:04Z")},
 			},
 		},
+		{
+			name: "a skill body between parallel results releases nothing",
+			steps: [][]string{
+				{ccCall("m1", "c1", "echo c1", "2026-01-01T10:00:01Z"), ccCall("m1", "c2", "echo c2", "2026-01-01T10:00:01Z")},
+				{ccToolResult("c1", "2026-01-01T10:00:02Z"), ccMetaText("Base directory for this skill", "2026-01-01T10:00:02Z")},
+				{ccUserText("<task-notification>done</task-notification>", "2026-01-01T10:00:03Z")},
+				{ccToolResult("c2", "2026-01-01T10:00:04Z")},
+			},
+		},
+		{
+			name: "killed mid-call, then resumed",
+			steps: [][]string{
+				{ccCall("m1", "c1", "echo c1", "2026-01-01T10:00:01Z"), ccToolResult("c1", "2026-01-01T10:00:02Z")},
+				{ccCall("m2", "c2", "echo orphan", "2026-01-01T10:00:03Z")},
+				{ccUserText("resumed", "2026-01-01T11:00:00Z")},
+				{ccCall("m3", "c3", "echo c3", "2026-01-01T11:00:01Z")},
+				{ccToolResult("c3", "2026-01-01T11:00:02Z"), ccText("m4", "API Error: 529 overloaded", "2026-01-01T11:00:03Z")},
+			},
+			orphans: []string{"echo orphan"},
+		},
+		{
+			name: "a response that stopped short of running its call",
+			steps: [][]string{
+				{ccCall("m1", "c1", "echo orphan", "2026-01-01T10:00:01Z")},
+				{ccText("m2", "Let me try that differently.", "2026-01-01T10:00:02Z"), ccCall("m2", "c2", "echo c2", "2026-01-01T10:00:03Z")},
+				{ccToolResult("c2", "2026-01-01T10:00:04Z")},
+			},
+			orphans: []string{"echo orphan"},
+		},
+		{
+			name: "one parallel sibling orphaned by an interrupt",
+			steps: [][]string{
+				{ccCall("m1", "c1", "echo c1", "2026-01-01T10:00:01Z"), ccCall("m1", "c2", "echo orphan", "2026-01-01T10:00:01Z"), ccCall("m1", "c3", "echo c3", "2026-01-01T10:00:01Z")},
+				{ccToolResult("c3", "2026-01-01T10:00:02Z"), ccToolResult("c1", "2026-01-01T10:00:03Z")},
+				{ccUserText("[Request interrupted by user]", "2026-01-01T10:00:04Z"), ccUserText("carry on", "2026-01-01T10:00:05Z")},
+				{ccCall("m2", "c4", "echo c4", "2026-01-01T10:00:06Z"), ccToolResult("c4", "2026-01-01T10:00:07Z")},
+			},
+			orphans: []string{"echo orphan"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1312,6 +1383,11 @@ func TestClaudeCodeIncrementalMatchesFull(t *testing.T) {
 			if end := jsonlCompleteOffset(path); wm != end {
 				t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
 			}
+			events, _, _, err := ClaudeCodeAdapter{}.Parse(t.Context(), path)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			assertOrphans(t, events, tt.orphans...)
 		})
 	}
 }

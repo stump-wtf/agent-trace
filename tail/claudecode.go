@@ -226,8 +226,7 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 	if opts == nil {
 		opts = osClassifyOptions(nil)
 	}
-	pending := map[string]classify.ToolCall{}
-	pendingOrder := []string{}
+	pending := newPendingCalls[ccPendingCall]()
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := 0
@@ -276,6 +275,12 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 		if json.Unmarshal(line.Message, &msg) != nil {
 			return
 		}
+		// A call this record proves can never be answered is emitted here,
+		// ahead of anything the record itself contributes — see ccSupersedes.
+		for _, p := range pending.release(func(p ccPendingCall) bool { return ccSupersedes(line, msg, p) }) {
+			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
+			seq++
+		}
 		if line.Type == "user" && hasCCUserMessage(msg.Content) {
 			text := ccUserMessageText(msg.Content)
 			if !injectedUserMessage(text) {
@@ -301,31 +306,27 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 				if call.Name == "Task" || call.Name == "Agent" {
 					marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: call.Name})
 				}
-				if _, exists := pending[call.ID]; !exists {
-					pendingOrder = append(pendingOrder, call.ID)
-				}
-				pending[call.ID] = call
+				pending.put(call.ID, ccPendingCall{call: call, messageID: msg.ID, sidechain: line.IsSidechain})
 			case "tool_result":
-				call, ok := pending[item.ToolUseID]
+				p, ok := pending.take(item.ToolUseID)
 				if !ok {
 					continue
 				}
-				delete(pending, item.ToolUseID)
 				result := classify.ToolResult{
 					Content: classify.ContentToString(item.Content),
 					IsError: item.IsError,
 				}
-				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
 				seq++
 			}
 		}
 	})
-	// Flush orphaned tool calls (no result received).
-	for _, id := range pendingOrder {
-		if call, ok := pending[id]; ok {
-			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{}))
-			seq++
-		}
+	// Flush the calls still open at the end of the session, last and in issue
+	// order. Nothing after them proves they are dead, so they may yet be
+	// answered — a live session's calls in flight look exactly like this.
+	for _, p := range pending.release(func(ccPendingCall) bool { return true }) {
+		events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
+		seq++
 	}
 	if meta.Title == "" {
 		meta.Title = filepath.Base(path)
@@ -385,9 +386,14 @@ func sessionHeadCwd(path string) string {
 // Instead the watermark advances only to the last record boundary at which no
 // call was outstanding, and events and marks past that point are withheld. The
 // unresolved tail is re-read next poll and emitted once the result lands, which
-// keeps the stream both complete and duplicate-free. A call that never gets a
-// result — a session killed mid-tool — parks the watermark on a short tail that
-// is cheap to re-read, rather than corrupting everything after it.
+// keeps the stream both complete and duplicate-free.
+//
+// A call that never gets a result — a session killed mid-tool, then resumed —
+// held the watermark there forever, and nothing later in the session was ever
+// delivered. Such a call is now released by the first record that proves no
+// result can follow (see ccSupersedes) and emitted at that record with an
+// empty result, exactly where Parse emits it. Until such a record arrives it
+// is indistinguishable from a slow call, and holds the watermark like one.
 func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -412,7 +418,7 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 	if opts == nil {
 		opts = osClassifyOptions(nil)
 	}
-	pending := map[string]classify.ToolCall{}
+	pending := newPendingCalls[ccPendingCall]()
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := startSeq
@@ -430,7 +436,7 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 
 	err = readCompleteJSONLines(f, offset, func(data []byte, end int64) {
 		defer func() {
-			if len(pending) == 0 {
+			if pending.len() == 0 {
 				safeOffset, safeEvents, safeMarks = end, len(events), len(marks)
 			}
 		}()
@@ -472,6 +478,12 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 		if json.Unmarshal(line.Message, &msg) != nil {
 			return
 		}
+		// A call this record proves can never be answered is emitted here,
+		// ahead of anything the record itself contributes — see ccSupersedes.
+		for _, p := range pending.release(func(p ccPendingCall) bool { return ccSupersedes(line, msg, p) }) {
+			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
+			seq++
+		}
 		if line.Type == "user" && hasCCUserMessage(msg.Content) {
 			text := ccUserMessageText(msg.Content)
 			if !injectedUserMessage(text) {
@@ -498,18 +510,17 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 				if call.Name == "Task" || call.Name == "Agent" {
 					marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: call.Name})
 				}
-				pending[item.ID] = call
+				pending.put(item.ID, ccPendingCall{call: call, messageID: msg.ID, sidechain: line.IsSidechain})
 			case "tool_result":
-				call, ok := pending[item.ToolUseID]
+				p, ok := pending.take(item.ToolUseID)
 				if !ok {
 					continue
 				}
-				delete(pending, item.ToolUseID)
 				result := classify.ToolResult{
 					Content: classify.ContentToString(item.Content),
 					IsError: item.IsError,
 				}
-				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
 				seq++
 			}
 		}
@@ -534,12 +545,60 @@ type ccRawLine struct {
 	Message     json.RawMessage `json:"message"`
 	AITitle     string          `json:"aiTitle"`
 	Subtype     string          `json:"subtype"`
+	// IsMeta marks a line Claude Code wrote into the conversation itself, such
+	// as a loaded skill's body, rather than one the user typed.
+	IsMeta bool `json:"isMeta"`
 }
 
 type ccMessage struct {
+	// ID is the API response the line belongs to. Claude Code writes each
+	// content block of a response on a line of its own, all sharing it.
+	ID      string        `json:"id"`
 	Role    string        `json:"role"`
 	Model   string        `json:"model"`
 	Content ccContentList `json:"content"`
+}
+
+// ccPendingCall is a tool_use waiting on its tool_result, with what a later
+// record needs to decide the result can no longer arrive.
+type ccPendingCall struct {
+	call      classify.ToolCall
+	messageID string // the API response that issued the call
+	sidechain bool
+}
+
+// ccSupersedes reports whether line, read after a pending call, proves the
+// call will never receive a result. Claude Code runs every call an API
+// response issues and writes its tool_result before it sends the next
+// request, and it writes the user's next message only once the turn is over.
+// So two records settle it:
+//
+//   - An assistant line from a different API response. The next request went
+//     out without this call's result, so the call was never run: the response
+//     stopped short (a refusal, say), or the process died and the session was
+//     resumed.
+//   - A message the user typed, including the "[Request interrupted by user]"
+//     marker Claude Code writes when a turn is cut short. Harness-injected
+//     text and isMeta lines do not count: a loaded skill's body is an isMeta
+//     user line written between the results of one batch of parallel calls.
+//
+// Both were checked against real transcripts: across 107,525 resolved calls
+// in 1,774 local sessions, no tool_result was ever written after either
+// record — only after an isMeta line, nine times. A line on the other side of
+// the sidechain boundary never counts, for transcripts that interleave a
+// subagent's lines with its parent's.
+func ccSupersedes(line ccRawLine, msg ccMessage, p ccPendingCall) bool {
+	if line.IsSidechain != p.sidechain {
+		return false
+	}
+	switch line.Type {
+	case "assistant":
+		return msg.ID != "" && p.messageID != "" && msg.ID != p.messageID
+	case "user":
+		return !line.IsMeta && hasCCUserMessage(msg.Content) &&
+			!injectedUserMessage(ccUserMessageText(msg.Content))
+	}
+	return false
 }
 
 type ccContentList struct {

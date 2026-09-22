@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/stump-wtf/agent-trace/classify"
@@ -162,4 +163,63 @@ func unmarshalContentList[T any](data []byte, makeTextItem func(string) T) ([]T,
 		return nil, err
 	}
 	return items, nil
+}
+
+// pendingCalls holds tool calls still waiting on their result, in the order
+// they were issued.
+//
+// The order is load-bearing twice over. A call that a later record proves
+// will never get a result is emitted at that record, and when several go at
+// once they go in issue order. A call still open when a full Parse reaches the
+// end of the session is flushed last, again in issue order. A bare map gave
+// both Go's randomized iteration order, so two parses of one session could
+// number the same calls differently.
+type pendingCalls[T any] struct {
+	byID  map[string]T
+	order []string
+}
+
+func newPendingCalls[T any]() *pendingCalls[T] {
+	return &pendingCalls[T]{byID: map[string]T{}}
+}
+
+// put records v under id. A repeated id replaces the value and keeps its
+// place in the order.
+func (p *pendingCalls[T]) put(id string, v T) {
+	if _, ok := p.byID[id]; !ok {
+		p.order = append(p.order, id)
+	}
+	p.byID[id] = v
+}
+
+// take removes and returns the call pending under id.
+func (p *pendingCalls[T]) take(id string) (T, bool) {
+	v, ok := p.byID[id]
+	if !ok {
+		return v, false
+	}
+	delete(p.byID, id)
+	p.order = slices.DeleteFunc(p.order, func(s string) bool { return s == id })
+	return v, true
+}
+
+// len reports how many calls are pending.
+func (p *pendingCalls[T]) len() int { return len(p.byID) }
+
+// release removes every pending call for which match reports true and
+// returns them in issue order.
+func (p *pendingCalls[T]) release(match func(T) bool) []T {
+	var out []T
+	kept := p.order[:0]
+	for _, id := range p.order {
+		v := p.byID[id]
+		if match(v) {
+			out = append(out, v)
+			delete(p.byID, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	p.order = kept
+	return out
 }
