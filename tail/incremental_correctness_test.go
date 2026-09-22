@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1170,5 +1171,271 @@ func TestCrushParseSameSecondCallAndResult(t *testing.T) {
 	}
 	if events[0].ResultBytes == 0 {
 		t.Error("the tool result was dropped and the call flushed as an orphan: same-second rows must still pair")
+	}
+}
+
+// --- Incremental == full ---
+
+// incrementalAdapter is an adapter the watcher tails incrementally.
+type incrementalAdapter interface {
+	Adapter
+	IncrementalParser
+}
+
+// assertIncrementalMatchesFull is the incremental twin of
+// assertFilteredMatchesInMemory, and the oracle every adapter's watermark
+// rules answer to. It replays a session the way the watcher meets it — one
+// write at a time, a ParseSince poll after each, resuming from the watermark
+// the previous poll returned — and requires everything the polls returned,
+// concatenated, to equal one full Parse of the finished session: the same
+// events at the same seqs, and the same marks at the same seqs. Arriving in
+// pieces must not repeat, lose or renumber anything.
+//
+// The finished session must leave no call in flight. Parse flushes such a
+// call last while ParseSince holds it, by design, so the two agree only once
+// every call has resolved or been superseded.
+//
+// It returns the last poll's watermark, so a caller can check that a session
+// which ends complete leaves the cursor at its end.
+func assertIncrementalMatchesFull(t *testing.T, a incrementalAdapter, path string, steps []func(t *testing.T)) int64 {
+	t.Helper()
+	var gotEvents []classify.Event
+	var gotMarks []classify.Mark
+	var wm int64
+	for i, step := range steps {
+		step(t)
+		resetDBCache()
+		events, marks, _, next, err := a.ParseSince(t.Context(), path, wm, len(gotEvents))
+		if err != nil {
+			t.Fatalf("poll %d: ParseSince: %v", i+1, err)
+		}
+		for _, ev := range events {
+			if ev.Seq != len(gotEvents) {
+				t.Fatalf("poll %d: event seq %d, want %d — contiguous with what earlier polls returned", i+1, ev.Seq, len(gotEvents))
+			}
+			gotEvents = append(gotEvents, ev)
+		}
+		gotMarks = append(gotMarks, marks...)
+		if next < wm {
+			t.Fatalf("poll %d: watermark moved backwards from %d to %d", i+1, wm, next)
+		}
+		wm = next
+	}
+
+	wantEvents, wantMarks, _, err := a.Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(gotEvents) != len(wantEvents) {
+		t.Errorf("events: the polls returned %d, a full Parse returned %d", len(gotEvents), len(wantEvents))
+	}
+	for i := range min(len(gotEvents), len(wantEvents)) {
+		if !reflect.DeepEqual(gotEvents[i], wantEvents[i]) {
+			t.Errorf("event %d:\n polls: %+v\n Parse: %+v", i, gotEvents[i], wantEvents[i])
+		}
+	}
+	// Marks compare on what both paths promise. Timestamp is left out: the
+	// Claude Code Parse path has never set it on a user-message mark, and that
+	// is a separate difference from the one this oracle guards.
+	if len(gotMarks) != len(wantMarks) {
+		t.Errorf("marks: the polls returned %d (%+v), a full Parse returned %d (%+v)", len(gotMarks), gotMarks, len(wantMarks), wantMarks)
+	}
+	for i := range min(len(gotMarks), len(wantMarks)) {
+		g, w := gotMarks[i], wantMarks[i]
+		if g.Seq != w.Seq || g.Type != w.Type || g.Note != w.Note {
+			t.Errorf("mark %d: polls gave seq=%d type=%q note=%q, Parse gave seq=%d type=%q note=%q",
+				i, g.Seq, g.Type, g.Note, w.Seq, w.Type, w.Note)
+		}
+	}
+	return wm
+}
+
+// appendStep is an incremental step that appends lines to a JSONL session.
+func appendStep(path string, lines ...string) func(t *testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		appendLines(t, path, strings.Join(lines, ""))
+	}
+}
+
+// ccCall is an assistant line issuing one Bash call from API message msgID.
+// Claude Code writes each content block on a line of its own, every line of
+// one API message sharing message.id — which is how parallel calls appear.
+func ccCall(msgID, id, cmd, ts string) string {
+	return `{"type":"assistant","timestamp":"` + ts + `","sessionId":"s1","cwd":"/tmp","message":{"id":"` + msgID + `","role":"assistant","model":"m","content":[{"type":"tool_use","id":"` + id + `","name":"Bash","input":{"command":"` + cmd + `"}}]}}` + "\n"
+}
+
+// ccText is an assistant line of plain text from API message msgID.
+func ccText(msgID, text, ts string) string {
+	return `{"type":"assistant","timestamp":"` + ts + `","sessionId":"s1","cwd":"/tmp","message":{"id":"` + msgID + `","role":"assistant","model":"m","content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
+}
+
+// ccUserText is a user line carrying text the user typed.
+func ccUserText(text, ts string) string {
+	return `{"type":"user","timestamp":"` + ts + `","sessionId":"s1","cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
+}
+
+// TestClaudeCodeIncrementalMatchesFull runs the incremental==full oracle over
+// the shapes a live Claude Code transcript takes across poll boundaries.
+func TestClaudeCodeIncrementalMatchesFull(t *testing.T) {
+	head := ccUserText("start", "2026-01-01T10:00:00Z")
+	tests := []struct {
+		name  string
+		steps [][]string
+	}{
+		{
+			name: "calls resolving in later polls",
+			steps: [][]string{
+				{ccCall("m1", "c1", "echo c1", "2026-01-01T10:00:01Z")},
+				{ccToolResult("c1", "2026-01-01T10:00:02Z"), ccUserText("next", "2026-01-01T10:00:03Z")},
+				{ccCall("m2", "c2", "echo c2", "2026-01-01T10:00:04Z")},
+				{ccToolResult("c2", "2026-01-01T10:00:05Z")},
+			},
+		},
+		{
+			name: "parallel calls resolving out of order",
+			steps: [][]string{
+				{ccCall("m1", "c1", "echo c1", "2026-01-01T10:00:01Z"), ccCall("m1", "c2", "echo c2", "2026-01-01T10:00:01Z")},
+				{ccToolResult("c2", "2026-01-01T10:00:02Z")},
+				{ccToolResult("c1", "2026-01-01T10:00:03Z"), ccText("m2", "done", "2026-01-01T10:00:04Z")},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempJSONL(t, "s.jsonl", head)
+			steps := []func(t *testing.T){appendStep(path)}
+			for _, lines := range tt.steps {
+				steps = append(steps, appendStep(path, lines...))
+			}
+			wm := assertIncrementalMatchesFull(t, &ClaudeCodeAdapter{}, path, steps)
+			if end := jsonlCompleteOffset(path); wm != end {
+				t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
+			}
+		})
+	}
+}
+
+// TestCodexIncrementalMatchesFull runs the incremental==full oracle over the
+// shapes a live Codex rollout takes across poll boundaries.
+func TestCodexIncrementalMatchesFull(t *testing.T) {
+	head := codexSessionMetaLine("2026-01-01T10:00:00Z")
+	tests := []struct {
+		name  string
+		steps [][]string
+	}{
+		{
+			name: "calls resolving in later polls",
+			steps: [][]string{
+				{codexUserLine("run it", "2026-01-01T10:00:01Z"), codexCallLine("c1", "shell", `"{\"command\":[\"echo\",\"c1\"]}"`, "2026-01-01T10:00:02Z")},
+				{codexOutputLine("c1", `"ok"`, "2026-01-01T10:00:03Z")},
+				{codexCallLine("c2", "shell", `"{\"command\":[\"echo\",\"c2\"]}"`, "2026-01-01T10:00:04Z"), codexCallLine("c3", "shell", `"{\"command\":[\"echo\",\"c3\"]}"`, "2026-01-01T10:00:04Z")},
+				{codexOutputLine("c3", `"ok"`, "2026-01-01T10:00:05Z")},
+				{codexOutputLine("c2", `"ok"`, "2026-01-01T10:00:06Z")},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempJSONL(t, "s.jsonl", head)
+			steps := []func(t *testing.T){appendStep(path)}
+			for _, lines := range tt.steps {
+				steps = append(steps, appendStep(path, lines...))
+			}
+			wm := assertIncrementalMatchesFull(t, &CodexAdapter{}, path, steps)
+			if end := jsonlCompleteOffset(path); wm != end {
+				t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
+			}
+		})
+	}
+}
+
+// crushStep is one write to a Crush session: a row inserted, or an existing
+// row's parts rewritten in place, as Crush streams a turn into the assistant
+// row it created when the turn began.
+type crushStep struct {
+	id, role, parts string
+	update          bool
+}
+
+// crushSteps turns batches of writes into incremental steps against one
+// session, one poll per batch, inserting rows a second apart.
+func crushSteps(dbPath, session string, start int64, writes ...[]crushStep) []func(t *testing.T) {
+	var steps []func(t *testing.T)
+	n := int64(0)
+	for _, batch := range writes {
+		steps = append(steps, func(t *testing.T) {
+			t.Helper()
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			for _, w := range batch {
+				if w.update {
+					if _, err := db.Exec(`UPDATE messages SET parts = ? WHERE id = ?`, w.parts, w.id); err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
+				n++
+				if _, err := db.Exec(`INSERT INTO messages (id, session_id, role, parts, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+					w.id, session, w.role, w.parts, "test-model", start+n, start+n); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+	return steps
+}
+
+func crushCallPart(id, cmd string) string {
+	return `{"type":"tool_call","data":{"id":"` + id + `","name":"bash","input":"{\"command\":\"` + cmd + `\"}","finished":true}}`
+}
+
+func crushResultRow(id string) string {
+	return `[{"type":"tool_result","data":{"tool_call_id":"` + id + `","name":"bash","content":"ok"}}]`
+}
+
+func crushUserRow(text string) string {
+	return `[{"type":"text","data":{"text":"` + text + `"}}]`
+}
+
+// crushFinish is a finish part with the given reason.
+func crushFinish(reason string) string {
+	return `{"type":"finish","data":{"reason":"` + reason + `","time":1789127781}}`
+}
+
+// TestCrushIncrementalMatchesFull runs the incremental==full oracle over the
+// shapes a live Crush session takes across poll boundaries.
+func TestCrushIncrementalMatchesFull(t *testing.T) {
+	tests := []struct {
+		name   string
+		writes [][]crushStep
+	}{
+		{
+			name: "a turn streamed into its row across polls",
+			writes: [][]crushStep{
+				{{id: "u1", role: "user", parts: crushUserRow("start")}, {id: "a1", role: "assistant", parts: `[]`}},
+				{{id: "a1", update: true, parts: `[` + crushCallPart("c1", "echo c1") + `,` + crushCallPart("c2", "echo c2") + `]`}},
+				{{id: "t2", role: "tool", parts: crushResultRow("c2")}},
+				{{id: "t1", role: "tool", parts: crushResultRow("c1")}, {id: "a1", update: true, parts: `[` + crushCallPart("c1", "echo c1") + `,` + crushCallPart("c2", "echo c2") + `,` + crushFinish("tool_use") + `]`}},
+				{{id: "a2", role: "assistant", parts: `[` + crushFinish("error") + `]`}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetDBCache()
+			t.Cleanup(resetDBCache)
+			now := time.Now().Unix()
+			dbPath := newCrushSession(t, "s1", now)
+			a := &CrushAdapter{DBPath: dbPath, Cwd: "/test"}
+			path := dbPath + "/s1"
+			wm := assertIncrementalMatchesFull(t, a, path, crushSteps(dbPath, "s1", now, tt.writes...))
+			if end := a.Watermark(t.Context(), path); wm != end {
+				t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
+			}
+		})
 	}
 }
