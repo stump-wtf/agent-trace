@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -52,6 +53,20 @@ var ccAPIErrorFixtures = []struct {
 			{Seq: 0, Type: "user-message", Note: "once more"},
 			{Seq: 0, Type: "error", Timestamp: "2026-03-03T09:20:30.000Z",
 				Note: "server_error: API Error: Can't reach the API. Check your network connection."},
+		},
+	},
+	{
+		// A failure recorded between a tool call and its result. The mark
+		// takes the seq the call's event will get, so it sorts before it, and
+		// ParseSince must hold it with the call rather than release either.
+		name:   "while a call is outstanding",
+		file:   "claudecode_api_error_pending.jsonl",
+		events: 1,
+		model:  "claude-test-model",
+		marks: []classify.Mark{
+			{Seq: 0, Type: "user-message", Note: "check the build"},
+			{Seq: 0, Type: "error", Timestamp: "2026-03-07T14:00:05.000Z",
+				Note: "server_error (529): API Error: 529 Overloaded. Try again later."},
 		},
 	},
 }
@@ -244,6 +259,95 @@ func TestClaudeCodeSidechainAPIError(t *testing.T) {
 	errs := errorMarksIn(marks)
 	if len(errs) != 1 || errs[0].Note != "rate_limit (429): You're out of usage credits" {
 		t.Errorf("error marks = %+v, want the subagent's rate limit", errs)
+	}
+}
+
+// TestClaudeCodeAPIErrorRecordStillDatesTheSession pins where the error
+// record's early return sits: after the session bookkeeping, not before it.
+// A poll whose only new record is a failed call must still move EndedAt —
+// a consumer watching for a stalled session keys on it — and the record's
+// session fields still count, in Parse and in ParseSince alike.
+func TestClaudeCodeAPIErrorRecordStillDatesTheSession(t *testing.T) {
+	const errTS = "2026-03-06T08:00:07Z"
+	head := `{"type":"user","timestamp":"2026-03-06T08:00:00Z","cwd":"/tmp","message":{"role":"user","content":"go"}}` + "\n"
+	failed := `{"type":"assistant","timestamp":"` + errTS + `","sessionId":"s-meta","agentId":"a7","isSidechain":true,"gitBranch":"feat/x","cwd":"/tmp","error":"rate_limit","apiErrorStatus":429,"isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"You've hit your session limit"}]}}` + "\n"
+	check := func(t *testing.T, how string, meta SessionMeta) {
+		t.Helper()
+		if meta.EndedAt != errTS || meta.ID != "s-meta" || meta.GitBranch != "feat/x" ||
+			!meta.IsSidechain || meta.AgentID != "a7" {
+			t.Errorf("%s meta = {EndedAt:%q ID:%q GitBranch:%q IsSidechain:%v AgentID:%q}, want every field from the error record",
+				how, meta.EndedAt, meta.ID, meta.GitBranch, meta.IsSidechain, meta.AgentID)
+		}
+	}
+	a := ClaudeCodeAdapter{}
+
+	path := writeTempJSONL(t, "full.jsonl", head+failed)
+	_, _, meta, err := a.Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	check(t, "Parse", meta)
+
+	path = writeTempJSONL(t, "poll.jsonl", head)
+	_, _, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
+	if err != nil {
+		t.Fatalf("first ParseSince: %v", err)
+	}
+	appendLines(t, path, failed)
+	_, marks, meta, wm, err := a.ParseSince(t.Context(), path, wm, 0)
+	if err != nil {
+		t.Fatalf("second ParseSince: %v", err)
+	}
+	check(t, "ParseSince", meta)
+	if errs := errorMarksIn(marks); len(errs) != 1 || len(marks) != 1 {
+		t.Errorf("second poll marks = %+v, want exactly the one error mark", marks)
+	}
+	if want := a.Watermark(t.Context(), path); wm != want {
+		t.Errorf("watermark = %d, want %d — nothing is outstanding", wm, want)
+	}
+}
+
+// TestClaudeCodeParseSinceHoldsAPIErrorWithPendingCall: an error record that
+// lands while a tool call is outstanding must not release the watermark past
+// the call, and its mark is withheld with it — then delivered exactly once,
+// ahead of the call's event, when the result arrives.
+func TestClaudeCodeParseSinceHoldsAPIErrorWithPendingCall(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "claudecode_api_error_pending.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(string(raw), "\n") // user, tool_use, error, tool_result, ""
+	if len(lines) != 5 {
+		t.Fatalf("fixture has %d records, want 4", len(lines)-1)
+	}
+	a := ClaudeCodeAdapter{}
+	path := writeTempJSONL(t, "pending.jsonl", lines[0]+lines[1]+lines[2])
+
+	_, marks, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
+	if err != nil {
+		t.Fatalf("first ParseSince: %v", err)
+	}
+	if want := int64(len(lines[0])); wm != want {
+		t.Fatalf("watermark = %d, want %d: it must stay before the outstanding call, error record or not", wm, want)
+	}
+	if errs := errorMarksIn(marks); len(errs) != 0 {
+		t.Fatalf("first poll error marks = %+v, want none until the call before them resolves", errs)
+	}
+
+	appendLines(t, path, lines[3])
+	events, marks, _, wm, err := a.ParseSince(t.Context(), path, wm, 0)
+	if err != nil {
+		t.Fatalf("second ParseSince: %v", err)
+	}
+	if len(events) != 1 || events[0].Seq != 0 {
+		t.Fatalf("second poll events = %+v, want the resolved call at seq 0", events)
+	}
+	errs := errorMarksIn(marks)
+	if len(errs) != 1 || len(marks) != 1 || errs[0].Seq != 0 {
+		t.Errorf("second poll marks = %+v, want the one error mark at seq 0", marks)
+	}
+	if want := a.Watermark(t.Context(), path); wm != want {
+		t.Errorf("watermark = %d, want %d — the call resolved", wm, want)
 	}
 }
 
