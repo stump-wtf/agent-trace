@@ -86,9 +86,9 @@ func excerptCases() []excerptCase {
 					[]string{"user", "assistant", "tool", "assistant", "tool"},
 					[]string{
 						`[{"type":"text","data":{"text":"fix the build"}}]`,
-						`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"missing.go\"}","finished":true}}]`,
+						`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"missing.go\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
 						`[{"type":"tool_result","data":{"tool_call_id":"c1","name":"view","content":"file not found: /repo/missing.go","is_error":true}}]`,
-						`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"main.go\"}","finished":true}}]`,
+						`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"main.go\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
 						`[{"type":"tool_result","data":{"tool_call_id":"c2","name":"view","content":"package main"}}]`,
 					})
 				return &CrushAdapter{DBPath: dbPath, Cwd: "/repo"}, dbPath + "/s1"

@@ -19,9 +19,9 @@ func TestCrushToolResultIsError(t *testing.T) {
 	insertCrushMessages(t, dbPath, "s1", 1789120000,
 		[]string{"assistant", "tool", "assistant", "tool"},
 		[]string{
-			`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"missing.go\"}","finished":true}}]`,
+			`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"missing.go\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
 			`[{"type":"tool_result","data":{"tool_call_id":"c1","name":"view","content":"file not found: /repo/missing.go","is_error":true}}]`,
-			`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"main.go\"}","finished":true}}]`,
+			`[{"type":"tool_call","data":{"id":"c2","name":"view","input":"{\"file_path\":\"main.go\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
 			`[{"type":"tool_result","data":{"tool_call_id":"c2","name":"view","content":"package main","is_error":false}}]`,
 		})
 	a := CrushAdapter{DBPath: dbPath, Cwd: "/repo"}
