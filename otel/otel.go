@@ -121,7 +121,9 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 
 	var spans []Span
 	parentIdx := -1 // index into spans
+	turnIdx := -1   // index into spans of the open turn's parent span
 	spanCounter := 0
+	errorRooted := []int{} // standalone error spans, zero-length
 
 	for _, entry := range timeline {
 		if entry.isMark {
@@ -142,6 +144,7 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 				}
 				spanCounter++
 				parentIdx = len(spans)
+				turnIdx = len(spans)
 				spans = append(spans, span)
 
 			case "compaction":
@@ -182,6 +185,42 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 				}
 				spanCounter++
 				spans = append(spans, span)
+
+			case "error":
+				// An error mark records why a turn failed (provider error,
+				// quota, auth, overload). Inside a turn it lands on the
+				// turn's span as an exception event plus an ERROR status;
+				// outside any turn it roots a zero-length standalone span.
+				// Either way it must be visible on the trace itself.
+				if turnIdx >= 0 && turnIdx < len(spans) {
+					turn := &spans[turnIdx]
+					turn.Status = StatusError
+					turn.StatusMsg = entry.mark.Note
+					turn.Events = append(turn.Events, SpanEvent{
+						Name:      "exception",
+						Timestamp: entry.startTime,
+						Attributes: map[string]any{
+							"exception.message": entry.mark.Note,
+						},
+					})
+				} else {
+					span := Span{
+						TraceID:   traceID,
+						SpanID:    deriveSpanID(traceID, spanCounter),
+						Name:      "error",
+						Kind:      SpanKindInternal,
+						StartTime: entry.startTime,
+						Attributes: map[string]any{
+							"agent.session.id": session.ID,
+							"agent.mark.type":  "error",
+						},
+						Status:    StatusError,
+						StatusMsg: entry.mark.Note,
+					}
+					spanCounter++
+					errorRooted = append(errorRooted, len(spans))
+					spans = append(spans, span)
+				}
 			}
 			continue
 		}
@@ -237,6 +276,9 @@ func BuildTrace(session tail.SessionMeta, events []classify.Event, marks []class
 	// their first child's start to their last child's end.
 	for i := range spans {
 		spans[i].EndTime = computeEndTime(spans, timeline, i, sessionStart)
+	}
+	for _, i := range errorRooted {
+		spans[i].EndTime = spans[i].StartTime
 	}
 
 	return Trace{
