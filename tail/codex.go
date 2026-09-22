@@ -32,7 +32,7 @@ type CodexAdapter struct {
 
 func (a CodexAdapter) Harness() Harness { return HarnessCodex }
 
-// SetOptions injects classify.Options for verify-pattern customization.
+// SetOptions injects classify.Options for verify patterns and error excerpts.
 func (a *CodexAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 // SetSummaryCache injects the summary cache the watcher shares across scans.
