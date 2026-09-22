@@ -1696,6 +1696,23 @@ func TestCrushIncrementalMatchesFull(t *testing.T) {
 				{{id: "a4", role: "assistant", parts: `[` + crushFinish("end_turn") + `]`}},
 			},
 		},
+		{
+			// The discriminating #108 shape: TWO unfinished assistant rows in
+			// one poll's read, with the EARLIER one finishing later. Holding
+			// below only the last unfinished row (the old contract) puts the
+			// watermark past a1, so a1's finish-error is lost; holding below
+			// every unfinished row (this fix) keeps the cursor below a1 until
+			// its finish lands.
+			name: "concurrent turns: two unfinished rows, the earlier finishes with an error",
+			writes: [][]crushStep{
+				{{id: "u1", role: "user", parts: crushUserRow("start")},
+					{id: "a1", role: "assistant", parts: crushUserRow("thinking about it")},
+					{id: "a2", role: "assistant", parts: `[` + crushCallPart("c2", "echo c2") + `]`}},
+				{{id: "t2", role: "tool", parts: crushResultRow("c2")}, {id: "a2", update: true, parts: `[` + crushCallPart("c2", "echo c2") + `,` + crushFinish("tool_use") + `]`}},
+				{{id: "a1", update: true, parts: `[{"type":"text","data":{"text":"thinking about it"}},` + crushFinish("error") + `]`}},
+				{{id: "a3", role: "assistant", parts: `[` + crushFinish("end_turn") + `]`}},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
