@@ -23,6 +23,7 @@ type Watcher struct {
 	pendingMarks map[string][]classify.Mark // session key → marks awaiting an event to ride on
 	fileState    map[string]string          // session key → last known EndedAt (change detection)
 	parseState   map[string]int64           // session key → incremental parse watermark (byte offset or native timestamp unit)
+	stallScans   map[string]int             // session key → consecutive scans that found the session unchanged
 	// summaries memoizes per-file session summaries across scans so
 	// discovery re-reads only what changed. Swept after each scan.
 	summaries *SummaryCache
@@ -150,7 +151,11 @@ type AgentGraphBuilder interface {
 // A watermark always names a point at which no tool call was left
 // outstanding, so an implementation withholds events past the last such
 // point rather than advancing over a call whose result has not been written
-// yet. That is what keeps the stream both complete and duplicate-free.
+// yet. That is what keeps the stream both complete and duplicate-free. The
+// one exception is the watcher's stalled-session reconciliation, which
+// replaces the watermark with a full-parse offset once a session has been
+// silent for StallScans scans: every event before that offset has been
+// delivered by then, which is what makes the resume safe.
 type IncrementalParser interface {
 	// ParseSince reads only content discovered after the watermark and returns
 	// events/marks with seq continuing from startSeq. The returned
@@ -248,6 +253,9 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 	if cfg.MaxAge == 0 {
 		cfg.MaxAge = DefaultMaxAge
 	}
+	if cfg.StallScans <= 0 {
+		cfg.StallScans = DefaultStallScans
+	}
 	if len(cfg.VerifyPatterns) > 0 {
 		for _, a := range adapters {
 			if os, ok := a.(OptionsSetter); ok {
@@ -272,6 +280,7 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 		lastEmitted:  make(map[string]int),
 		lastMark:     make(map[string]int),
 		pendingMarks: make(map[string][]classify.Mark),
+		stallScans:   make(map[string]int),
 		fileState:    make(map[string]string),
 		parseState:   make(map[string]int64),
 		done:         make(chan struct{}),
@@ -411,6 +420,11 @@ func (w *Watcher) scanSession(ctx context.Context, a Adapter, meta SessionMeta) 
 	w.mu.Unlock()
 
 	if meta.EndedAt == prevEndedAt && prevEndedAt != "" {
+		// Unchanged is exactly where a stalled watermark hides: a transcript
+		// whose writer died mid-call never changes again, so its orphan holds
+		// the incremental watermark below it forever (#110). Give the session
+		// StallScans scans of silence, then reconcile it with a full Parse.
+		w.reconcileStalled(ctx, a, meta)
 		return // unchanged
 	}
 
@@ -459,8 +473,70 @@ func (w *Watcher) scanSession(ctx context.Context, a Adapter, meta SessionMeta) 
 	w.mu.Lock()
 	w.fileState[meta.Key] = meta.EndedAt
 	w.parseState[meta.Key] = newWatermark
+	// The session moved, so whatever silence preceded it says nothing about
+	// the watermark that governs from here.
+	delete(w.stallScans, meta.Key)
 	w.mu.Unlock()
 
+	w.emitEvents(events, marks, meta, lastSeq, lastMark)
+}
+
+// reconcileStalled runs on a scan that found the session unchanged — the only
+// circumstance in which an incremental watermark can be permanently stuck.
+// ParseSince cannot tell a call whose writer died from one whose result is a
+// few records away, and it holds both, by design; a session that has stopped
+// changing has settled that question by silence. Once the session has been
+// silent for cfg.StallScans consecutive scans, and its watermark still sits
+// below the end of the file, a full Parse is run — whose orphan flush is what
+// a completed transcript deserves — and everything the incremental polls had
+// withheld is delivered, deduplicated by seq, exactly as Parse would emit it.
+// The watermark jumps to the end of the file, so later scans are the cheap
+// no-op they should be.
+//
+// The trade is the one StallScans documents: a tool call that genuinely runs
+// longer than that many scans of silence is emitted early with an empty
+// result, and its result, landing afterwards, is dropped — the in-flight
+// contract's hold is bounded by the threshold. Between scans the hold is
+// untouched: nothing here runs while the session is still changing.
+func (w *Watcher) reconcileStalled(ctx context.Context, a Adapter, meta SessionMeta) {
+	ip, ok := a.(IncrementalParser)
+	if !ok {
+		// A non-incremental adapter re-parses from scratch on every change
+		// already; an unchanged scan has nothing stuck to reconcile.
+		return
+	}
+
+	w.mu.Lock()
+	w.stallScans[meta.Key]++
+	silent := w.stallScans[meta.Key]
+	watermark := w.parseState[meta.Key]
+	lastSeq := w.lastEmitted[meta.Key]
+	lastMark := w.lastMark[meta.Key]
+	w.mu.Unlock()
+	if silent < w.cfg.StallScans {
+		return
+	}
+
+	end := ip.Watermark(ctx, meta.Path)
+	if end <= watermark {
+		// Nothing was withheld: the watermark already covers the file (or the
+		// end cannot be read right now, in which case the next silent scan
+		// retries). Keep counting so a session that grows again restarts the
+		// window from real movement rather than from a stale count.
+		return
+	}
+
+	events, marks, _, err := a.Parse(ctx, meta.Path)
+	if err != nil {
+		return
+	}
+
+	w.mu.Lock()
+	w.parseState[meta.Key] = end
+	w.mu.Unlock()
+	// emitEvents re-derives the mark park and deduplicates by seq, so the
+	// events and marks the incremental polls already delivered are skipped
+	// and only the withheld tail goes out.
 	w.emitEvents(events, marks, meta, lastSeq, lastMark)
 }
 

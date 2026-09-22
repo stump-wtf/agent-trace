@@ -11,6 +11,24 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Fixed
+
+- A transcript whose writer died mid-call no longer stalls the watcher's
+  cursor forever. `ParseSince` holds an unresolved call below its watermark by
+  design, and a daemon restart's trailing records — a `bridge-session`, a
+  `last-prompt`, a `queue-operation` — can neither answer the call nor prove
+  it dead, so on a transcript that will never change again every poll re-read
+  the same bytes and returned the same offset: #110's real case settled at
+  3,168,969 of 3,176,944 bytes with 400 consecutive empty polls. Nothing in
+  the file can tell a dead call from a slow one, so the proof arrives as
+  silence: after `StallScans` consecutive scans that find a session unchanged,
+  the watcher reconciles it with a full `Parse` — whose orphan flush is what
+  a completed transcript deserves — and delivers everything the incremental
+  polls had withheld, deduplicated by seq, with the watermark set to the end
+  of the file. The trade is explicit: a tool call that genuinely outlasts the
+  window is emitted early with an empty result, and its result, landing
+  afterwards, is dropped. Below the threshold the in-flight hold is untouched.
+
 ## [0.3.0] - 2026-09-22
 
 A correctness release for `tail`: the incremental readers stop going silent,

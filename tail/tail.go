@@ -138,12 +138,40 @@ type WatchConfig struct {
 	// long-lived machine — and a consumer showing "current sessions" has to
 	// re-filter them itself or show noise.
 	MaxAge time.Duration
+	// StallScans is how many consecutive scans may find a session unchanged
+	// before the watcher reconciles it with a full Parse (#110). A transcript
+	// whose writer died mid-call never changes again, so its incremental
+	// watermark sits below an orphaned call forever — the exact bytes the
+	// orphan holds back are re-read every poll and withheld every poll, and
+	// nothing in the file ever proves the call dead. ParseSince cannot tell a
+	// dead call from a slow one, and neither can one scan; only silence across
+	// scans can. After StallScans of it, the watcher runs a full Parse — whose
+	// orphan flush is what a completed session deserves — and delivers
+	// whatever the incremental polls had withheld, deduplicated by seq.
+	//
+	// The trade is explicit: a tool call that genuinely runs longer than
+	// StallScans polls of silence is emitted early with an empty result, and
+	// its result, landing later, is dropped. That is the same call the
+	// in-flight contract holds — the threshold bounds how long "holding"
+	// lasts once nothing in the session moves. Zero selects
+	// DefaultStallScans.
+	StallScans int
 }
 
 // DefaultMaxAge is the activity window a watcher applies when WatchConfig
 // leaves MaxAge unset: two days, long enough to span a weekend gap in a piece
 // of work without carrying a machine's whole history.
 const DefaultMaxAge = 48 * time.Hour
+
+// DefaultStallScans is the unchanged-scan count a watcher applies when
+// WatchConfig leaves StallScans unset: three scans of silence — at the
+// default two-second interval, roughly six seconds — before a session is
+// reconciled. The window is deliberately short, because the sessions it
+// reconciles are ones whose writer will never write again; a live session's
+// next record resets the count before silence can be misread. A tool call
+// that genuinely outlasts the window is emitted early with an empty result —
+// the trade the StallScans doc records (#110).
+const DefaultStallScans = 3
 
 // DefaultWatchConfig returns sensible defaults for live watching.
 func DefaultWatchConfig() WatchConfig {
