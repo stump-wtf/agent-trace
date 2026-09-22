@@ -207,14 +207,15 @@ func BuildEvent(seq int, cwd string, call ToolCall, result ToolResult) Event {
 	return BuildEventWith(nil, seq, cwd, call, result)
 }
 
-// BuildEventWith is the Options-aware variant.
+// BuildEventWith is the Options-aware variant. It fills Event.ErrorExcerpt
+// only when opts.ErrorExcerptBytes is positive and result.IsError is true.
 func BuildEventWith(opts *Options, seq int, cwd string, call ToolCall, result ToolResult) Event {
 	action := ActionForWith(opts, call.Name, call.Input, result.Content)
 	targets, outside := TargetsForWith(opts, cwd, call.Name, call.Input, result.Content)
 	if targets == nil {
 		targets = []Target{}
 	}
-	return Event{
+	ev := Event{
 		Seq:         seq,
 		Timestamp:   call.Timestamp,
 		Tool:        call.Name,
@@ -225,6 +226,10 @@ func BuildEventWith(opts *Options, seq int, cwd string, call ToolCall, result To
 		IsError:     result.IsError,
 		Summary:     SummarizeTool(call.Name, call.Input, targets, outside, result.IsError),
 	}
+	if opts != nil && opts.ErrorExcerptBytes > 0 && result.IsError {
+		ev.ErrorExcerpt = errorExcerpt(result.Content, opts.ErrorExcerptBytes, opts.Redact)
+	}
+	return ev
 }
 
 func firstString(input map[string]any, keys ...string) string {
