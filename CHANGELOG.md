@@ -38,7 +38,8 @@ breaking changes arrive in minor releases. See the note under
   being guessed at from text. The failed call's `<synthetic>` model no longer
   becomes the session's model, which it did for a session whose first
   assistant record was a failure. Retries (the `system` records with subtype
-  `api_error`) are not marks: a retry that succeeds is not a failed call.
+  `api_error`) are not marks: a retry that succeeds is not a failed call. As
+  with the Crush mark, `otel` has no span for the type and passes it over.
 
 ### Fixed
 
