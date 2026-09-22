@@ -54,6 +54,21 @@ breaking changes arrive in minor releases. See the note under
   order, is unchanged, and both paths now ignore an output that arrives after
   its call was settled.
 
+- The Crush adapter's incremental cursor no longer stalls for good behind a
+  call its step finished without answering. A step cut short (max tokens, an
+  unknown finish) never runs the calls it streamed, and a live store held
+  such a call with 528 rows behind it, all withheld from `ParseSince`. Crush
+  writes a step's finish part only after every tool row the step will write,
+  so a call on a finished row that no row answers is released once a user or
+  assistant row follows, and emitted at the end of its row with a zero-value
+  `ToolResult`, by `Parse` and `ParseSince` alike. A later row alone proves
+  nothing: Crush runs turns concurrently within one session, and in live
+  stores 39 of 42,341 results landed after a later user or assistant row. A
+  call on a row that never finishes, which is what a Crush killed mid-call
+  leaves, therefore still holds the cursor. `Parse` also flushes the calls
+  still open at the end of a session in the order they were issued, where it
+  ranged over a map and could number several of them differently each time.
+
 - The Crush adapter's incremental cursor no longer skips a turn that is still
   being streamed. Crush inserts an assistant row when a turn starts and writes
   its tool calls and its `finish` part into that same row as the stream

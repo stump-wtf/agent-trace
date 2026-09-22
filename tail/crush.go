@@ -487,11 +487,16 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 	// messages). It requires messages to be an ordinary rowid table, which it
 	// has been since Crush's initial migration.
 	rows, err := db.QueryContext(ctx,
-		`SELECT id, role, parts, model, created_at FROM messages WHERE session_id = ? ORDER BY rowid`, sessionID)
+		`SELECT rowid, role, parts, model, created_at FROM messages WHERE session_id = ? ORDER BY rowid`, sessionID)
 	if err != nil {
 		return nil, nil, meta, err
 	}
 	defer func() { _ = rows.Close() }()
+	msgs, err := readCrushMessages(rows)
+	if err != nil {
+		return nil, nil, meta, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
+	}
+	lookahead := newCrushLookahead(msgs)
 
 	opts := a.opts
 	if opts == nil {
@@ -500,30 +505,20 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := 0
-	pendingCalls := map[string]classify.ToolCall{}
+	pending := newPendingCalls[crushPendingCall]()
 
-	for rows.Next() {
-		var msgID, role, partsJSON string
-		// messages.model is nullable, and Crush leaves it NULL on user
-		// messages. Scanning it into a string failed on exactly those rows and
-		// the `continue` dropped them, so every user message vanished from the
-		// marks a session produced.
-		var model sql.NullString
-		var msgCreatedAt int64
-		if err := rows.Scan(&msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
+	for _, m := range msgs {
+		ts := secToRFC3339(m.createdAt)
+		if m.model.Valid && m.model.String != "" && meta.Model == "" {
+			meta.Model = m.model.String
+		}
+		if m.parts == nil {
 			continue
 		}
-		ts := secToRFC3339(msgCreatedAt)
-		if model.Valid && model.String != "" && meta.Model == "" {
-			meta.Model = model.String
-		}
+		role := m.role
+		finished := false
 
-		var parts []crushPart
-		if json.Unmarshal([]byte(partsJSON), &parts) != nil {
-			continue
-		}
-
-		for _, part := range parts {
+		for _, part := range m.parts {
 			switch part.Type {
 			case "text":
 				if role == "user" && strings.TrimSpace(part.Data.Text) != "" {
@@ -537,6 +532,7 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 					}
 				}
 			case "finish":
+				finished = true
 				// A turn Crush could not complete ends in a finish part with
 				// reason "error", carrying the provider's message and details.
 				// For a run that died it is usually the only record of why —
@@ -572,30 +568,33 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 					Input:     input,
 					Timestamp: ts,
 				}
-				pendingCalls[callID] = call
+				pending.put(callID, crushPendingCall{call: call, row: m.row})
 
 			case "tool_result":
-				callID := part.Data.ToolCallID
-				call, ok := pendingCalls[callID]
+				p, ok := pending.take(part.Data.ToolCallID)
 				if !ok {
 					continue
 				}
-				delete(pendingCalls, callID)
 				result := classify.ToolResult{
 					Content: part.Data.Content,
 				}
-				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
+				seq++
+			}
+		}
+		if finished {
+			for _, p := range pending.release(crushAbandoned(m.row, lookahead)) {
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
 				seq++
 			}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, meta, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
-	}
 
-	// Flush orphaned tool calls.
-	for _, call := range pendingCalls {
-		events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{}))
+	// Flush the calls still open at the end of the session, last and in issue
+	// order. Ranging over a map here numbered several of them differently from
+	// one Parse to the next.
+	for _, p := range pending.release(func(crushPendingCall) bool { return true }) {
+		events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
 		seq++
 	}
 
@@ -708,12 +707,21 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 		meta.Title = filepath.Base(cwd) + " — " + sessionID[:min(8, len(sessionID))]
 	}
 
-	query := `SELECT rowid, id, role, parts, model, created_at FROM messages WHERE session_id = ? AND rowid > ? ORDER BY rowid`
+	query := `SELECT rowid, role, parts, model, created_at FROM messages WHERE session_id = ? AND rowid > ? ORDER BY rowid`
 	rows, err := db.QueryContext(ctx, query, sessionID, watermark)
 	if err != nil {
 		return nil, nil, meta, 0, err
 	}
 	defer func() { _ = rows.Close() }()
+	// An iteration error is returned rather than swallowed: truncating here
+	// would advance nothing — the watcher only stores newWatermark on success —
+	// but a partial slice handed back as success would emit a subset of the
+	// session's events and marks as though it were the whole truth.
+	msgs, err := readCrushMessages(rows)
+	if err != nil {
+		return nil, nil, meta, watermark, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
+	}
+	lookahead := newCrushLookahead(msgs)
 
 	opts := a.opts
 	if opts == nil {
@@ -722,10 +730,9 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := startSeq
-	pendingCalls := map[string]classify.ToolCall{}
-	// callRows remembers the rowid of each still-unresolved call, so the safe
-	// point can be kept strictly below it.
-	callRows := map[string]int64{}
+	// Each pending call remembers the rowid of the row that issued it, so the
+	// safe point can be kept strictly below it.
+	pending := newPendingCalls[crushPendingCall]()
 
 	// Cursor and result counts as of the last message that left no tool call
 	// outstanding. A Crush tool_call and its tool_result are separate message
@@ -738,6 +745,11 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	// rolled back to the last point strictly below the earliest unresolved
 	// call before returning, cutting those later rows out of this poll and
 	// leaving them to be re-read by the next one.
+	//
+	// A call that will never be answered held that point for good, and every
+	// later row with it. One its finished step abandoned is released at the
+	// end of its row instead (see crushAbandoned); one on a row that never
+	// finishes still holds, because nothing tells it from a slow call.
 	type crushSafePoint struct {
 		row    int64
 		events int
@@ -756,29 +768,21 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	// cursor back forever.
 	var streamingRow int64
 
-	for rows.Next() {
-		var msgRow int64
-		var msgID, role, partsJSON string
-		var model sql.NullString
-		var msgCreatedAt int64
-		if err := rows.Scan(&msgRow, &msgID, &role, &partsJSON, &model, &msgCreatedAt); err != nil {
-			continue
-		}
+	for _, m := range msgs {
+		msgRow, role := m.row, m.role
 		streamingRow = 0
-		if role == "assistant" {
-			if finished, _ := crushPartsFinished(partsJSON); !finished {
-				streamingRow = msgRow
-			}
+		if role == "assistant" && !m.finished {
+			streamingRow = msgRow
 		}
-		ts := secToRFC3339(msgCreatedAt)
-		if model.Valid && model.String != "" && meta.Model == "" {
-			meta.Model = model.String
+		ts := secToRFC3339(m.createdAt)
+		if m.model.Valid && m.model.String != "" && meta.Model == "" {
+			meta.Model = m.model.String
 		}
-		var parts []crushPart
-		if json.Unmarshal([]byte(partsJSON), &parts) != nil {
+		if m.parts == nil {
 			continue
 		}
-		for _, part := range parts {
+		finished := false
+		for _, part := range m.parts {
 			switch part.Type {
 			case "text":
 				if role == "user" && strings.TrimSpace(part.Data.Text) != "" {
@@ -792,6 +796,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 					}
 				}
 			case "finish":
+				finished = true
 				// A turn Crush could not complete ends in a finish part with
 				// reason "error", carrying the provider's message and details.
 				// For a run that died it is usually the only record of why —
@@ -827,22 +832,24 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 					Input:     input,
 					Timestamp: ts,
 				}
-				pendingCalls[callID] = call
-				callRows[callID] = msgRow
+				pending.put(callID, crushPendingCall{call: call, row: msgRow})
 			case "tool_result":
-				callID := part.Data.ToolCallID
-				call, ok := pendingCalls[callID]
+				p, ok := pending.take(part.Data.ToolCallID)
 				if !ok {
 					continue
 				}
-				delete(pendingCalls, callID)
-				delete(callRows, callID)
 				result := classify.ToolResult{Content: part.Data.Content}
-				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, result))
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
 				seq++
 			}
 		}
-		if len(pendingCalls) == 0 {
+		if finished {
+			for _, p := range pending.release(crushAbandoned(msgRow, lookahead)) {
+				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
+				seq++
+			}
+		}
+		if pending.len() == 0 {
 			safe = append(safe, crushSafePoint{msgRow, len(events), len(marks)})
 		}
 	}
@@ -853,18 +860,10 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	// which resumed past a second that was still being written to. A rowid is
 	// the column the ORDER BY and the WHERE now agree on, and it admits no
 	// ties, so "resume after this row" means exactly that.
-	//
-	// An iteration error is returned rather than swallowed: truncating here
-	// would advance nothing — the watcher only stores newWatermark on success —
-	// but a partial slice handed back as success would emit a subset of the
-	// session's events and marks as though it were the whole truth.
-	if err := rows.Err(); err != nil {
-		return nil, nil, meta, watermark, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
-	}
 	hold := streamingRow
-	for _, r := range callRows {
-		if hold == 0 || r < hold {
-			hold = r
+	for _, p := range pending.all() {
+		if hold == 0 || p.row < hold {
+			hold = p.row
 		}
 	}
 	if hold > 0 {
@@ -896,6 +895,116 @@ type crushPartData struct {
 	Message string `json:"message"`
 	Details string `json:"details"`
 	Time    int64  `json:"time"`
+}
+
+// crushMessage is one messages row, read in full before any of it is
+// processed: whether a call on a finished row is abandoned depends on every
+// row after it in the same read (see crushAbandoned).
+type crushMessage struct {
+	row  int64
+	role string
+	// parts is nil when the row's parts do not parse; the row still counts
+	// for the model and, in ParseSince, for the streaming check.
+	parts []crushPart
+	// finished reports a finish part among the parts, as crushPartsFinished
+	// does: the step that wrote the row has ended.
+	finished bool
+	// model is nullable, and Crush leaves it NULL on user messages. Scanning
+	// it into a string failed on exactly those rows and the `continue`
+	// dropped them, so every user message vanished from a session's marks.
+	model     sql.NullString
+	createdAt int64
+}
+
+// readCrushMessages drains rows selected as (rowid, role, parts, model,
+// created_at). A row that fails to scan is skipped, as it always was; an
+// iteration error is returned.
+func readCrushMessages(rows *sql.Rows) ([]crushMessage, error) {
+	var msgs []crushMessage
+	for rows.Next() {
+		var m crushMessage
+		var partsJSON string
+		if rows.Scan(&m.row, &m.role, &partsJSON, &m.model, &m.createdAt) != nil {
+			continue
+		}
+		var parts []crushPart
+		if json.Unmarshal([]byte(partsJSON), &parts) == nil {
+			m.parts = parts
+			if m.parts == nil {
+				m.parts = []crushPart{}
+			}
+		}
+		for _, p := range m.parts {
+			m.finished = m.finished || p.Type == "finish"
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
+// crushLookahead is what the rows of one read say about the rows before
+// them: which calls some row answers, and the last row that begins or
+// continues a turn rather than carrying tool results.
+type crushLookahead struct {
+	answered map[string]bool
+	lastTurn int64
+}
+
+func newCrushLookahead(msgs []crushMessage) crushLookahead {
+	la := crushLookahead{answered: map[string]bool{}}
+	for _, m := range msgs {
+		if m.role == "user" || m.role == "assistant" {
+			la.lastTurn = max(la.lastTurn, m.row)
+		}
+		for _, p := range m.parts {
+			if p.Type == "tool_result" {
+				la.answered[p.Data.ToolCallID] = true
+			}
+		}
+	}
+	return la
+}
+
+// crushPendingCall is a tool call waiting on its result, and the row that
+// issued it.
+type crushPendingCall struct {
+	call classify.ToolCall
+	row  int64
+}
+
+// crushAbandoned matches the calls a finished row abandoned: the row's own
+// calls that no row in the same read answers, once a user or assistant row
+// follows it. Parse and ParseSince release them at the end of that row, with
+// an empty result, so the watermark can move past a call that will never be
+// answered instead of holding below it for good.
+//
+// The finish part is the proof. Crush writes it when a step ends, after every
+// tool row the step will ever write: fantasy calls OnStepFinish only once the
+// step's tools have returned, and a failed or cancelled turn first writes an
+// error result for each call it abandons, then the finish. A step cut short
+// (max tokens, an unknown finish) never dispatches the calls it streamed, so
+// they get no result at all. In live stores no result was ever written after
+// its row's finish, across 42,326 answered calls on finished rows; one store
+// held a call its finished step never answered with 528 rows after it, every
+// one of which ParseSince withheld.
+//
+// The later user or assistant row is for Crush before fantasy, which wrote
+// the finish when the stream completed and ran the tools afterwards. That
+// version ran one turn at a time, so its next turn row follows the step's
+// results; requiring one costs a fantasy-era session only the wait for its
+// next row.
+//
+// Nothing weaker proves a Crush call dead. A later row on its own does not:
+// Crush runs turns concurrently within one session — a channel message starts
+// a turn while another is still running tools — and in live stores 39 of
+// 42,341 results were written after a later user or assistant row. So the row
+// a Crush killed mid-call leaves behind, which never gets a finish part,
+// holds the watermark exactly as a slow call in a concurrent turn does:
+// nothing in the store tells the two apart.
+func crushAbandoned(row int64, la crushLookahead) func(crushPendingCall) bool {
+	return func(p crushPendingCall) bool {
+		return p.row == row && !la.answered[p.call.ID] && la.lastTurn > row
+	}
 }
 
 // crushFinishTimestamp dates a finish part by its own time, falling back to

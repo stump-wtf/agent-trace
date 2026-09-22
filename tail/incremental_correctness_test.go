@@ -1550,12 +1550,21 @@ func crushFinish(reason string) string {
 	return `{"type":"finish","data":{"reason":"` + reason + `","time":1789127781}}`
 }
 
+// crushCallStreaming is a tool call whose input has not finished streaming.
+func crushCallStreaming(id string) string {
+	return `{"type":"tool_call","data":{"id":"` + id + `","name":"bash","input":"","finished":false}}`
+}
+
 // TestCrushIncrementalMatchesFull runs the incremental==full oracle over the
-// shapes a live Crush session takes across poll boundaries.
+// shapes a live Crush session takes across poll boundaries — including a
+// call its finished step never answered, which used to hold the watermark
+// forever (#103), and turns running concurrently in one session, which is why
+// nothing weaker than a finish part may release a call.
 func TestCrushIncrementalMatchesFull(t *testing.T) {
 	tests := []struct {
-		name   string
-		writes [][]crushStep
+		name    string
+		writes  [][]crushStep
+		orphans []string
 	}{
 		{
 			name: "a turn streamed into its row across polls",
@@ -1565,6 +1574,60 @@ func TestCrushIncrementalMatchesFull(t *testing.T) {
 				{{id: "t2", role: "tool", parts: crushResultRow("c2")}},
 				{{id: "t1", role: "tool", parts: crushResultRow("c1")}, {id: "a1", update: true, parts: `[` + crushCallPart("c1", "echo c1") + `,` + crushCallPart("c2", "echo c2") + `,` + crushFinish("tool_use") + `]`}},
 				{{id: "a2", role: "assistant", parts: `[` + crushFinish("error") + `]`}},
+			},
+		},
+		{
+			// The live-store shape: a call whose input never finished
+			// streaming, on a step that finished anyway.
+			name: "a step that finished without answering a call",
+			writes: [][]crushStep{
+				{{id: "u1", role: "user", parts: crushUserRow("start")}, {id: "a1", role: "assistant", parts: `[` + crushCallStreaming("c1") + `]`}},
+				{{id: "a1", update: true, parts: `[` + crushCallStreaming("c1") + `,` + crushCallPart("c2", "echo c2") + `]`}},
+				{{id: "t2", role: "tool", parts: crushResultRow("c2")}, {id: "a1", update: true, parts: `[` + crushCallStreaming("c1") + `,` + crushCallPart("c2", "echo c2") + `,` + crushFinish("tool_use") + `]`}},
+				{{id: "a2", role: "assistant", parts: `[` + crushCallPart("c3", "echo c3") + `]`}},
+				{{id: "t3", role: "tool", parts: crushResultRow("c3")}, {id: "a2", update: true, parts: `[` + crushCallPart("c3", "echo c3") + `,` + crushFinish("tool_use") + `]`}},
+				{{id: "a3", role: "assistant", parts: `[` + crushFinish("end_turn") + `]`}},
+			},
+			orphans: []string{"bash"},
+		},
+		{
+			// A step that ends on max tokens never dispatches the calls it
+			// streamed, so they get no result; the session resumes later.
+			name: "a step cut short that never ran its call, then resumed",
+			writes: [][]crushStep{
+				{{id: "u1", role: "user", parts: crushUserRow("start")}, {id: "a1", role: "assistant", parts: `[` + crushCallPart("c1", "echo orphan") + `]`}},
+				{{id: "a1", update: true, parts: `[` + crushCallPart("c1", "echo orphan") + `,` + crushFinish("max_tokens") + `]`}},
+				{{id: "u2", role: "user", parts: crushUserRow("resumed")}},
+				{{id: "a2", role: "assistant", parts: `[` + crushCallPart("c2", "echo c2") + `]`}},
+				{{id: "t2", role: "tool", parts: crushResultRow("c2")}, {id: "a2", update: true, parts: `[` + crushCallPart("c2", "echo c2") + `,` + crushFinish("tool_use") + `]`}},
+				{{id: "a3", role: "assistant", parts: `[` + crushFinish("error") + `]`}},
+			},
+			orphans: []string{"echo orphan"},
+		},
+		{
+			// Crush before fantasy wrote the finish when the stream ended and
+			// ran the tools afterwards, so a finished row's call was still in
+			// flight until the next turn row.
+			name: "a finish written before the tools ran",
+			writes: [][]crushStep{
+				{{id: "u1", role: "user", parts: crushUserRow("start")}, {id: "a1", role: "assistant", parts: `[` + crushCallPart("c1", "echo c1") + `]`}},
+				{{id: "a1", update: true, parts: `[` + crushCallPart("c1", "echo c1") + `,` + crushFinish("tool_use") + `]`}},
+				{{id: "t1", role: "tool", parts: crushResultRow("c1")}},
+				{{id: "a2", role: "assistant", parts: `[` + crushFinish("end_turn") + `]`}},
+			},
+		},
+		{
+			// Two turns interleaved in one session, as channel-driven Crush
+			// sessions write them: c1's result lands after a later user row
+			// and a later assistant row, and must still pair with c1.
+			name: "concurrent turns: a result after later user and assistant rows",
+			writes: [][]crushStep{
+				{{id: "u1", role: "user", parts: crushUserRow("start")}, {id: "a1", role: "assistant", parts: `[` + crushCallPart("c1", "echo c1") + `]`}},
+				{{id: "u2", role: "user", parts: crushUserRow("and another thing")}, {id: "a2", role: "assistant", parts: `[` + crushCallPart("c2", "echo c2") + `]`}},
+				{{id: "t2", role: "tool", parts: crushResultRow("c2")}, {id: "a2", update: true, parts: `[` + crushCallPart("c2", "echo c2") + `,` + crushFinish("tool_use") + `]`}},
+				{{id: "a3", role: "assistant", parts: `[` + crushFinish("end_turn") + `]`}},
+				{{id: "t1", role: "tool", parts: crushResultRow("c1")}, {id: "a1", update: true, parts: `[` + crushCallPart("c1", "echo c1") + `,` + crushFinish("tool_use") + `]`}},
+				{{id: "a4", role: "assistant", parts: `[` + crushFinish("end_turn") + `]`}},
 			},
 		},
 	}
@@ -1580,6 +1643,11 @@ func TestCrushIncrementalMatchesFull(t *testing.T) {
 			if end := a.Watermark(t.Context(), path); wm != end {
 				t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
 			}
+			events, _, _, err := a.Parse(t.Context(), path)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			assertOrphans(t, events, tt.orphans...)
 		})
 	}
 }

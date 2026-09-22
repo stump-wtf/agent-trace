@@ -206,6 +206,15 @@ func (p *pendingCalls[T]) take(id string) (T, bool) {
 // len reports how many calls are pending.
 func (p *pendingCalls[T]) len() int { return len(p.byID) }
 
+// all returns the pending calls in issue order, leaving them pending.
+func (p *pendingCalls[T]) all() []T {
+	out := make([]T, 0, len(p.order))
+	for _, id := range p.order {
+		out = append(out, p.byID[id])
+	}
+	return out
+}
+
 // release removes every pending call for which match reports true and
 // returns them in issue order.
 func (p *pendingCalls[T]) release(match func(T) bool) []T {

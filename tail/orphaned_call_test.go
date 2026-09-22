@@ -2,9 +2,12 @@ package tail
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stump-wtf/agent-trace/classify"
 )
@@ -310,6 +313,167 @@ func TestCodexParseSinceHoldsSlowCall(t *testing.T) {
 	for _, ev := range events {
 		if ev.ResultBytes == 0 {
 			t.Errorf("event %d (%s) has no output: released while it was still running", ev.Seq, ev.Summary)
+		}
+	}
+}
+
+// TestCrushParseSinceReleasesCallItsStepAbandoned is the Crush release: a
+// step that finished without answering one of its calls — here one cut short
+// at max tokens, which never dispatches the calls it streamed. Once a later
+// turn row confirms the step is over, the call is emitted at the end of its
+// row with no result, and the resumed turn behind it is delivered.
+func TestCrushParseSinceReleasesCallItsStepAbandoned(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+	now := time.Now().Unix()
+	dbPath := newCrushSession(t, "s1", now)
+	a := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
+	path := dbPath + "/s1"
+	batch := int64(0)
+	poll := func(wm int64, startSeq int, writes ...crushStep) ([]classify.Event, []classify.Mark, int64) {
+		t.Helper()
+		batch++
+		crushSteps(dbPath, "s1", now+batch*10, writes)[0](t)
+		resetDBCache()
+		events, marks, _, next, err := a.ParseSince(t.Context(), path, wm, startSeq)
+		if err != nil {
+			t.Fatalf("ParseSince: %v", err)
+		}
+		return events, marks, next
+	}
+
+	events, marks, wm := poll(0, 0,
+		crushStep{id: "u1", role: "user", parts: crushUserRow("start")},
+		crushStep{id: "a1", role: "assistant", parts: `[` + crushCallPart("c1", "echo orphan") + `]`})
+	if len(events) != 0 || len(marks) != 1 || wm != 1 {
+		t.Fatalf("poll 1: %d events, %d marks, watermark %d; want 0, the user message, and 1 — c1 is running", len(events), len(marks), wm)
+	}
+
+	// The step ends on max tokens: c1 is never run. Nothing after the row yet,
+	// so it is held — Crush before fantasy wrote this same row while the call
+	// was still about to run.
+	events, marks, wm = poll(wm, 0, crushStep{id: "a1", update: true, parts: `[` + crushCallPart("c1", "echo orphan") + `,` + crushFinish("max_tokens") + `]`})
+	if len(events) != 0 || len(marks) != 0 || wm != 1 {
+		t.Fatalf("poll 2: %d events, %d marks, watermark %d; want 0, 0, 1", len(events), len(marks), wm)
+	}
+
+	events, marks, wm = poll(wm, 0,
+		crushStep{id: "u2", role: "user", parts: crushUserRow("resumed")},
+		crushStep{id: "a2", role: "assistant", parts: `[` + crushCallPart("c2", "echo c2") + `]`},
+		crushStep{id: "t2", role: "tool", parts: crushResultRow("c2")},
+		crushStep{id: "a2", update: true, parts: `[` + crushCallPart("c2", "echo c2") + `,` + crushFinish("tool_use") + `]`},
+		crushStep{id: "a3", role: "assistant", parts: finishErrorParts})
+	if len(events) != 2 {
+		t.Fatalf("poll 3: got %d events, want the orphan and c2", len(events))
+	}
+	if events[0].Seq != 0 || events[0].ResultBytes != 0 || events[0].Summary != orphanSummary {
+		t.Errorf("poll 3: event 0 = %+v, want the orphan at seq 0 with no result", events[0])
+	}
+	if events[1].Seq != 1 || events[1].ResultBytes == 0 {
+		t.Errorf("poll 3: event 1 = %+v, want c2 at seq 1 with its result", events[1])
+	}
+	if len(marks) != 2 || marks[0].Note != "resumed" || marks[0].Seq != 1 || marks[1].Type != "error" || marks[1].Seq != 2 {
+		t.Errorf("poll 3: marks = %+v, want the resumed message at seq 1 and the error at seq 2", marks)
+	}
+	if end := a.Watermark(t.Context(), path); wm != end {
+		t.Errorf("poll 3: watermark = %d, want %d", wm, end)
+	}
+
+	events, marks, _, _, err := a.ParseSince(t.Context(), path, wm, 2)
+	if err != nil {
+		t.Fatalf("poll 4: ParseSince: %v", err)
+	}
+	if len(events) != 0 || len(marks) != 0 {
+		t.Errorf("poll 4: %d events, %d marks; want none", len(events), len(marks))
+	}
+}
+
+// TestCrushParseSinceHoldsCallThroughConcurrentTurn pins why nothing weaker
+// than a finish part releases a Crush call. Crush runs turns concurrently in
+// one session, so a call can still be running while a later user message
+// starts another turn — and its result then lands after that turn's rows, as
+// it did 39 times in live stores. The call must be held until it does.
+//
+// The row a Crush killed mid-call leaves behind looks exactly like c1 at the
+// first poll, and is held the same way, for good: the store has no record
+// that tells a dead call from one in a concurrent turn.
+func TestCrushParseSinceHoldsCallThroughConcurrentTurn(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+	now := time.Now().Unix()
+	dbPath := newCrushSession(t, "s1", now)
+	a := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
+	path := dbPath + "/s1"
+
+	crushSteps(dbPath, "s1", now, []crushStep{
+		{id: "u1", role: "user", parts: crushUserRow("start")},
+		{id: "a1", role: "assistant", parts: `[` + crushCallPart("c1", "sleep 600") + `]`},
+		{id: "u2", role: "user", parts: crushUserRow("and another thing")},
+		{id: "a2", role: "assistant", parts: `[` + crushCallPart("c2", "echo c2") + `]`},
+		{id: "t2", role: "tool", parts: crushResultRow("c2")},
+		{id: "a2", update: true, parts: `[` + crushCallPart("c2", "echo c2") + `,` + crushFinish("tool_use") + `]`},
+		{id: "a3", role: "assistant", parts: `[` + crushFinish("end_turn") + `]`},
+	})[0](t)
+	resetDBCache()
+	events, _, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
+	if err != nil {
+		t.Fatalf("poll 1: ParseSince: %v", err)
+	}
+	if len(events) != 0 || wm != 1 {
+		t.Fatalf("poll 1: %d events, watermark %d; want 0 and 1 — c1 is still running in the first turn", len(events), wm)
+	}
+
+	crushSteps(dbPath, "s1", now+100, []crushStep{
+		{id: "t1", role: "tool", parts: crushResultRow("c1")},
+		{id: "a1", update: true, parts: `[` + crushCallPart("c1", "sleep 600") + `,` + crushFinish("tool_use") + `]`},
+	})[0](t)
+	resetDBCache()
+	events, _, _, _, err = a.ParseSince(t.Context(), path, wm, 0)
+	if err != nil {
+		t.Fatalf("poll 2: ParseSince: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("poll 2: got %d events, want c2 and c1", len(events))
+	}
+	for _, ev := range events {
+		if ev.ResultBytes == 0 {
+			t.Errorf("event %d (%s) has no result: released while its turn was still running", ev.Seq, ev.Summary)
+		}
+	}
+}
+
+// TestCrushParseFlushesOpenCallsInIssueOrder: a full Parse flushes the calls
+// still open at the end of a session last, and in the order they were issued.
+// It ranged over a map, so several open calls came out in a different order,
+// with different seqs, from one Parse to the next.
+func TestCrushParseFlushesOpenCallsInIssueOrder(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+	now := time.Now().Unix()
+	dbPath := newCrushSession(t, "s1", now)
+	var calls, want []string
+	for i := range 6 {
+		cmd := fmt.Sprintf("echo c%d", i)
+		calls = append(calls, crushCallPart(fmt.Sprintf("c%d", i), cmd))
+		want = append(want, cmd+" -> 0 targets, 0 outside")
+	}
+	crushSteps(dbPath, "s1", now, []crushStep{
+		{id: "u1", role: "user", parts: crushUserRow("start")},
+		{id: "a1", role: "assistant", parts: `[` + strings.Join(calls, ",") + `]`},
+	})[0](t)
+	a := CrushAdapter{DBPath: dbPath, Cwd: "/test"}
+
+	for run := range 20 {
+		events, _, _, err := a.Parse(t.Context(), dbPath+"/s1")
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		var got []string
+		for _, ev := range events {
+			got = append(got, ev.Summary)
+		}
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("run %d: open calls flushed as %q, want issue order %q", run, got, want)
 		}
 	}
 }
