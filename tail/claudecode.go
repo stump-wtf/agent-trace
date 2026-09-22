@@ -548,6 +548,17 @@ type ccRawLine struct {
 	// IsMeta marks a line Claude Code wrote into the conversation itself, such
 	// as a loaded skill's body, rather than one the user typed.
 	IsMeta bool `json:"isMeta"`
+
+	// The three fields below describe a failed API call; see isCCAPIError.
+	// APIError and APIErrorStatus stay raw because they are not one type
+	// across record kinds: "error" is a string code on the synthetic
+	// assistant record, but an object on the system records Claude Code
+	// writes for each retry (subtype "api_error"). Typed as a string, every
+	// one of those retry lines would fail to decode and be dropped whole —
+	// its timestamp, session ID and all.
+	IsAPIErrorMessage bool            `json:"isApiErrorMessage"`
+	APIError          json.RawMessage `json:"error"`
+	APIErrorStatus    json.RawMessage `json:"apiErrorStatus"`
 }
 
 type ccMessage struct {
