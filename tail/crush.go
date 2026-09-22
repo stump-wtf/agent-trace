@@ -577,6 +577,7 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 				}
 				result := classify.ToolResult{
 					Content: part.Data.Content,
+					IsError: part.Data.IsError,
 				}
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
 				seq++
@@ -854,7 +855,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 				if !ok {
 					continue
 				}
-				result := classify.ToolResult{Content: part.Data.Content}
+				result := classify.ToolResult{Content: part.Data.Content, IsError: part.Data.IsError}
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
 				seq++
 			}
@@ -903,7 +904,13 @@ type crushPartData struct {
 	Finished   bool   `json:"finished"`
 	ToolCallID string `json:"tool_call_id"`
 	Content    string `json:"content"`
-	Text       string `json:"text"`
+	// IsError is a tool_result part's own error flag. Crush sets it when a
+	// tool returns an error response (a missing file, an edit that did not
+	// apply, arguments that were not valid JSON, a cancelled call), but not
+	// for a shell command that exits non-zero: that is a normal response
+	// whose text ends "Exit code N".
+	IsError bool   `json:"is_error"`
+	Text    string `json:"text"`
 	// Reason, Message, Details and Time are a finish part's fields. Reason is
 	// "error" for a turn the provider rejected or that failed mid-stream; Time
 	// is when the turn ended, in Unix seconds.
