@@ -73,9 +73,10 @@ type Adapter interface {
 
 // OptionsSetter is an optional interface adapters implement to accept
 // classify.Options from the watcher. When WatchConfig.VerifyPatterns is
-// non-empty, the watcher calls SetOptions on each adapter that implements
-// this interface before scanning, so custom verify patterns reach
-// BuildEventWith inside the adapter's Parse method.
+// non-empty or WatchConfig.ErrorExcerptBytes is positive, the watcher calls
+// SetOptions on each adapter that implements this interface before scanning,
+// so custom verify patterns and the error-excerpt settings reach
+// BuildEventWith inside the adapter's Parse and ParseSince methods.
 //
 // Adapters must implement this with a pointer receiver so the watcher's
 // type assertion succeeds on &adapter.
@@ -241,8 +242,9 @@ func NewWatcher(cfg IdleConfig, adapters []Adapter) *Watcher {
 }
 
 // NewWatcherWithConfig creates a watcher with full WatchConfig control.
-// If cfg.VerifyPatterns is non-empty, the watcher injects them into each
-// adapter that implements OptionsSetter before the first scan.
+// If cfg.VerifyPatterns is non-empty or cfg.ErrorExcerptBytes is positive,
+// the watcher injects them (with cfg.Redact) into each adapter that
+// implements OptionsSetter before the first scan.
 //
 // It also shares one SummaryCache across every adapter that accepts one, so
 // repeated scans re-read only the session files that actually changed.
@@ -256,11 +258,13 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 	if cfg.StallScans <= 0 {
 		cfg.StallScans = DefaultStallScans
 	}
-	if len(cfg.VerifyPatterns) > 0 {
+	if len(cfg.VerifyPatterns) > 0 || cfg.ErrorExcerptBytes > 0 {
 		for _, a := range adapters {
 			if os, ok := a.(OptionsSetter); ok {
 				os.SetOptions(&classify.Options{
-					VerifyPatterns: cfg.VerifyPatterns,
+					VerifyPatterns:    cfg.VerifyPatterns,
+					ErrorExcerptBytes: cfg.ErrorExcerptBytes,
+					Redact:            cfg.Redact,
 				})
 			}
 		}

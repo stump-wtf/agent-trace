@@ -28,7 +28,7 @@ type PiAdapter struct {
 
 func (a PiAdapter) Harness() Harness { return HarnessPi }
 
-// SetOptions injects classify.Options for verify-pattern customization.
+// SetOptions injects classify.Options for verify patterns and error excerpts.
 func (a *PiAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
 
 // SetSummaryCache injects the summary cache the watcher shares across scans.
