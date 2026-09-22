@@ -130,6 +130,15 @@ called out under Changed.
 
 ### Changed
 
+- **Breaking for consumers that key on sequence numbers:** a tool call released
+  as an orphan now takes its seq where a later record proved it dead, rather
+  than last as `Parse` used to place it. Every event and mark after such a call
+  therefore moves up by one, per orphan, for Claude Code and Crush; Codex
+  already numbered calls in order and is unchanged. Callers that persist seqs
+  across a poll boundary — harness's telemetry item IDs, for one — see a
+  one-time shift on any session containing an orphan. Reiterating a call's own
+  seq as it arrives is unaffected.
+
 - `CrushAdapter` and `DefaultAdapters` now document that `CRUSH_GLOBAL_DATA`
   relocates `projects.json`, so a supervised Crush needs its own adapter with
   `ProjectsPath`, and that `DBPath` plus `Cwd` is a supported single-project
@@ -313,8 +322,8 @@ Bugs worth calling out because they produced wrong output rather than errors:
 
 `v0.x` means the API is still moving, and this project's minor bumps carry
 breaking changes rather than deferring them to a major: v0.1.0 shipped two,
-v0.2.0 another, and v0.3.0 one. Treat every minor bump as potentially breaking
-and pin exactly.
+v0.2.0 another, and v0.3.0 a change to how orphans are sequenced. Treat every
+minor bump as potentially breaking and pin exactly.
 
 The module path lives on the GitHub mirror because Go resolves versions there.
 Tags are created on Gitea and reach GitHub through the push mirror — never tag the
