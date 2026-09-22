@@ -64,7 +64,7 @@ Discovers and parses live agent session logs from per-harness directories, emitt
 
 **Orphaned tool calls:** Both Claude Code and Pi adapters flush pending tool calls that never received a result, emitting them with zero-value `ToolResult`.
 
-**Claude Code API errors:** a failed API call is a synthetic assistant record flagged `isApiErrorMessage`; `isCCAPIError` detects it on the flag alone (never the text) and `ccAPIErrorNote` renders the mark as `<code> (<status>): <text>`, dropping ` (<status>)` when there was no HTTP response. harness's Prometheus exporter matches that front, so treat the format as a contract. The record's top-level `error` is a string there but an object on the per-retry `system`/`api_error` records, which is why `ccRawLine` keeps it raw.
+**Claude Code API errors:** a failed API call is a synthetic assistant record flagged `isApiErrorMessage`; `isCCAPIError` detects it on the flag alone (never the text) and `ccAPIErrorNote` renders the mark as `<code> (<status>): <text>`, dropping ` (<status>)` when there was no HTTP response and capping the code at 64 runes so truncation never reaches the front. harness's Prometheus exporter classifies these marks on the code and status (a quota message's text names neither), so treat the format as a contract. `otel` has no span for `error` marks and passes them over, for Crush and Claude Code alike. The record's top-level `error` is a string there but an object on the per-retry `system`/`api_error` records, which is why `ccRawLine` keeps it raw.
 
 **Codex error inference:** Codex doesn't set an explicit error flag, so `commandOutputFailed()` pattern-matches output text for `exit code 1`, `error:`, `fatal:`, etc.
 

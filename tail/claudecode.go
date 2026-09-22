@@ -670,10 +670,12 @@ func ccAPIErrorMark(line ccRawLine, seq int) classify.Mark {
 // the record carries no text.
 //
 // This shape is a contract, not presentation: harness's Prometheus exporter
-// sorts error marks into quota, auth, timeout, transport and other by
-// matching the code and status at the front, so change it only together with
-// that classifier. The note is truncated to 2000 runes, as the Crush reader's
-// error note is; the front is never what gets cut.
+// sorts error marks into quota, auth, timeout, transport and other, and the
+// code and status are what it can classify a Claude Code failure on — a
+// session-limit message, for one, names neither a rate limit nor a 429 — so
+// change it only together with that classifier. The note is truncated to
+// 2000 runes, as the Crush reader's error note is; the front is never what
+// gets cut.
 func ccAPIErrorNote(code string, status int, text string) string {
 	code = strings.Map(func(r rune) rune {
 		switch r {
