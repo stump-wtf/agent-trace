@@ -1234,17 +1234,18 @@ func assertIncrementalMatchesFull(t *testing.T, a incrementalAdapter, path strin
 			t.Errorf("event %d:\n polls: %+v\n Parse: %+v", i, gotEvents[i], wantEvents[i])
 		}
 	}
-	// Marks compare on what both paths promise. Timestamp is left out: the
-	// Claude Code Parse path has never set it on a user-message mark, and that
-	// is a separate difference from the one this oracle guards.
+	// Marks compare on what both paths promise. Timestamp is compared only
+	// where Parse sets one: the Claude Code Parse path has never set it on a
+	// user-message mark, and that is a separate difference from the one this
+	// oracle guards. Everywhere else a mark's time is part of the contract.
 	if len(gotMarks) != len(wantMarks) {
 		t.Errorf("marks: the polls returned %d (%+v), a full Parse returned %d (%+v)", len(gotMarks), gotMarks, len(wantMarks), wantMarks)
 	}
 	for i := range min(len(gotMarks), len(wantMarks)) {
 		g, w := gotMarks[i], wantMarks[i]
-		if g.Seq != w.Seq || g.Type != w.Type || g.Note != w.Note {
-			t.Errorf("mark %d: polls gave seq=%d type=%q note=%q, Parse gave seq=%d type=%q note=%q",
-				i, g.Seq, g.Type, g.Note, w.Seq, w.Type, w.Note)
+		if g.Seq != w.Seq || g.Type != w.Type || g.Note != w.Note || (w.Timestamp != "" && g.Timestamp != w.Timestamp) {
+			t.Errorf("mark %d: polls gave seq=%d type=%q note=%q ts=%q, Parse gave seq=%d type=%q note=%q ts=%q",
+				i, g.Seq, g.Type, g.Note, g.Timestamp, w.Seq, w.Type, w.Note, w.Timestamp)
 		}
 	}
 	return wm
