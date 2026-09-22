@@ -14,8 +14,9 @@ breaking changes arrive in minor releases. See the note under
 ## [0.4.0] - 2026-09-22
 
 A correctness release for `tail` and `otel`: a failed model call reaches the
-exported trace, and two cursor bugs stop losing events on a session that runs
-turns concurrently or goes quiet mid-call.
+exported trace, an errored tool result can keep its text, and two cursor bugs
+stop losing events on a session that runs turns concurrently or goes quiet
+mid-call.
 
 `otel` now renders an `error` mark on the trace instead of dropping it. Inside a
 turn the mark lands on that turn's span as an exception event plus an ERROR
