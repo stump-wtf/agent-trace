@@ -47,6 +47,8 @@ event := classify.BuildEventWith(opts, seq, cwd, call, result)
 
 In `tail`, set the same two fields on `WatchConfig` and the watcher hands them to every adapter. An excerpt only appears where the adapter knows the call failed: Claude Code and Pi record their own flag, Codex's is inferred from the exit code in the output, OpenCode's comes from a part in the `error` state, and Crush's from the `tool_result` part's `is_error`. Crush records a shell command that exits non-zero as an ordinary result whose text ends `Exit code N`, and the adapter keeps `is_error` alone rather than guessing from that text. OpenCode is narrower for a different reason: the adapter reads only a part's `state.error`, so a failed shell command — which lands in `state.output` under a `completed` status — carries no excerpt either.
 
+An `Event` also keeps no arguments, and for a tool the classifier does not know — any MCP tool — `Summary` is only the tool name. `Event.InputDigest` (`inputDigest` in JSON) is the hex SHA-256 of the call's input encoded as JSON with sorted keys, so two calls with the same arguments share a digest whatever order the transcript stored them in, and a consumer can tell an agent repeating one call from an agent working through a list. It is always filled, it does not include the tool name (pair it with `Event.Tool`), and it is a fingerprint rather than a redaction: an input small enough to guess can be confirmed by hashing the guess.
+
 ### `tail`
 
 Live session log discovery and per-agent JSONL parsing. Watches agent session directories, tails growing files, and emits classified `Event`s. Supports Claude Code, Codex, Crush, OpenCode, and Pi via the `Adapter` interface — `DefaultAdapters()` returns all five.

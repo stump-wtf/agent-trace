@@ -11,6 +11,18 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Added
+
+- `classify.Event.InputDigest` (`inputDigest` in JSON): the hex SHA-256 of the
+  call's input encoded as JSON, whose map keys encoding/json sorts at every
+  depth. Two calls with the same arguments share it whatever order the
+  transcript stored them in. An `Event` kept no arguments, and for a tool the
+  classifier does not know — every MCP tool — `Summary` is only the tool name,
+  so a consumer could not tell 608 identical `add_comment` calls from 608
+  different ones. It is always filled by
+  `BuildEvent` and `BuildEventWith`, excludes the tool name, and is a
+  fingerprint, not a redaction.
+
 ## [0.4.0] - 2026-09-22
 
 A correctness release for `tail` and `otel`: a failed model call reaches the

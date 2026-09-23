@@ -33,6 +33,11 @@ type Event struct {
 	// It is empty unless Options.ErrorExcerptBytes is positive and IsError is
 	// true; see Options.ErrorExcerptBytes for its shape.
 	ErrorExcerpt string `json:"errorExcerpt,omitempty"`
+	// InputDigest is the hex SHA-256 of the call's input encoded as JSON
+	// with sorted keys: equal for two calls with the same arguments, whatever
+	// order the transcript stored them in, and different otherwise. It does
+	// not include the tool name. See digest.go.
+	InputDigest string `json:"inputDigest,omitempty"`
 }
 
 // Target is a repo file touched by a tool call, with the deepest interaction
