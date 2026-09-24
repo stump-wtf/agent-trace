@@ -11,6 +11,8 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-24
+
 ### Added
 
 - `classify.Event.InputDigest` (`inputDigest` in JSON): the hex SHA-256 of the
