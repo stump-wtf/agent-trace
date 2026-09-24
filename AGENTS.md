@@ -48,7 +48,7 @@ Discovers and parses live agent session logs from per-harness directories, emitt
 |---|---|---|
 | `ClaudeCodeAdapter` | `~/.claude/projects/` | One JSONL per session, `tool_use`/`tool_result` content items |
 | `CodexAdapter` | `~/.codex/sessions/` | `response_item` lines with `function_call`/`function_call_output` |
-| `PiAdapter` | `~/.pi/agent/sessions/` | Append-only tree linearized via `parentId` chain |
+| `PiAdapter` | `~/.pi/agent/sessions/` (`~/.omp/agent/sessions/` with `OMP`) | Append-only tree linearized via `parentId` chain; an oh-my-pi file's leading 256-byte title slot is skipped (`parsePiTitleSlot`) |
 | `CrushAdapter` | `~/.local/share/crush/projects.json` | SQLite (`crush.db`), messages stored as JSON parts |
 | `OpenCodeAdapter` | `~/.opencode/opencode.db` | SQLite, parts stored as JSON |
 

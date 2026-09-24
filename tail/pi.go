@@ -14,11 +14,28 @@ import (
 	"github.com/stump-wtf/agent-trace/internal/strutil"
 )
 
+// HarnessOMP identifies oh-my-pi (OMP) sessions: a PiAdapter with OMP set
+// labels what it reads with it. OMP is a fork of Pi that keeps Pi's session
+// format and adds to it — a leading title slot (parsePiTitleSlot), a
+// "provider/model" model_change (piEntryModel), and entry types and message
+// roles the reader passes over — so one reader serves both, and the label is
+// the caller's to choose. No adapter in DefaultAdapters uses it.
+const HarnessOMP Harness = "omp"
+
 // PiAdapter discovers and parses Pi agent session logs from
 // ~/.pi/agent/sessions/. Pi sessions are append-only trees that get
 // linearized before parsing.
+//
+// It also reads oh-my-pi (OMP) session files, which open with a fixed-width
+// title slot line before the session header. Set OMP to label those sessions
+// HarnessOMP rather than HarnessPi and to default to OMP's directory.
 type PiAdapter struct {
 	Dir string // override default session directory
+	// OMP makes the adapter an oh-my-pi reader: Harness() — and so every
+	// SessionMeta.Harness and session key it produces — is HarnessOMP, and
+	// the default directory is ~/.omp/agent/sessions. Parsing is identical
+	// either way; a Pi reader also accepts OMP files and vice versa.
+	OMP bool
 	// opts carries classify.Options from the watcher (verify patterns, etc).
 	opts *classify.Options
 	// cache memoizes summaries across scans so an unchanged session file is
@@ -26,7 +43,21 @@ type PiAdapter struct {
 	cache *SummaryCache
 }
 
-func (a PiAdapter) Harness() Harness { return HarnessPi }
+// Harness returns HarnessPi, or HarnessOMP when OMP is set.
+func (a PiAdapter) Harness() Harness {
+	if a.OMP {
+		return HarnessOMP
+	}
+	return HarnessPi
+}
+
+// agentDir is the adapter's agent directory relative to a HOME-like root.
+func (a PiAdapter) agentDir() string {
+	if a.OMP {
+		return filepath.Join(".omp", "agent")
+	}
+	return filepath.Join(".pi", "agent")
+}
 
 // SetOptions injects classify.Options for verify patterns and error excerpts.
 func (a *PiAdapter) SetOptions(opts *classify.Options) { a.opts = opts }
@@ -47,19 +78,20 @@ func (a PiAdapter) SessionDir() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".pi", "agent", "sessions")
+	return filepath.Join(home, a.agentDir(), "sessions")
 }
 
 // WithRoot returns a copy of the adapter that discovers sessions under root,
 // which is treated as a HOME-like base: the adapter appends its own layout
-// (.pi/agent/sessions). Sibling fields are preserved; only the root-derived
-// path changes. Pass an empty string to restore the default.
+// (.pi/agent/sessions, or .omp/agent/sessions when OMP is set). Sibling
+// fields are preserved; only the root-derived path changes. Pass an empty
+// string to restore the default.
 func (a PiAdapter) WithRoot(root string) Adapter {
 	if root == "" {
 		a.Dir = ""
 		return &a
 	}
-	a.Dir = filepath.Join(root, ".pi", "agent", "sessions")
+	a.Dir = filepath.Join(root, a.agentDir(), "sessions")
 	return &a
 }
 
@@ -120,14 +152,14 @@ func (a PiAdapter) Summarize(ctx context.Context, path string) (SessionMeta, err
 	if err := ctx.Err(); err != nil {
 		return SessionMeta{}, err
 	}
-	header, entries, recognized, err := readPiSession(path)
+	head, entries, recognized, err := readPiSession(path)
 	if err != nil && !recognized {
 		return SessionMeta{}, err
 	}
 	if !recognized {
 		return SessionMeta{}, fmt.Errorf("not a pi session: %s", path)
 	}
-	meta := a.piBaseMeta(path, header)
+	meta := a.piBaseMeta(path, head.header)
 	for _, entry := range linearizePi(entries) {
 		if entry.Timestamp != "" {
 			if meta.StartedAt == "" {
@@ -135,8 +167,10 @@ func (a PiAdapter) Summarize(ctx context.Context, path string) (SessionMeta, err
 			}
 			meta.EndedAt = entry.Timestamp
 		}
-		if entry.Type == "model_change" && entry.ModelID != "" {
-			meta.Model = entry.ModelID
+		if entry.Type == "model_change" {
+			if model := piEntryModel(entry); model != "" {
+				meta.Model = model
+			}
 		}
 		if entry.Type == "session_info" && entry.Name != "" {
 			meta.Title = entry.Name
@@ -152,21 +186,21 @@ func (a PiAdapter) Summarize(ctx context.Context, path string) (SessionMeta, err
 		}
 	}
 	if meta.Title == "" {
-		meta.Title = piSessionTitle(entries, "", path)
+		meta.Title = piSessionTitle(entries, head.storedTitle(), "", path)
 	}
 	return meta, err
 }
 
 // Parse reads a complete Pi session file and returns classified events.
 func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
-	header, entries, recognized, err := readPiSession(path)
+	head, entries, recognized, err := readPiSession(path)
 	if err != nil && !recognized {
 		return nil, nil, SessionMeta{}, err
 	}
 	if !recognized {
 		return nil, nil, SessionMeta{}, fmt.Errorf("not a pi session: %s", path)
 	}
-	meta := a.piBaseMeta(path, header)
+	meta := a.piBaseMeta(path, head.header)
 
 	opts := a.opts
 	if opts == nil {
@@ -188,8 +222,8 @@ func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []
 		}
 		switch entry.Type {
 		case "model_change":
-			if entry.ModelID != "" {
-				meta.Model = entry.ModelID
+			if model := piEntryModel(entry); model != "" {
+				meta.Model = model
 			}
 		case "compaction":
 			marks = append(marks, classify.Mark{Seq: seq, Timestamp: entry.Timestamp, Type: "compaction"})
@@ -273,7 +307,7 @@ func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []
 			seq++
 		}
 	}
-	meta.Title = piSessionTitle(entries, firstUserText, path)
+	meta.Title = piSessionTitle(entries, head.storedTitle(), firstUserText, path)
 	return events, marks, meta, err
 }
 
@@ -284,24 +318,29 @@ func (a PiAdapter) Watermark(ctx context.Context, path string) int64 {
 	return jsonlCompleteOffset(path)
 }
 
-// piSessionHead reads the session's header record — the first line, which
-// carries the session id, cwd and opening timestamp. ParseSince starts
+// piSessionHead reads the session's header record — the first line, or the
+// second when the first is an OMP title slot — which carries the session id,
+// cwd and opening timestamp, along with the slot's title. ParseSince starts
 // mid-file and needs it for the same reason ClaudeCodeAdapter needs
 // sessionHeadCwd: the metadata before the watermark is what new events are
-// attributed to.
-func piSessionHead(path string) (piRawEntry, bool) {
-	line := jsonlFirstLine(path)
-	if line == nil {
-		return piRawEntry{}, false
+// attributed to. It reads those two lines and no further.
+func piSessionHead(path string) (piHead, bool) {
+	lines := jsonlLeadingLines(path, 2)
+	if len(lines) == 0 {
+		return piHead{}, false
 	}
-	if !isPiHeader(line) {
-		return piRawEntry{}, false
+	var head piHead
+	if title, ok := parsePiTitleSlot(lines[0]); ok {
+		head.slotTitle, head.slotted = title, true
+		lines = lines[1:]
 	}
-	var header piRawEntry
-	if json.Unmarshal(line, &header) != nil {
-		return piRawEntry{}, false
+	if len(lines) == 0 || !isPiHeader(lines[0]) {
+		return piHead{}, false
 	}
-	return header, true
+	if json.Unmarshal(lines[0], &head.header) != nil {
+		return piHead{}, false
+	}
+	return head, true
 }
 
 // ParseSince reads only records appended after the byte offset, returning
@@ -393,8 +432,8 @@ func (a PiAdapter) ParseSince(ctx context.Context, path string, offset int64, st
 		return events, marks, meta, jsonlCompleteOffset(path), nil
 	}
 
-	header, _ := piSessionHead(path)
-	meta := a.piBaseMeta(path, header)
+	head, _ := piSessionHead(path)
+	meta := a.piBaseMeta(path, head.header)
 
 	opts := a.opts
 	if opts == nil {
@@ -419,8 +458,8 @@ func (a PiAdapter) ParseSince(ctx context.Context, path string, offset int64, st
 		}
 		switch entry.Type {
 		case "model_change":
-			if entry.ModelID != "" {
-				meta.Model = entry.ModelID
+			if model := piEntryModel(entry); model != "" {
+				meta.Model = model
 			}
 		case "compaction":
 			marks = append(marks, classify.Mark{Seq: seq, Timestamp: entry.Timestamp, Type: "compaction"})
@@ -507,7 +546,7 @@ func (a PiAdapter) ParseSince(ctx context.Context, path string, offset int64, st
 		safeOffset = ends[safeIdx]
 	}
 	if meta.Title == "" {
-		meta.Title = piSessionTitle(newEntries, firstUserText, path)
+		meta.Title = piSessionTitle(newEntries, head.storedTitle(), firstUserText, path)
 	}
 	return events[:safeEvents], marks[:safeMarks], meta, safeOffset, nil
 }
@@ -524,6 +563,93 @@ type piRawEntry struct {
 	ModelID   string          `json:"modelId"`
 	Summary   string          `json:"summary"`
 	Name      string          `json:"name"`
+	// Title is the header's own title (OMP writes one on legacy, slot-less
+	// files). It is read from the header only: an OMP title_change entry
+	// carries a title too, but that is an audit record, and the title slot
+	// already holds the current title.
+	Title string `json:"title"`
+	// Model and Role are OMP's model_change shape: "provider/modelId" and
+	// the model role it selects. Pi writes ModelID instead.
+	Model string `json:"model"`
+	Role  string `json:"role"`
+}
+
+// piHead is what precedes a Pi session's entries: the header and, on an OMP
+// file, the title slot before it.
+type piHead struct {
+	header    piRawEntry
+	slotTitle string
+	slotted   bool // the file opened with an OMP title slot
+}
+
+// storedTitle is the title the file itself records: the OMP slot's current
+// title, else the header's. Empty on a Pi file.
+func (h piHead) storedTitle() string {
+	if h.slotted && h.slotTitle != "" {
+		return h.slotTitle
+	}
+	return h.header.Title
+}
+
+// parsePiTitleSlot recognises OMP's title slot, the physical first line of
+// every current OMP session file: {"type":"title","v":1,"title":…,
+// "source"?:…,"updatedAt":…,"pad":"<spaces>"}, space-padded to 256 bytes
+// with its newline (SESSION_TITLE_SLOT_BYTES) and rewritten in place at that
+// width whenever the session is renamed. The fixed width is why a rename
+// never moves a byte offset after the slot; the reader does not depend on
+// it, and skips the slot as one line whatever its length.
+//
+// It accepts exactly what OMP's own parseTitleSlotObject accepts (oh-my-pi
+// 62bc57be, packages/coding-agent/src/session/session-title-slot.ts): type
+// "title", v 1, string title/updatedAt/pad, and source absent or
+// "auto"/"user". Anything else is not a slot, and so is left to fail header
+// recognition.
+func parsePiTitleSlot(data []byte) (title string, ok bool) {
+	var probe struct {
+		Type      string          `json:"type"`
+		V         json.RawMessage `json:"v"`
+		Title     *string         `json:"title"`
+		Source    json.RawMessage `json:"source"`
+		UpdatedAt *string         `json:"updatedAt"`
+		Pad       *string         `json:"pad"`
+	}
+	if json.Unmarshal(data, &probe) != nil {
+		return "", false
+	}
+	if probe.Type != "title" || string(probe.V) != "1" {
+		return "", false
+	}
+	if probe.Title == nil || probe.UpdatedAt == nil || probe.Pad == nil {
+		return "", false
+	}
+	if len(probe.Source) > 0 {
+		var source string
+		if json.Unmarshal(probe.Source, &source) != nil || (source != "auto" && source != "user") {
+			return "", false
+		}
+	}
+	return *probe.Title, true
+}
+
+// piEntryModel is the model a model_change entry selects, as a model id
+// without its provider — the form Pi's modelId and an assistant message's
+// model both take. Pi writes modelId; OMP writes model as "provider/modelId"
+// plus an optional role, and only the default role (an absent role is
+// "default") is the session's model — a change under another role ("smol",
+// "slow", …) sets the model for that role instead (oh-my-pi 62bc57be,
+// docs/session.md "model_change" and "Context Reconstruction",
+// packages/coding-agent/src/session/session-entries.ts ModelChangeEntry).
+func piEntryModel(entry piRawEntry) string {
+	if entry.ModelID != "" {
+		return entry.ModelID
+	}
+	if entry.Model == "" || (entry.Role != "" && entry.Role != "default") {
+		return ""
+	}
+	if _, id, ok := strings.Cut(entry.Model, "/"); ok && id != "" {
+		return id
+	}
+	return entry.Model
 }
 
 type piMessage struct {
@@ -574,10 +700,15 @@ func (a PiAdapter) piBaseMeta(path string, header piRawEntry) SessionMeta {
 	}
 }
 
-func readPiSession(path string) (header piRawEntry, entries []piRawEntry, recognized bool, err error) {
+// readPiSession reads a whole Pi or OMP session file. The file is a session
+// only if its first JSON record is the header — or, on an OMP file, if its
+// first is a title slot and its second the header. One slot is skipped, and
+// only in first position: anything else ahead of the header, a second slot
+// included, means the file is not a session.
+func readPiSession(path string) (head piHead, entries []piRawEntry, recognized bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return piRawEntry{}, nil, false, err
+		return piHead{}, nil, false, err
 	}
 	defer func() { _ = f.Close() }()
 	sawEntry := false
@@ -591,9 +722,15 @@ func readPiSession(path string) (header piRawEntry, entries []piRawEntry, recogn
 			return
 		}
 		if !sawEntry {
+			if !head.slotted {
+				if title, ok := parsePiTitleSlot(data); ok {
+					head.slotTitle, head.slotted = title, true
+					return
+				}
+			}
 			sawEntry = true
 			if isPiHeader(data) {
-				header = entry
+				head.header = entry
 				recognized = true
 			}
 			return
@@ -602,7 +739,7 @@ func readPiSession(path string) (header piRawEntry, entries []piRawEntry, recogn
 			entries = append(entries, entry)
 		}
 	})
-	return header, entries, recognized, err
+	return head, entries, recognized, err
 }
 
 // linearizePi walks the parentId chain from the last entry back to root,
@@ -669,9 +806,11 @@ func piContentText(raw json.RawMessage) string {
 }
 
 // piSessionTitle mirrors pi's getSessionName: the latest session_info entry
-// wins (an empty name explicitly clears), else the first user message
-// previewed to 240 runes, else filepath.Base(path).
-func piSessionTitle(entries []piRawEntry, firstUserText, path string) string {
+// wins (an empty name explicitly clears), else the title the file stores (an
+// OMP title slot or header — see piHead.storedTitle), else the first user
+// message previewed to 240 runes, else filepath.Base(path). Pi files store
+// no title, so for them stored is empty and the rule is pi's unchanged.
+func piSessionTitle(entries []piRawEntry, stored, firstUserText, path string) string {
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].Type != "session_info" {
 			continue
@@ -680,6 +819,9 @@ func piSessionTitle(entries []piRawEntry, firstUserText, path string) string {
 			return entries[i].Name
 		}
 		break
+	}
+	if stored != "" {
+		return stored
 	}
 	if firstUserText != "" {
 		preview := strings.Join(strings.Fields(firstUserText), " ")

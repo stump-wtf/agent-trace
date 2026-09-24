@@ -22,6 +22,23 @@ breaking changes arrive in minor releases. See the note under
   different ones. It is always filled by
   `BuildEvent` and `BuildEventWith`, excludes the tool name, and is a
   fingerprint, not a redaction.
+- `tail.PiAdapter` reads oh-my-pi (OMP) session files. OMP opens every
+  session with a fixed-width, 256-byte `{"type":"title","v":1,…}` slot line
+  that it rewrites in place on rename, then the Pi session header, and the
+  reader recognised a session only by a header on its first line — so it
+  rejected every OMP session as "not a pi session". It now skips exactly one
+  leading slot, in `Parse`, `Summarize` and `ParseSince`'s header lookup;
+  byte-offset watermarks are unaffected, and a rename moves none of them.
+  The slot's title becomes `SessionMeta.Title` (a Pi `session_info` name
+  still wins), OMP's `model_change` shape (`model: "provider/modelId"` with a
+  `role`, only the default role counting) sets `SessionMeta.Model`, and
+  OMP-only entry types and message roles are passed over. A file with a slot
+  and no header straight after it is still rejected.
+- `tail.HarnessOMP` and `PiAdapter.OMP`. Setting `OMP` labels the sessions
+  an adapter reads `omp` instead of `pi` — `Harness()`, `SessionMeta.Harness`
+  and session keys — and defaults its directory to `~/.omp/agent/sessions`
+  (`WithRoot` likewise). The zero value is unchanged, and `DefaultAdapters`
+  does not include an OMP adapter.
 
 ## [0.4.0] - 2026-09-22
 

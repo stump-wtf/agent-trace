@@ -66,18 +66,38 @@ func readCompleteJSONLines(r io.Reader, base int64, visit func(line []byte, end 
 // EOF for a first line would reintroduce the very cost ParseSince exists to
 // avoid.
 func jsonlFirstLine(path string) []byte {
+	lines := jsonlLeadingLines(path, 1)
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines[0]
+}
+
+// jsonlLeadingLines returns up to the first n records of the file, each as
+// jsonlFirstLine returns one, stopping early at end of file or at an empty
+// read. Like jsonlFirstLine it reads those records and no further: an OMP
+// session keeps its header on the second line, behind a title slot.
+func jsonlLeadingLines(path string, n int) [][]byte {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
-	// A read error with partial data still yields a first line to try;
-	// callers that fail to unmarshal it treat the metadata as absent.
-	line, _ := bufio.NewReaderSize(f, 64*1024).ReadBytes('\n')
-	if len(line) == 0 {
-		return nil
+	r := bufio.NewReaderSize(f, 64*1024)
+	var lines [][]byte
+	for len(lines) < n {
+		// A read error with partial data still yields a line to try;
+		// callers that fail to unmarshal it treat the metadata as absent.
+		line, err := r.ReadBytes('\n')
+		if len(line) == 0 {
+			break
+		}
+		lines = append(lines, bytes.TrimRight(line, "\r\n"))
+		if err != nil {
+			break
+		}
 	}
-	return bytes.TrimRight(line, "\r\n")
+	return lines
 }
 
 // jsonlLastLineBefore returns the complete record that ends immediately

@@ -51,7 +51,7 @@ An `Event` also keeps no arguments, and for a tool the classifier does not know 
 
 ### `tail`
 
-Live session log discovery and per-agent JSONL parsing. Watches agent session directories, tails growing files, and emits classified `Event`s. Supports Claude Code, Codex, Crush, OpenCode, and Pi via the `Adapter` interface — `DefaultAdapters()` returns all five.
+Live session log discovery and per-agent JSONL parsing. Watches agent session directories, tails growing files, and emits classified `Event`s. Supports Claude Code, Codex, Crush, OpenCode, and Pi via the `Adapter` interface — `DefaultAdapters()` returns all five. The Pi adapter also reads oh-my-pi (OMP) sessions; set `PiAdapter.OMP` to label them `omp` and default to `~/.omp/agent/sessions`.
 
 ```go
 import "github.com/stump-wtf/agent-trace/tail"

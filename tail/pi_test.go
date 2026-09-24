@@ -6,6 +6,7 @@ func TestPiSessionTitle(t *testing.T) {
 	tests := []struct {
 		name          string
 		entries       []piRawEntry
+		stored        string // an OMP title slot's or header's title
 		firstUserText string
 		path          string
 		want          string
@@ -39,6 +40,22 @@ func TestPiSessionTitle(t *testing.T) {
 			want:          "fix the bug",
 		},
 		{
+			name:          "stored title beats the first user message",
+			stored:        "Repair the build",
+			firstUserText: "fix the build",
+			path:          "/tmp/sess.jsonl",
+			want:          "Repair the build",
+		},
+		{
+			name: "session_info beats the stored title",
+			entries: []piRawEntry{
+				{Type: "session_info", Name: "renamed"},
+			},
+			stored: "Repair the build",
+			path:   "/tmp/sess.jsonl",
+			want:   "renamed",
+		},
+		{
 			name:          "first user message fallback",
 			entries:       nil,
 			firstUserText: "add a login page",
@@ -55,7 +72,7 @@ func TestPiSessionTitle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := piSessionTitle(tt.entries, tt.firstUserText, tt.path)
+			got := piSessionTitle(tt.entries, tt.stored, tt.firstUserText, tt.path)
 			if got != tt.want {
 				t.Errorf("piSessionTitle() = %q, want %q", got, tt.want)
 			}
