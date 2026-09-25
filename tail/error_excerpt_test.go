@@ -97,6 +97,29 @@ func excerptCases() []excerptCase {
 			want:   map[int]string{0: "file not found: /repo/missing.go"},
 		},
 		{
+			// A failed Crush shell command is an ordinary text response:
+			// is_error stays false and the text ends "Exit code N" before
+			// the <cwd> block, which the adapter reads instead (#115).
+			name: "crush shell",
+			build: func(t *testing.T) (Adapter, string) {
+				resetDBCache()
+				t.Cleanup(resetDBCache)
+				dbPath := newCrushSession(t, "s1", 1789120000)
+				insertCrushMessages(t, dbPath, "s1", 1789120000,
+					[]string{"user", "assistant", "tool", "assistant", "tool"},
+					[]string{
+						`[{"type":"text","data":{"text":"fix the build"}}]`,
+						`[{"type":"tool_call","data":{"id":"c1","name":"bash","input":"{\"command\":\"go build ./...\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
+						`[{"type":"tool_result","data":{"tool_call_id":"c1","name":"bash","content":"\n./main.go:3:2: undefined: foo\nExit code 1\n\n<cwd>/repo</cwd>","is_error":false}}]`,
+						`[{"type":"tool_call","data":{"id":"c2","name":"bash","input":"{\"command\":\"go vet ./...\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
+						`[{"type":"tool_result","data":{"tool_call_id":"c2","name":"bash","content":"no output","is_error":false}}]`,
+					})
+				return &CrushAdapter{DBPath: dbPath, Cwd: "/repo"}, dbPath + "/s1"
+			},
+			events: 2,
+			want:   map[int]string{0: "./main.go:3:2: undefined: foo\nExit code 1\n\n<cwd>/repo</cwd>"},
+		},
+		{
 			// OpenCode keeps a failed call's text in state.error rather than
 			// state.output.
 			name: "opencode",

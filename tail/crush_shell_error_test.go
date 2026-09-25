@@ -99,3 +99,47 @@ func TestCrushShellResultIsError(t *testing.T) {
 		}
 	}
 }
+
+// TestCrushShellResultIsErrorAcrossPolls is the watcher's shape: one poll
+// reads the bash call before Crush has written its result, and the next reads
+// the failed result in a row of its own. The call is held below the watermark
+// and re-read with its result, and the event it then yields is IsError at the
+// seq the watcher continues from (#115).
+func TestCrushShellResultIsErrorAcrossPolls(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+
+	const now = 1789120000
+	dbPath := newCrushSession(t, "polls", now)
+	insertCrushMessages(t, dbPath, "polls", now, []string{"user", "assistant", "tool", "assistant"}, []string{
+		`[{"type":"text","data":{"text":"run the tests"}}]`,
+		`[{"type":"tool_call","data":{"id":"c1","name":"view","input":"{\"file_path\":\"a.go\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
+		`[{"type":"tool_result","data":{"tool_call_id":"c1","name":"view","content":"package a"}}]`,
+		`[{"type":"tool_call","data":{"id":"c2","name":"bash","input":"{\"command\":\"go test ./...\"}","finished":true}},{"type":"finish","data":{"reason":"tool_use"}}]`,
+	})
+	a := CrushAdapter{DBPath: dbPath, Cwd: "/repo"}
+	path := dbPath + "/polls"
+
+	first, _, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
+	if err != nil {
+		t.Fatalf("first ParseSince: %v", err)
+	}
+	if len(first) != 1 || first[0].IsError {
+		t.Fatalf("first poll = %+v, want only the successful view", first)
+	}
+
+	insertCrushMessages(t, dbPath, "polls", now+10, []string{"tool"}, []string{
+		`[{"type":"tool_result","data":{"tool_call_id":"c2","name":"bash","content":"FAIL\tpkg\n\nExit code 1\n\n<cwd>/repo</cwd>","is_error":false}}]`,
+	})
+
+	second, _, _, _, err := a.ParseSince(t.Context(), path, wm, len(first))
+	if err != nil {
+		t.Fatalf("second ParseSince: %v", err)
+	}
+	if len(second) != 1 {
+		t.Fatalf("second poll = %d events, want the bash call re-read with its result", len(second))
+	}
+	if ev := second[0]; !ev.IsError || ev.Seq != 1 {
+		t.Errorf("second poll event: IsError = %v, Seq = %d; want true, 1", ev.IsError, ev.Seq)
+	}
+}
