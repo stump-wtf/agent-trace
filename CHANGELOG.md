@@ -35,6 +35,42 @@ breaking changes arrive in minor releases. See the note under
   output, or any other tool's text, is not a failure. This changes `IsError`,
   `Summary` and span status for existing consumers of Crush events. The
   OpenCode adapter is unchanged.
+- The Pi adapter's incremental cursor no longer stalls for good behind a
+  tool call that never gets a result (#103). A response the user interrupts
+  mid-stream keeps the calls it streamed, and Pi never runs them; an abort
+  mid-batch leaves the calls after the one it reached unrun; a process that
+  dies mid-call leaves its call unanswered too. In each case `ParseSince`
+  held its watermark below the call from then on, and nothing later in the
+  session — the next prompt, its tool calls — reached `ParseSince` or a
+  `Watcher`. Pi writes every result a response's calls will ever get before
+  the turn ends, and the next user or assistant message only after that (it
+  defers extension messages and the user's own bash runs to the end of the
+  turn so nothing lands between a call and its result), so such a message now
+  releases every call still open before it. The call is emitted there with a
+  zero-value `ToolResult`, by `Parse` and `ParseSince` alike, including on
+  oh-my-pi files, whose resume writes an aborted assistant message after a
+  process that died mid-turn. A call with no later message is still held, and
+  `Parse` still flushes it last.
+
+- The OpenCode adapter's incremental cursor no longer stalls for good behind
+  a tool part left `pending` or `running` by a process that died (#103).
+  `ParseSince` withholds such a part until it turns terminal, which it never
+  does, so nothing later in the session was delivered. OpenCode runs one step
+  at a time per session and marks every tool part a step has not finished as
+  an error before it creates the next step's assistant message, so a later
+  assistant message in the session now releases the part: it is emitted in
+  place with a zero-value `ToolResult`, exactly as `Parse` has always emitted
+  it, and seqs are unchanged. A later user message does not release it —
+  OpenCode writes a prompt sent while the session is busy at once and runs it
+  after the current step.
+
+### Changed
+
+- **Breaking for consumers that key on sequence numbers:** a Pi tool call
+  released as an orphan now takes its seq at the message that proved it dead,
+  rather than last, where `Parse` used to place it — the change v0.3.0 made
+  for Claude Code and Crush. Every Pi event and mark after such a call moves
+  up by one, per orphan.
 
 ## [0.5.0] - 2026-09-24
 

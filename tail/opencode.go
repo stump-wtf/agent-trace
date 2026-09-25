@@ -536,6 +536,12 @@ func (a OpenCodeAdapter) Watermark(ctx context.Context, path string) int64 {
 // the first such part is withheld along with it, the same prefix-cut the
 // other adapters apply to an unresolved call.
 //
+// A part left running by a process that died never turns terminal, and held
+// the watermark there forever: nothing later in the session was delivered
+// (#103). Such a part is released once the session holds a later assistant
+// message (opencodeSuperseded) and emitted in place with an empty result —
+// exactly where, and exactly how, Parse emits it.
+//
 // The watermark also must never equal the time_created of a withheld row:
 // the next poll filters on a strict `>`, so an equal value would exclude
 // that row forever. Safe points are recorded as the row is passed and rolled
@@ -595,8 +601,17 @@ func (a OpenCodeAdapter) ParseSince(ctx context.Context, path string, watermark 
 		}
 	}
 
+	// The session's latest assistant message: a tool part still pending or
+	// running on an earlier message will never finish (opencodeSuperseded).
+	var lastAssistant sql.NullInt64
+	if err := db.QueryRowContext(ctx,
+		`SELECT MAX(time_created) FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant'`,
+		sessionID).Scan(&lastAssistant); err != nil {
+		return nil, nil, meta, 0, fmt.Errorf("reading opencode session %s: %w", sessionID, err)
+	}
+
 	rows, err := db.QueryContext(ctx,
-		`SELECT p.data, p.time_created
+		`SELECT p.data, p.time_created, m.time_created
 		 FROM part p
 		 JOIN message m ON p.message_id = m.id
 		 WHERE p.session_id = ? AND p.time_created > ?
@@ -638,8 +653,8 @@ func (a OpenCodeAdapter) ParseSince(ctx context.Context, path string, watermark 
 
 	for rows.Next() {
 		var dataJSON string
-		var timeCreated int64
-		if err := rows.Scan(&dataJSON, &timeCreated); err != nil {
+		var timeCreated, msgCreated int64
+		if err := rows.Scan(&dataJSON, &timeCreated, &msgCreated); err != nil {
 			continue
 		}
 		ts := msToRFC3339(timeCreated)
@@ -659,8 +674,11 @@ func (a OpenCodeAdapter) ParseSince(ctx context.Context, path string, watermark 
 			if part.Tool == "" || part.CallID == "" {
 				continue
 			}
-			if part.State != nil && (part.State.Status == "pending" || part.State.Status == "running") {
-				// Outstanding: withheld until the row turns terminal.
+			if part.State != nil && (part.State.Status == "pending" || part.State.Status == "running") &&
+				!opencodeSuperseded(msgCreated, lastAssistant) {
+				// Outstanding: withheld until the row turns terminal, or until
+				// a later step proves it never will — then it is emitted
+				// below with an empty result, as Parse emits it.
 				if !hasOutstanding || timeCreated < outstandingAt {
 					outstandingAt, hasOutstanding = timeCreated, true
 				}
@@ -785,6 +803,27 @@ func (a OpenCodeAdapter) ParseSince(ctx context.Context, path string, watermark 
 	})
 
 	return events[:safePoint.events], safeMarks, meta, safePoint.t, nil
+}
+
+// opencodeSuperseded reports whether a tool part still pending or running on
+// a message created at msgCreated will never finish, given the time of the
+// session's latest assistant message. It will not once a later assistant
+// message exists. OpenCode runs one step at a time per session — a prompt
+// sent while it is busy is written as a user message and waits, a shell
+// command is refused while a step runs, and a step waits for a running shell
+// command to finish — and a step's processor, as
+// it ends, marks every tool part it has not finished as an error ("Tool
+// execution aborted"), before the loop creates the next step's assistant
+// message. A part left pending or running behind a later assistant message
+// was abandoned by a process that died mid-step (or a subtask that failed
+// before it ran). A later user message proves nothing: that is a queued
+// prompt, and the part may still be running.
+//
+// Checked against opencode's packages/opencode/src/session/processor.ts
+// (cleanup), prompt.ts and effect/runner.ts. No local OpenCode store was
+// available to replay, so the rule rests on the source, not on sessions.
+func opencodeSuperseded(msgCreated int64, lastAssistant sql.NullInt64) bool {
+	return lastAssistant.Valid && lastAssistant.Int64 > msgCreated
 }
 
 // windowMark pairs a mark with the storage timestamp of the row that produced

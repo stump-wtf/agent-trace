@@ -206,8 +206,7 @@ func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []
 	if opts == nil {
 		opts = osClassifyOptions(nil)
 	}
-	pending := map[string]classify.ToolCall{}
-	pendingOrder := []string{}
+	pending := newPendingCalls[classify.ToolCall]()
 	var events []classify.Event
 	var marks []classify.Mark
 	firstUserText := ""
@@ -241,6 +240,15 @@ func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []
 			if json.Unmarshal(entry.Message, &msg) != nil {
 				continue
 			}
+			// A call this message proves can never be answered is emitted
+			// here, ahead of anything the message itself contributes — see
+			// piSupersedes.
+			if piSupersedes(msg) {
+				for _, call := range pending.release(func(classify.ToolCall) bool { return true }) {
+					events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{}))
+					seq++
+				}
+			}
 			switch msg.Role {
 			case "user":
 				text := piContentText(msg.Content)
@@ -269,17 +277,13 @@ func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []
 						Input:     block.Arguments,
 						Timestamp: entry.Timestamp,
 					}
-					if _, exists := pending[call.ID]; !exists {
-						pendingOrder = append(pendingOrder, call.ID)
-					}
-					pending[call.ID] = call
+					pending.put(call.ID, call)
 				}
 			case "toolResult":
-				call, ok := pending[msg.ToolCallID]
+				call, ok := pending.take(msg.ToolCallID)
 				if !ok {
 					continue
 				}
-				delete(pending, msg.ToolCallID)
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{
 					Content: piContentText(msg.Content),
 					IsError: msg.IsError,
@@ -300,12 +304,12 @@ func (a PiAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []
 			}
 		}
 	}
-	// Flush orphaned tool calls.
-	for _, id := range pendingOrder {
-		if call, ok := pending[id]; ok {
-			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{}))
-			seq++
-		}
+	// Flush the calls still open at the end of the session, last and in issue
+	// order. Nothing after them proves they are dead, so they may yet be
+	// answered — a live session's calls in flight look exactly like this.
+	for _, call := range pending.release(func(classify.ToolCall) bool { return true }) {
+		events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{}))
+		seq++
 	}
 	meta.Title = piSessionTitle(entries, head.storedTitle(), firstUserText, path)
 	return events, marks, meta, err
@@ -439,17 +443,19 @@ func (a PiAdapter) ParseSince(ctx context.Context, path string, offset int64, st
 	if opts == nil {
 		opts = osClassifyOptions(nil)
 	}
-	pending := map[string]classify.ToolCall{}
+	pending := newPendingCalls[classify.ToolCall]()
 	var events []classify.Event
 	var marks []classify.Mark
 	firstUserText := ""
 	seq := startSeq
 
 	// Offset and result counts as of the last record that left no tool call
-	// outstanding — the ClaudeCodeAdapter.ParseSince withhold rule. Orphaned
-	// calls are deliberately NOT flushed here, unlike Parse: an unresolved
-	// call is re-read from the last safe offset next poll and emitted once
-	// its result lands, rather than emitted empty and then again complete.
+	// outstanding — the ClaudeCodeAdapter.ParseSince withhold rule. A call a
+	// later message proves dead is released in position, exactly as Parse
+	// releases it (piSupersedes); a call still open at the end of the window
+	// is deliberately NOT flushed here, unlike Parse: it is re-read from the
+	// last safe offset next poll and emitted once its result lands, rather
+	// than emitted empty and then again complete.
 	safeIdx, safeEvents, safeMarks := -1, 0, 0
 
 	for i, entry := range newEntries {
@@ -481,6 +487,15 @@ func (a PiAdapter) ParseSince(ctx context.Context, path string, offset int64, st
 			if json.Unmarshal(entry.Message, &msg) != nil {
 				continue
 			}
+			// A call this message proves can never be answered is emitted
+			// here, ahead of anything the message itself contributes — see
+			// piSupersedes.
+			if piSupersedes(msg) {
+				for _, call := range pending.release(func(classify.ToolCall) bool { return true }) {
+					events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{}))
+					seq++
+				}
+			}
 			switch msg.Role {
 			case "user":
 				text := piContentText(msg.Content)
@@ -509,14 +524,13 @@ func (a PiAdapter) ParseSince(ctx context.Context, path string, offset int64, st
 						Input:     block.Arguments,
 						Timestamp: entry.Timestamp,
 					}
-					pending[call.ID] = call
+					pending.put(call.ID, call)
 				}
 			case "toolResult":
-				call, ok := pending[msg.ToolCallID]
+				call, ok := pending.take(msg.ToolCallID)
 				if !ok {
 					continue
 				}
-				delete(pending, msg.ToolCallID)
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, call, classify.ToolResult{
 					Content: piContentText(msg.Content),
 					IsError: msg.IsError,
@@ -536,7 +550,7 @@ func (a PiAdapter) ParseSince(ctx context.Context, path string, offset int64, st
 				seq++
 			}
 		}
-		if len(pending) == 0 {
+		if pending.len() == 0 {
 			safeIdx, safeEvents, safeMarks = i, len(events), len(marks)
 		}
 	}
@@ -669,6 +683,34 @@ type piContentBlock struct {
 	ID        string         `json:"id"`
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
+}
+
+// piSupersedes reports whether msg, read after a pending tool call on the
+// same linearized chain, proves the call will never receive a result. Any
+// user or assistant message does. Pi's agent loop writes the results of a
+// response's calls before the turn ends — a response cut off at the token
+// limit gets an error result per call rather than none — and only then
+// writes the next user or assistant message: steering the user typed
+// mid-turn included. The one exception writes fewer results, never later
+// ones: an abort mid-batch stops the executor (sequential or parallel) at
+// the call it reached, and the calls after it are never run and never
+// answered. It defers everything else that could land mid-turn (an
+// extension's custom message, a user's own bash run, an oh-my-pi eval run)
+// to the end of the turn for exactly this reason: providers reject a
+// transcript with anything between a call and its result. So a call still
+// pending at the next user or assistant message was never run — its
+// response was aborted or errored mid-stream, and Pi runs no call from such
+// a response, or the user aborted its batch before reaching it — or its
+// process died running it. oh-my-pi, resuming a session whose process died,
+// writes an aborted assistant message that closes the turn.
+//
+// Checked against pi-mono's packages/agent/src/agent-loop.ts (runLoop,
+// executeToolCalls) and packages/coding-agent's AgentSession persistence,
+// and oh-my-pi's fork of both (createInterruptedTurnAbortMessage). No local
+// Pi store was available to replay, so unlike the Claude Code rule this one
+// rests on the source, not on transcripts.
+func piSupersedes(msg piMessage) bool {
+	return msg.Role == "user" || msg.Role == "assistant"
 }
 
 func isPiHeader(data []byte) bool {

@@ -28,6 +28,10 @@ import (
 // stays inside one conversation — parallel inline subagents, and a
 // subagent's own file — and that a line carrying a tool_result, no text, or
 // text opening with a tag never counts as a message the user typed.
+//
+// @joestump-agent 09/25/2026 - Added the Pi release (#103): any later user
+// or assistant message on the chain — and the OpenCode release: a later
+// assistant message in the session, where a queued prompt must not count.
 
 // TestClaudeCodeParseSinceReleasesOrphanedCall is the shape #103 reports: an
 // agent killed mid-call and then resumed. The resumed turn must be delivered,
@@ -613,4 +617,328 @@ func TestCrushParseFlushesOpenCallsInIssueOrder(t *testing.T) {
 			t.Fatalf("run %d: open calls flushed as %q, want issue order %q", run, got, want)
 		}
 	}
+}
+
+// --- Pi ---
+
+// piChain writes Pi session entries that each chain onto the one before, the
+// way Pi appends a linear conversation: every entry's parentId is the
+// previous entry's id.
+type piChain struct {
+	n    int
+	prev string
+}
+
+// entry is one chained entry of the given type; fields is the rest of the
+// record's JSON, without braces.
+func (c *piChain) entry(typ, fields, ts string) string {
+	c.n++
+	id := fmt.Sprintf("e%d", c.n)
+	line := `{"type":"` + typ + `","id":"` + id + `","parentId":"` + c.prev + `","timestamp":"` + ts + `",` + fields + `}` + "\n"
+	c.prev = id
+	return line
+}
+
+// user is a message the user typed.
+func (c *piChain) user(text, ts string) string {
+	return c.entry("message", `"message":{"role":"user","content":[{"type":"text","text":"`+text+`"}]}`, ts)
+}
+
+// calls is an assistant message issuing one bash call per id/command pair,
+// ending with stopReason — "toolUse" for a response whose calls Pi runs,
+// "aborted" for one the user interrupted mid-stream, whose calls it never
+// runs.
+func (c *piChain) calls(stopReason, ts string, idCmd ...string) string {
+	var blocks []string
+	for i := 0; i+1 < len(idCmd); i += 2 {
+		blocks = append(blocks, `{"type":"toolCall","id":"`+idCmd[i]+`","name":"bash","arguments":{"command":"`+idCmd[i+1]+`"}}`)
+	}
+	return c.entry("message", `"message":{"role":"assistant","model":"m","stopReason":"`+stopReason+`","content":[`+strings.Join(blocks, ",")+`]}`, ts)
+}
+
+// text is an assistant message of plain text.
+func (c *piChain) text(text, stopReason, ts string) string {
+	return c.entry("message", `"message":{"role":"assistant","model":"m","stopReason":"`+stopReason+`","content":[{"type":"text","text":"`+text+`"}]}`, ts)
+}
+
+// result is the toolResult message answering call id.
+func (c *piChain) result(id, ts string) string {
+	return c.entry("message", `"message":{"role":"toolResult","toolCallId":"`+id+`","toolName":"bash","content":[{"type":"text","text":"ok"}],"isError":false}`, ts)
+}
+
+// TestPiParseSinceReleasesOrphanedCall is the Pi shape of #103: a response
+// the user interrupted mid-stream keeps the calls it streamed, and Pi never
+// runs them, so they get no result; the next prompt follows. Pi writes every
+// result of a batch before the turn ends, and a user or assistant message
+// only at a turn boundary, so the prompt proves the call dead: it must be
+// emitted there, once, in position, and the watermark must move.
+func TestPiParseSinceReleasesOrphanedCall(t *testing.T) {
+	var c piChain
+	path := writeTempJSONL(t, "s.jsonl", piHeaderLine("s1", "2026-01-01T10:00:00Z")+
+		c.user("start", "2026-01-01T10:00:01Z")+
+		c.calls("toolUse", "2026-01-01T10:00:02Z", "c1", "echo c1")+
+		c.result("c1", "2026-01-01T10:00:03Z"))
+	a := PiAdapter{}
+	preOrphan := a.Watermark(t.Context(), path)
+
+	appendLines(t, path, c.calls("aborted", "2026-01-01T10:00:04Z", "c2", "echo orphan"))
+	events, marks, _, wm, err := a.ParseSince(t.Context(), path, preOrphan, 1)
+	if err != nil {
+		t.Fatalf("poll 1: ParseSince: %v", err)
+	}
+	if len(events) != 0 || len(marks) != 0 || wm != preOrphan {
+		t.Fatalf("poll 1: %d events, %d marks, watermark %d; want 0, 0, %d — nothing yet says c2 is dead", len(events), len(marks), wm, preOrphan)
+	}
+
+	appendLines(t, path, c.user("resumed", "2026-01-01T11:00:00Z")+
+		c.calls("toolUse", "2026-01-01T11:00:01Z", "c3", "echo c3")+
+		c.result("c3", "2026-01-01T11:00:02Z"))
+	events, marks, _, wm, err = a.ParseSince(t.Context(), path, wm, 1)
+	if err != nil {
+		t.Fatalf("poll 2: ParseSince: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("poll 2: got %d events, want the orphan and c3", len(events))
+	}
+	if events[0].Seq != 1 || events[0].ResultBytes != 0 || events[0].Summary != orphanSummary {
+		t.Errorf("poll 2: event 0 = %+v, want the orphan at seq 1 with no result", events[0])
+	}
+	if events[1].Seq != 2 || events[1].ResultBytes == 0 {
+		t.Errorf("poll 2: event 1 = %+v, want c3 at seq 2 with its result", events[1])
+	}
+	if len(marks) != 1 || marks[0].Note != "resumed" || marks[0].Seq != 2 {
+		t.Errorf("poll 2: marks = %+v, want the resumed turn's message at seq 2, after the orphan it superseded", marks)
+	}
+	if end := jsonlCompleteOffset(path); wm != end {
+		t.Errorf("poll 2: watermark = %d, want %d", wm, end)
+	}
+
+	events, marks, _, _, err = a.ParseSince(t.Context(), path, wm, 3)
+	if err != nil {
+		t.Fatalf("poll 3: ParseSince: %v", err)
+	}
+	if len(events) != 0 || len(marks) != 0 {
+		t.Errorf("poll 3: %d events, %d marks; want none", len(events), len(marks))
+	}
+
+	full, _, _, err := a.Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(full) != 3 || full[1].Summary != orphanSummary {
+		t.Errorf("Parse = %+v, want the orphan at seq 1, between c1 and c3", full)
+	}
+}
+
+// TestPiParseSinceHoldsSlowCall is the in-flight contract for Pi. Entries
+// written while a call runs — a parallel sibling's result, and the entries
+// that are not messages at all (an extension's custom message, a model or
+// session-name change, a label) — say nothing about it, so it is held until
+// its own result lands. Pi defers an extension's message and a user's own
+// bash run to the end of the turn precisely so neither lands between a call
+// and its result; they would not release it even if they did.
+func TestPiParseSinceHoldsSlowCall(t *testing.T) {
+	var c piChain
+	path := writeTempJSONL(t, "s.jsonl", piHeaderLine("s1", "2026-01-01T10:00:00Z")+
+		c.user("start", "2026-01-01T10:00:01Z"))
+	a := PiAdapter{}
+	start := a.Watermark(t.Context(), path)
+
+	appendLines(t, path, c.calls("toolUse", "2026-01-01T10:00:02Z", "c1", "sleep 600", "c2", "echo c2")+
+		c.result("c2", "2026-01-01T10:00:03Z")+
+		c.entry("custom_message", `"customType":"ext","content":"context","display":false`, "2026-01-01T10:00:04Z")+
+		c.entry("model_change", `"provider":"p","modelId":"m2"`, "2026-01-01T10:00:05Z")+
+		c.entry("session_info", `"name":"renamed"`, "2026-01-01T10:00:06Z")+
+		c.entry("label", `"targetId":"e2","label":"here"`, "2026-01-01T10:00:07Z"))
+	events, _, _, wm, err := a.ParseSince(t.Context(), path, start, 0)
+	if err != nil {
+		t.Fatalf("poll 1: ParseSince: %v", err)
+	}
+	if len(events) != 0 || wm != start {
+		t.Fatalf("poll 1: %d events, watermark %d; want 0 and %d — c1 is still running", len(events), wm, start)
+	}
+
+	appendLines(t, path, c.result("c1", "2026-01-01T10:10:00Z"))
+	events, _, _, _, err = a.ParseSince(t.Context(), path, wm, 0)
+	if err != nil {
+		t.Fatalf("poll 2: ParseSince: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("poll 2: got %d events, want c2 and c1", len(events))
+	}
+	assertOrphans(t, events)
+}
+
+// TestPiIncrementalMatchesFull runs the incremental==full oracle over Pi
+// sessions containing orphaned calls, each released where a later message
+// proves it dead — which used to hold the watermark forever, so this oracle
+// failed outright — alongside calls that resolve across poll boundaries.
+func TestPiIncrementalMatchesFull(t *testing.T) {
+	tests := []struct {
+		name    string
+		steps   func(c *piChain) [][]string
+		orphans []string
+	}{
+		{
+			name: "parallel calls resolving in later polls",
+			steps: func(c *piChain) [][]string {
+				return [][]string{
+					{c.calls("toolUse", "2026-01-01T10:00:02Z", "c1", "echo c1", "c2", "echo c2")},
+					{c.result("c1", "2026-01-01T10:00:03Z")},
+					{c.result("c2", "2026-01-01T10:00:04Z"), c.text("done", "stop", "2026-01-01T10:00:05Z")},
+				}
+			},
+		},
+		{
+			name: "an interrupted response's calls, released by the next prompt",
+			steps: func(c *piChain) [][]string {
+				return [][]string{
+					{c.calls("aborted", "2026-01-01T10:00:02Z", "c1", "echo orphan", "c2", "echo orphan")},
+					{c.user("resumed", "2026-01-01T11:00:00Z")},
+					{c.calls("toolUse", "2026-01-01T11:00:01Z", "c3", "echo c3")},
+					{c.result("c3", "2026-01-01T11:00:02Z")},
+				}
+			},
+			orphans: []string{"echo orphan"},
+		},
+		{
+			// oh-my-pi, resuming a session whose process died mid-call,
+			// writes an aborted assistant message to close the turn.
+			name: "a call its process died running, released by the next response",
+			steps: func(c *piChain) [][]string {
+				return [][]string{
+					{c.calls("toolUse", "2026-01-01T10:00:02Z", "c1", "echo c1", "c2", "echo orphan")},
+					{c.result("c1", "2026-01-01T10:00:03Z")},
+					{c.text("interrupted", "aborted", "2026-01-01T11:00:00Z")},
+					{c.user("go on", "2026-01-01T11:00:01Z"), c.calls("toolUse", "2026-01-01T11:00:02Z", "c3", "echo c3")},
+					{c.result("c3", "2026-01-01T11:00:03Z")},
+				}
+			},
+			orphans: []string{"echo orphan"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var c piChain
+			path := writeTempJSONL(t, "s.jsonl", piHeaderLine("s1", "2026-01-01T10:00:00Z")+
+				c.user("start", "2026-01-01T10:00:01Z"))
+			var steps []func(t *testing.T)
+			steps = append(steps, appendStep(path))
+			for _, lines := range tt.steps(&c) {
+				steps = append(steps, appendStep(path, lines...))
+			}
+			wm := assertIncrementalMatchesFull(t, &PiAdapter{}, path, steps)
+			if end := jsonlCompleteOffset(path); wm != end {
+				t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
+			}
+			events, _, _, err := PiAdapter{}.Parse(t.Context(), path)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			assertOrphans(t, events, tt.orphans...)
+		})
+	}
+}
+
+// --- OpenCode ---
+
+// ocTool is an OpenCode tool part running command in the given state.
+func ocTool(callID, cmd, status string) string {
+	extra := ""
+	if status == "completed" {
+		extra = `,"output":"ok"`
+	}
+	return `{"type":"tool","tool":"bash","callID":"` + callID + `","state":{"status":"` + status + `","input":{"command":"` + cmd + `"}` + extra + `}}`
+}
+
+// TestOpenCodeParseSinceReleasesOrphanedTool is the OpenCode shape of #103:
+// a tool part left running by a process that died, then the session resumed.
+// OpenCode runs one step at a time per session and, before its next
+// assistant message is created, marks every tool part of the step it ends
+// terminal ("Tool execution aborted" if nothing else) — so a later assistant
+// message proves the part will never finish. The part is emitted in place
+// with no result, where Parse has always put it, and everything after it is
+// delivered.
+func TestOpenCodeParseSinceReleasesOrphanedTool(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+	db, dbPath := openTestOpenCodeDB(t)
+	path := dbPath + "/ses_1"
+	a := OpenCodeAdapter{DBPath: dbPath}
+
+	steps := []func(t *testing.T){
+		func(t *testing.T) {
+			insertOpenCodeMessage(t, db, "m1", "ses_1", `{"role":"user","content":"start"}`, 1784148216000)
+			insertOpenCodeMessage(t, db, "m2", "ses_1", `{"role":"assistant"}`, 1784148217000)
+			insertOpenCodePart(t, db, "p1", "m2", "ses_1", ocTool("c1", "echo c1", "completed"), 1784148217100)
+			insertOpenCodePart(t, db, "p2", "m2", "ses_1", ocTool("c2", "echo orphan", "running"), 1784148217200)
+		},
+		// The process is gone; nothing in the session changes for a while.
+		func(t *testing.T) {},
+		func(t *testing.T) {
+			insertOpenCodeMessage(t, db, "m3", "ses_1", `{"role":"user","content":"resumed"}`, 1784150000000)
+		},
+		func(t *testing.T) {
+			insertOpenCodeMessage(t, db, "m4", "ses_1", `{"role":"assistant"}`, 1784150001000)
+			insertOpenCodePart(t, db, "p3", "m4", "ses_1", ocTool("c3", "echo c3", "completed"), 1784150001100)
+		},
+	}
+	wm := assertIncrementalMatchesFull(t, &a, path, steps)
+	if end := a.Watermark(t.Context(), path); wm != end {
+		t.Errorf("watermark = %d, want %d: the session ends with nothing in flight", wm, end)
+	}
+	events, marks, _, err := a.Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(events) != 3 || events[1].Summary != orphanSummary {
+		t.Fatalf("Parse = %+v, want the orphan at seq 1, between c1 and c3", events)
+	}
+	assertOrphans(t, events, "echo orphan")
+	if len(marks) != 2 || marks[1].Note != "resumed" || marks[1].Seq != 2 {
+		t.Errorf("marks = %+v, want the resumed turn's message at seq 2, after the orphan", marks)
+	}
+}
+
+// TestOpenCodeParseSinceHoldsRunningToolThroughQueuedPrompt is the in-flight
+// contract the release must not break. OpenCode writes a prompt sent while
+// the session is busy as a user message straight away and runs it after the
+// current step, and a subagent's assistant messages belong to its own child
+// session: neither says anything about a part still running, so it is held
+// until it turns terminal and then emitted once, with its result.
+func TestOpenCodeParseSinceHoldsRunningToolThroughQueuedPrompt(t *testing.T) {
+	resetDBCache()
+	t.Cleanup(resetDBCache)
+	db, dbPath := openTestOpenCodeDB(t)
+	path := dbPath + "/ses_1"
+	a := OpenCodeAdapter{DBPath: dbPath}
+
+	insertOpenCodeMessage(t, db, "m1", "ses_1", `{"role":"assistant"}`, 1784148217000)
+	insertOpenCodePart(t, db, "p1", "m1", "ses_1", ocTool("c1", "sleep 600", "running"), 1784148217100)
+	insertOpenCodeMessage(t, db, "m2", "ses_1", `{"role":"user","content":"and another thing"}`, 1784148218000)
+	insertOpenCodeMessage(t, db, "x1", "ses_2", `{"role":"assistant"}`, 1784148219000)
+	resetDBCache()
+	events, _, _, wm, err := a.ParseSince(t.Context(), path, 0, 0)
+	if err != nil {
+		t.Fatalf("poll 1: ParseSince: %v", err)
+	}
+	if len(events) != 0 || wm >= 1784148217100 {
+		t.Fatalf("poll 1: %d events, watermark %d; want 0 and a watermark below the running part — it is still running", len(events), wm)
+	}
+
+	if _, err := db.Exec(`UPDATE part SET time_updated = ?, data = ? WHERE id = 'p1'`,
+		1784148800000, ocTool("c1", "sleep 600", "completed")); err != nil {
+		t.Fatal(err)
+	}
+	insertOpenCodeMessage(t, db, "m3", "ses_1", `{"role":"assistant"}`, 1784148800100)
+	insertOpenCodePart(t, db, "p2", "m3", "ses_1", ocTool("c2", "echo c2", "completed"), 1784148800200)
+	resetDBCache()
+	events, _, _, _, err = a.ParseSince(t.Context(), path, wm, 0)
+	if err != nil {
+		t.Fatalf("poll 2: ParseSince: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("poll 2: got %d events, want c1 and c2", len(events))
+	}
+	assertOrphans(t, events)
 }
