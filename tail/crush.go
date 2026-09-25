@@ -518,6 +518,9 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 		}
 		role := m.role
 		finished := false
+		// The row's turn-end mark, placed after any call its step abandoned:
+		// those calls belong to the turn that ended.
+		var turnEnd *classify.Mark
 
 		for _, part := range m.parts {
 			switch part.Type {
@@ -546,6 +549,13 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 						Type:      "error",
 						Note:      crushFinishErrorNote(part.Data),
 					})
+				}
+				if role == "assistant" && crushEndsTurn(part.Data.Reason) {
+					turnEnd = &classify.Mark{
+						Timestamp: crushFinishTimestamp(part.Data, ts),
+						Type:      "turn-end",
+						Note:      part.Data.Reason,
+					}
 				}
 			case "tool_call":
 				callID := part.Data.ID
@@ -586,6 +596,10 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
 				seq++
 			}
+		}
+		if turnEnd != nil {
+			turnEnd.Seq = seq
+			marks = append(marks, *turnEnd)
 		}
 	}
 
@@ -797,6 +811,9 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 			continue
 		}
 		finished := false
+		// The row's turn-end mark, placed after any call its step abandoned:
+		// those calls belong to the turn that ended.
+		var turnEnd *classify.Mark
 		for _, part := range m.parts {
 			switch part.Type {
 			case "text":
@@ -824,6 +841,13 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 						Type:      "error",
 						Note:      crushFinishErrorNote(part.Data),
 					})
+				}
+				if role == "assistant" && crushEndsTurn(part.Data.Reason) {
+					turnEnd = &classify.Mark{
+						Timestamp: crushFinishTimestamp(part.Data, ts),
+						Type:      "turn-end",
+						Note:      part.Data.Reason,
+					}
 				}
 			case "tool_call":
 				callID := part.Data.ID
@@ -864,6 +888,10 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 				seq++
 			}
 		}
+		if turnEnd != nil {
+			turnEnd.Seq = seq
+			marks = append(marks, *turnEnd)
+		}
 		if pending.len() == 0 {
 			safe = append(safe, crushSafePoint{msgRow, len(events), len(marks)})
 		}
@@ -888,6 +916,22 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	}
 	sp := safe[len(safe)-1]
 	return events[:sp.events], marks[:sp.marks], meta, sp.row, nil
+}
+
+// crushEndsTurn reports whether an assistant row's finish reason ends the
+// turn successfully: end_turn, max_tokens, or content_filter (a provider
+// refusal, which Crush shows as the turn's answer). tool_use ends one step of
+// a turn whose next step follows; error has its own "error" mark; canceled
+// is a turn the user stopped and unknown one Crush could not classify, and
+// neither is a completed turn. Crush also writes finish parts, reason "stop",
+// on tool and user rows — those are not the model's, which is why callers
+// check the row's role too.
+func crushEndsTurn(reason string) bool {
+	switch reason {
+	case "end_turn", "max_tokens", "content_filter":
+		return true
+	}
+	return false
 }
 
 // crushShellFailRe matches the tail Crush writes on a shell result that did

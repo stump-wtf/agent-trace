@@ -339,6 +339,13 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 					Type:      "compaction",
 				})
 			}
+			if codexEndsTurn(payload.Type) {
+				marks = append(marks, classify.Mark{
+					Seq:       len(callOrder),
+					Timestamp: line.Timestamp,
+					Type:      "turn-end",
+				})
+			}
 			if payload.Type == "patch_apply_end" && payload.CallID != "" && directPatches[payload.CallID] {
 				if _, exists := patchResults[payload.CallID]; !exists {
 					patchResults[payload.CallID] = payload
@@ -598,6 +605,13 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 					Type:      "compaction",
 				})
 			}
+			if codexEndsTurn(payload.Type) {
+				marks = append(marks, classify.Mark{
+					Seq:       startSeq + len(callOrder),
+					Timestamp: line.Timestamp,
+					Type:      "turn-end",
+				})
+			}
 			if payload.Type == "patch_apply_end" && payload.CallID != "" && directPatches[payload.CallID] {
 				if _, exists := patchResults[payload.CallID]; !exists {
 					patchResults[payload.CallID] = payload
@@ -667,6 +681,16 @@ func codexReleaseOpenCalls(calls map[string]classify.ToolCall, results map[strin
 			results[id] = classify.ToolResult{}
 		}
 	}
+}
+
+// codexEndsTurn reports whether an event_msg type marks the end of a turn.
+// Codex persists a TurnComplete event to every rollout, serialized as
+// "task_complete" (with the turn's turn_id and its last agent message);
+// "turn_complete" is the alias Codex's own deserializer also accepts, the
+// twin of the task_started/turn_started pair above. An aborted turn is a
+// separate event (turn_aborted) and is not a turn end here.
+func codexEndsTurn(eventType string) bool {
+	return eventType == "task_complete" || eventType == "turn_complete"
 }
 
 // Codex-specific types.

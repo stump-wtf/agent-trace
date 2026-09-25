@@ -76,6 +76,18 @@ if watcher.IsIdle(sessionKey) {
 
 Each adapter has a `Dir` field for testing with temp directories. The Codex adapter also has `IndexPath` for title resolution from `session_index.jsonl`.
 
+Alongside events, `Parse` and `ParseSince` return `classify.Mark`s — timeline annotations that are not tool calls, each at the seq of the next tool event:
+
+| `Type` | Meaning | Agents |
+|---|---|---|
+| `user-message` | a message the user typed (harness-injected text is filtered) | all |
+| `compaction` | the context was compacted | Claude Code, Codex, OpenCode, Pi |
+| `subagent` | a subagent was launched | Claude Code, Codex, OpenCode |
+| `error` | a model call failed; `Note` says why | Claude Code, Crush |
+| `turn-end` | the agent finished its turn, dated by the boundary; `Note` is the agent's reason where it records one | Claude Code, Codex, Crush |
+
+`turn-end` comes from a Claude Code response's `stop_reason` (`end_turn`, `stop_sequence`, `max_tokens`, `refusal` — never `tool_use`), once per response even though Claude Code writes one line per content block; from Codex's `task_complete` event; and from a Crush assistant row's finish part (`end_turn`, `max_tokens`, `content_filter`). `ParseSince` delivers each exactly once across polls.
+
 ### `otel`
 
 Converts classified events and marks into OpenTelemetry span structs. Maps user messages to parent spans, tool calls to child spans, errors to status codes. Deterministic trace/span IDs enable idempotent re-submission.

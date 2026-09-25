@@ -233,8 +233,12 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := 0
+	// ccTurnEndID of the previous record; see ccTurnEndMark.
+	prevEndID := ""
 
 	err = ReadJSONLines(f, func(data []byte) {
+		thisEndID := ""
+		defer func() { prevEndID = thisEndID }()
 		var line ccRawLine
 		if json.Unmarshal(data, &line) != nil {
 			return
@@ -289,6 +293,12 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 		for _, p := range pending.release(func(p ccPendingCall) bool { return ccSupersedes(line, msg, p) }) {
 			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
 			seq++
+		}
+		if m, ok := ccTurnEndMark(line, msg, prevEndID, seq); ok {
+			marks = append(marks, m)
+		}
+		if ccEndsTurn(line, msg) {
+			thisEndID = msg.ID
 		}
 		if line.Type == "user" && hasCCUserMessage(msg.Content) {
 			text := ccUserMessageText(msg.Content)
@@ -442,6 +452,10 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 	// Watermark and result counts as of the last record that left no call
 	// outstanding — the point it is safe to resume from.
 	safeOffset, safeEvents, safeMarks := offset, 0, 0
+	// ccTurnEndID of the previous record; see ccTurnEndMark. Until the first
+	// record has been read it is not known: that record's predecessor sits
+	// before the offset and is read only if the first record needs it.
+	prevEndID, prevKnown := "", offset == 0
 
 	err = readCompleteJSONLines(f, offset, func(data []byte, end int64) {
 		defer func() {
@@ -449,6 +463,8 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 				safeOffset, safeEvents, safeMarks = end, len(events), len(marks)
 			}
 		}()
+		thisEndID := ""
+		defer func() { prevEndID, prevKnown = thisEndID, true }()
 
 		var line ccRawLine
 		if json.Unmarshal(data, &line) != nil {
@@ -498,6 +514,17 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 		for _, p := range pending.release(func(p ccPendingCall) bool { return ccSupersedes(line, msg, p) }) {
 			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
 			seq++
+		}
+		if !prevKnown && ccEndsTurn(line, msg) {
+			// The first record read may continue a response whose earlier
+			// lines precede the offset: look back at the one record before.
+			prevEndID = ccTurnEndID(jsonlLastLineBefore(path, offset))
+		}
+		if m, ok := ccTurnEndMark(line, msg, prevEndID, seq); ok {
+			marks = append(marks, m)
+		}
+		if ccEndsTurn(line, msg) {
+			thisEndID = msg.ID
 		}
 		if line.Type == "user" && hasCCUserMessage(msg.Content) {
 			text := ccUserMessageText(msg.Content)
@@ -579,10 +606,13 @@ type ccRawLine struct {
 type ccMessage struct {
 	// ID is the API response the line belongs to. Claude Code writes each
 	// content block of a response on a line of its own, all sharing it.
-	ID      string        `json:"id"`
-	Role    string        `json:"role"`
-	Model   string        `json:"model"`
-	Content ccContentList `json:"content"`
+	ID    string `json:"id"`
+	Role  string `json:"role"`
+	Model string `json:"model"`
+	// StopReason is why the API response stopped; see ccEndsTurn. null
+	// decodes to "".
+	StopReason string        `json:"stop_reason"`
+	Content    ccContentList `json:"content"`
 }
 
 // ccPendingCall is a tool_use waiting on its tool_result, with what a later
@@ -742,6 +772,73 @@ func ccAPIErrorMark(line ccRawLine, seq int) classify.Mark {
 		// specific to user messages.
 		Note: ccAPIErrorNote(code, status, ccUserMessageText(msg.Content)),
 	}
+}
+
+// ccEndsTurn reports whether a record is a model response that ends the
+// agent's turn: an assistant line whose stop_reason is end_turn,
+// stop_sequence, max_tokens or refusal. tool_use is not a boundary — the
+// agent runs the calls and sends the next request — and neither is
+// pause_turn, which the API returns to be resumed, nor a missing
+// stop_reason.
+//
+// Only the model's own responses in this conversation count. A failed API
+// call is a synthetic record with its own "error" mark, and the
+// "<synthetic>" "No response requested." record is written without calling
+// the model. An inline subagent line (isSidechain with no agentId, the older
+// layout that interleaves subagents with the parent) ends the subagent's
+// turn, not the session's; a subagent's own transcript carries its agentId
+// on every line, and its turn ends count.
+func ccEndsTurn(line ccRawLine, msg ccMessage) bool {
+	if line.Type != "assistant" || line.IsAPIErrorMessage || msg.Model == "<synthetic>" {
+		return false
+	}
+	if line.IsSidechain && line.AgentID == "" {
+		return false
+	}
+	switch msg.StopReason {
+	case "end_turn", "stop_sequence", "max_tokens", "refusal":
+		return true
+	}
+	return false
+}
+
+// ccTurnEndID returns the message ID of a raw record that ends a turn (see
+// ccEndsTurn), or "" when it does not, has no ID, or is nil.
+func ccTurnEndID(data []byte) string {
+	var line ccRawLine
+	if len(data) == 0 || json.Unmarshal(data, &line) != nil || len(line.Message) == 0 {
+		return ""
+	}
+	var msg ccMessage
+	if json.Unmarshal(line.Message, &msg) != nil || !ccEndsTurn(line, msg) {
+		return ""
+	}
+	return msg.ID
+}
+
+// ccTurnEndMark returns the "turn-end" mark a record contributes, if any: at
+// the given seq, dated by the record, noted with its stop_reason. prevEndID is
+// ccTurnEndID of the record immediately before this one.
+//
+// Claude Code writes each content block of a response on its own line, and
+// current versions copy the final stop_reason onto every one of them, so a
+// thinking-then-text response is two end_turn lines; older versions, and
+// subagent transcripts, put null on all but the last. One response is one
+// turn end: a line that continues the previous record's turn-ending response
+// adds nothing, so the mark lands on the first line carrying the boundary.
+//
+// Deciding from the one record before, rather than every response ever
+// marked, is what lets ParseSince resume mid-response with a single bounded
+// read (jsonlLastLineBefore) and still agree with Parse. The cost is a
+// response whose lines are split by another record — seen once in ~1,600
+// multi-line responses across local transcripts — which marks twice, and a
+// turn-ending line over jsonlLastLineCap, which ParseSince cannot look back
+// at and so marks its continuation too.
+func ccTurnEndMark(line ccRawLine, msg ccMessage, prevEndID string, seq int) (classify.Mark, bool) {
+	if !ccEndsTurn(line, msg) || (msg.ID != "" && msg.ID == prevEndID) {
+		return classify.Mark{}, false
+	}
+	return classify.Mark{Seq: seq, Timestamp: line.Timestamp, Type: "turn-end", Note: msg.StopReason}, true
 }
 
 // ccAPIErrorNote formats a failed API call's note so that its front is

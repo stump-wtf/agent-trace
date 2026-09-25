@@ -513,8 +513,11 @@ func TestCrushParseSinceReleasesCallItsStepAbandoned(t *testing.T) {
 	if events[1].Seq != 1 || events[1].ResultBytes == 0 {
 		t.Errorf("poll 3: event 1 = %+v, want c2 at seq 1 with its result", events[1])
 	}
-	if len(marks) != 2 || marks[0].Note != "resumed" || marks[0].Seq != 1 || marks[1].Type != "error" || marks[1].Seq != 2 {
-		t.Errorf("poll 3: marks = %+v, want the resumed message at seq 1 and the error at seq 2", marks)
+	// The max_tokens step ended its turn, so its row also carries a turn-end,
+	// placed after the call it abandoned.
+	if len(marks) != 3 || marks[0].Type != "turn-end" || marks[0].Note != "max_tokens" || marks[0].Seq != 1 ||
+		marks[1].Note != "resumed" || marks[1].Seq != 1 || marks[2].Type != "error" || marks[2].Seq != 2 {
+		t.Errorf("poll 3: marks = %+v, want the turn end and the resumed message at seq 1 and the error at seq 2", marks)
 	}
 	if end := a.Watermark(t.Context(), path); wm != end {
 		t.Errorf("poll 3: watermark = %d, want %d", wm, end)

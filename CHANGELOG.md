@@ -71,6 +71,25 @@ breaking changes arrive in minor releases. See the note under
   rather than last, where `Parse` used to place it — the change v0.3.0 made
   for Claude Code and Crush. Every Pi event and mark after such a call moves
   up by one, per orphan.
+### Added
+
+- `turn-end` marks: `tail` now reports where an agent finished its turn,
+  dated by the boundary record, as the closing counterpart of
+  `user-message`. No reader reported one before, so a consumer could only
+  guess a turn was over from silence — harness's graceful shutdown waited out
+  a quiet period, and its metrics could not count a turn that ended in text
+  alone. Claude Code marks a response whose `stop_reason` is `end_turn`,
+  `stop_sequence`, `max_tokens` or `refusal` (never `tool_use`), noted with
+  that reason, once per response although Claude Code writes one line per
+  content block and current versions repeat the stop_reason on each;
+  failed-call, `<synthetic>` and inline-subagent records never count. Codex
+  marks its `task_complete` event (alias `turn_complete`). Crush marks an
+  assistant row's finish part with reason `end_turn`, `max_tokens` or
+  `content_filter`, dated by the part's own time; its `error` finish mark is
+  unchanged. `ParseSince` delivers each exactly once, including when a poll
+  stops between two lines of one Claude Code response. Pi and OpenCode emit
+  none yet. `otel` makes no span for the mark, but a turn's last tool span
+  now ends at the turn end instead of stretching to the next user message.
 
 ## [0.5.0] - 2026-09-24
 

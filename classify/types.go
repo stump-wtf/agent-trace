@@ -56,8 +56,10 @@ type OutsideTouch struct {
 	Path  string `json:"path"`
 }
 
-// Mark is a non-tool timeline annotation: user messages, context compactions,
-// subagent launches. Marks carry turn boundaries that Events do not.
+// Mark is a non-tool timeline annotation. Type is one of "user-message",
+// "compaction", "subagent", "error" (a failed model call) or "turn-end" (the
+// agent finished its turn; Note carries the agent's own reason where it
+// records one). Marks carry turn boundaries that Events do not.
 type Mark struct {
 	Seq       int    `json:"seq"`
 	Timestamp string `json:"ts,omitempty"`
