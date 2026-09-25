@@ -11,6 +11,20 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Fixed
+
+- The Crush adapter flags a failed shell command as `IsError`, from both
+  `Parse` and `ParseSince` (#115). Crush returns a non-zero exit as an
+  ordinary text response, so the part's `is_error` stays false and a failed
+  build or test read as a success in `Summary`, the span status and
+  `ErrorExcerpt`. A `bash` or `job_output` result whose last line is
+  `Exit code N` (N non-zero) or `Command was aborted before completion` —
+  before the `<cwd>…</cwd>` block `bash` appends — now sets `IsError`. The
+  rule is anchored to the end of the text, so an exit line earlier in the
+  output, or any other tool's text, is not a failure. This changes `IsError`,
+  `Summary` and span status for existing consumers of Crush events. The
+  OpenCode adapter is unchanged.
+
 ## [0.5.0] - 2026-09-24
 
 ### Added
