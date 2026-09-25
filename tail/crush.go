@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -575,10 +576,7 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 				if !ok {
 					continue
 				}
-				result := classify.ToolResult{
-					Content: part.Data.Content,
-					IsError: part.Data.IsError,
-				}
+				result := crushToolResult(p.call.Name, part.Data)
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
 				seq++
 			}
@@ -855,7 +853,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 				if !ok {
 					continue
 				}
-				result := classify.ToolResult{Content: part.Data.Content, IsError: part.Data.IsError}
+				result := crushToolResult(p.call.Name, part.Data)
 				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
 				seq++
 			}
@@ -892,6 +890,38 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	return events[:sp.events], marks[:sp.marks], meta, sp.row, nil
 }
 
+// crushShellFailRe matches the tail Crush writes on a shell result that did
+// not succeed: an "Exit code N" line for a non-zero exit, or "Command was
+// aborted before completion" for an interrupted command, as the last line,
+// optionally followed by the "<cwd>…</cwd>" block the bash tool appends after
+// it. Crush never writes "Exit code 0".
+var crushShellFailRe = regexp.MustCompile(`(?:\A|\n)(?:Exit code [1-9][0-9]*|Command was aborted before completion)(?:\n\n<cwd>[^\n]*</cwd>)?\z`)
+
+// crushShellFailed reports whether a Crush bash or job_output result records
+// a failed command. Crush returns a non-zero exit as an ordinary text
+// response, so the tool_result part's is_error stays false and the text is
+// the only record of the failure (#115). The rule is anchored to the end of
+// the content, where formatOutput (bash) and job_output put the line, so an
+// exit line earlier in the output, or any other tool's text, is not a failure.
+func crushShellFailed(tool, content string) bool {
+	switch tool {
+	case "bash", "job_output":
+		return crushShellFailRe.MatchString(content)
+	}
+	return false
+}
+
+// crushToolResult builds the result for a tool_result part answering a call
+// to tool. Parse and ParseSince both go through it so they cannot disagree on
+// IsError: the part's own flag, or a shell result whose text records a failed
+// command (crushShellFailed).
+func crushToolResult(tool string, d crushPartData) classify.ToolResult {
+	return classify.ToolResult{
+		Content: d.Content,
+		IsError: d.IsError || crushShellFailed(tool, d.Content),
+	}
+}
+
 type crushPart struct {
 	Type string        `json:"type"`
 	Data crushPartData `json:"data"`
@@ -908,7 +938,7 @@ type crushPartData struct {
 	// tool returns an error response (a missing file, an edit that did not
 	// apply, arguments that were not valid JSON, a cancelled call), but not
 	// for a shell command that exits non-zero: that is a normal response
-	// whose text ends "Exit code N".
+	// whose text ends "Exit code N", which crushShellFailed reads instead.
 	IsError bool   `json:"is_error"`
 	Text    string `json:"text"`
 	// Reason, Message, Details and Time are a finish part's fields. Reason is
