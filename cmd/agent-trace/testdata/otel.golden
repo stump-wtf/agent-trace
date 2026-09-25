@@ -1,0 +1,111 @@
+{
+  "session": {
+    "cwd": "/home/user/project",
+    "endedAt": "2026-01-01T10:00:09Z",
+    "gitBranch": "main",
+    "harness": "claude-code",
+    "id": "cli-session-1",
+    "key": "<id-0>",
+    "model": "claude-sonnet-4-20250514",
+    "path": "testdata/claude-code.jsonl",
+    "startedAt": "2026-01-01T10:00:00Z",
+    "title": "claude-code.jsonl"
+  },
+  "spans": [
+    {
+      "attributes": {
+        "agent.session.harness": "claude-code",
+        "agent.session.id": "cli-session-1",
+        "agent.turn.type": "user-message"
+      },
+      "endTime": "2026-01-01T10:00:05Z",
+      "kind": 0,
+      "name": "deploy the fix, the staging password: [REDACTED]",
+      "spanId": "<id-1>",
+      "startTime": "2026-01-01T10:00:01Z",
+      "status": 1,
+      "traceId": "<id-2>"
+    },
+    {
+      "attributes": {
+        "agent.result.bytes": 21,
+        "agent.session.id": "cli-session-1",
+        "agent.targets": "deploy.sh",
+        "agent.tool.action": "read",
+        "agent.tool.name": "Read"
+      },
+      "endTime": "2026-01-01T10:00:03Z",
+      "kind": 0,
+      "name": "Read -> 1 targets, 0 outside",
+      "parentSpanId": "<id-1>",
+      "spanId": "<id-3>",
+      "startTime": "2026-01-01T10:00:01Z",
+      "status": 1,
+      "traceId": "<id-2>"
+    },
+    {
+      "attributes": {
+        "agent.result.bytes": 60,
+        "agent.session.id": "cli-session-1",
+        "agent.tool.action": "exec",
+        "agent.tool.name": "Bash"
+      },
+      "endTime": "2026-01-01T10:00:05Z",
+      "kind": 0,
+      "name": "http POST https://example.com/deploy 'Authorization: Bearer [REDACTED]' -> 0 targets, 0 outside error",
+      "parentSpanId": "<id-1>",
+      "spanId": "<id-4>",
+      "startTime": "2026-01-01T10:00:03Z",
+      "status": 2,
+      "statusMsg": "http POST https://example.com/deploy 'Authorization: Bearer [REDACTED]' -> 0 targets, 0 outside error",
+      "traceId": "<id-2>"
+    },
+    {
+      "attributes": {
+        "agent.result.bytes": 21,
+        "agent.session.id": "cli-session-1",
+        "agent.tool.action": "exec",
+        "agent.tool.name": "Bash"
+      },
+      "endTime": "2026-01-01T10:00:08Z",
+      "kind": 0,
+      "name": "git push https://ci:[REDACTED]@example.com/repo.git -> 0 targets, 0 outside",
+      "parentSpanId": "<id-1>",
+      "spanId": "<id-5>",
+      "startTime": "2026-01-01T10:00:05Z",
+      "status": 1,
+      "traceId": "<id-2>"
+    },
+    {
+      "attributes": {
+        "agent.session.harness": "claude-code",
+        "agent.session.id": "cli-session-1",
+        "agent.turn.type": "user-message"
+      },
+      "endTime": "2026-01-01T10:00:08Z",
+      "kind": 0,
+      "name": "now run the tests",
+      "spanId": "<id-6>",
+      "startTime": "2026-01-01T10:00:08Z",
+      "status": 1,
+      "traceId": "<id-2>"
+    },
+    {
+      "attributes": {
+        "agent.result.bytes": 2,
+        "agent.session.id": "cli-session-1",
+        "agent.tool.action": "verify",
+        "agent.tool.name": "Bash"
+      },
+      "endTime": "2026-01-01T10:00:08Z",
+      "kind": 0,
+      "name": "go test ./... -> 0 targets, 0 outside",
+      "parentSpanId": "<id-6>",
+      "spanId": "<id-7>",
+      "startTime": "2026-01-01T10:00:08Z",
+      "status": 1,
+      "traceId": "<id-2>"
+    }
+  ],
+  "traceId": "<id-2>"
+}

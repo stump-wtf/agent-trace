@@ -1,4 +1,5 @@
 # Go
+/agent-trace
 *.out
 *.prof
 coverage.txt

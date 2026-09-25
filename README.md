@@ -123,6 +123,35 @@ err := otel.WriteJSON(os.Stdout, trace)
 
 No `time.Now()` — missing timestamps fall back to the nearest event, then `SessionMeta.StartedAt`, then zero. Building the same trace twice produces identical timings.
 
+## CLI
+
+`cmd/agent-trace` runs one transcript through the same pipeline Harness uses — a `tail` adapter, `classify`, and for `otel` the span builder — and writes the result to stdout, for shell pipelines, CI jobs and debugging a run by hand.
+
+```sh
+go install github.com/stump-wtf/agent-trace/cmd/agent-trace@latest
+
+# The session, then its marks and events in seq order: one JSON record per line.
+agent-trace normalize --harness claude-code ~/.claude/projects/<project>/<session>.jsonl
+
+# One otel.BuildTrace object ({traceId, session, spans}), the shape Cairn's trace ingest takes.
+agent-trace otel --harness codex ~/.codex/sessions/2026/09/25/rollout-<id>.jsonl
+
+# SQLite-backed harnesses name the database and the session.
+agent-trace normalize --harness crush <path/to/crush.db>/<session-id>
+```
+
+`--harness` is one of `claude-code`, `codex`, `crush`, `omp`, `opencode`, `pi`. Each `normalize` line is `{"kind":"session","session":{…}}`, `{"kind":"mark","mark":{…}}` or `{"kind":"event","event":{…}}`; a mark sorts ahead of an event with the same `seq`, the order `otel.BuildTrace` reads them in.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--harness <name>` | required | the adapter that parses the transcript |
+| `--error-excerpt-bytes <n>` | `0` | keep up to *n* bytes of each errored result's text on `errorExcerpt` (see `classify.Options.ErrorExcerptBytes`) |
+| `--no-redact` | off | write text fields unredacted |
+
+**Redaction is on by default.** Event summaries, mark notes, the session title and error excerpts pass through a pattern-based redactor before anything is written — Authorization headers, bearer tokens, URL and `curl -u` passwords, `key=value` pairs and `--flag value` arguments whose key names a credential, PEM private keys, and GitHub, OpenAI-style, Slack, AWS and JWT token shapes become `[REDACTED]`. The error excerpt is redacted through `classify.Options.Redact`, before it is cut. It is best-effort: `classify` truncates a summary before the CLI sees it, so a token cut short there can survive in part. Paths are not redacted, and `inputDigest` is a hash of the raw arguments.
+
+Exit status is 0 on success, 1 when the transcript cannot be read, and 2 on a usage error. Reading a structured stream from standard input (`-`, or no transcript) is reserved for the planned `io.Reader` stream API and fails with an error until that lands.
+
 ## Architecture
 
 ```
@@ -135,7 +164,7 @@ One-way data flow. `classify` is the pure core. `tail` does I/O and passes `Opti
 
 ```sh
 make test    # go test ./...
-make lint    # gofmt + go vet
+make lint    # gofmt + go vet + golangci-lint
 make check   # lint + test
 ```
 

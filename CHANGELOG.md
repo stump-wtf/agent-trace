@@ -107,6 +107,18 @@ breaking changes arrive in minor releases. See the note under
   marks; only the prompt's user-message mark is transcript-only, because -p
   does not echo the prompt. A subagent's records, which share the parent's
   stream, pair within their own conversation.
+- `cmd/agent-trace`, a CLI over the library. `agent-trace normalize --harness
+  <name> <transcript>` writes the session, its marks and its events as JSONL,
+  one `{"kind": "session"|"mark"|"event", …}` record per line in seq order;
+  `agent-trace otel --harness <name> <transcript>` writes `otel.BuildTrace`'s
+  JSON. Every adapter is reachable (`claude-code`, `codex`, `crush`, `omp`,
+  `opencode`, `pi`), so a shell pipeline or CI job gets the records Harness
+  would build. Output is redacted by default: summaries, mark notes, session
+  titles and error excerpts pass through a pattern-based credential redactor,
+  the excerpt through `classify.Options.Redact` before it is cut;
+  `--no-redact` turns it off and `--error-excerpt-bytes` opts in to excerpts.
+  Reading a stream from standard input (`-`) is reserved for #132 and returns
+  an error until then.
 
 ## [0.5.0] - 2026-09-24
 

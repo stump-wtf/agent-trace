@@ -1,0 +1,93 @@
+{
+  "kind": "session",
+  "session": {
+    "cwd": "/home/user/project",
+    "endedAt": "2026-01-01T10:00:09Z",
+    "gitBranch": "main",
+    "harness": "claude-code",
+    "id": "cli-session-1",
+    "key": "<id-0>",
+    "model": "claude-sonnet-4-20250514",
+    "path": "testdata/claude-code.jsonl",
+    "startedAt": "2026-01-01T10:00:00Z",
+    "title": "claude-code.jsonl"
+  }
+}
+{
+  "kind": "mark",
+  "mark": {
+    "note": "deploy the fix, the staging password: [REDACTED]",
+    "seq": 0,
+    "type": "user-message"
+  }
+}
+{
+  "event": {
+    "action": "read",
+    "inputDigest": "4a69beb00d4ff9e79cf3072954a0940b1875882d4fc02a66b50e79f5cf585aa5",
+    "isError": false,
+    "resultBytes": 21,
+    "seq": 0,
+    "summary": "Read -> 1 targets, 0 outside",
+    "targets": [
+      {
+        "path": "deploy.sh",
+        "touch": "read"
+      }
+    ],
+    "tool": "Read",
+    "ts": "2026-01-01T10:00:01Z"
+  },
+  "kind": "event"
+}
+{
+  "event": {
+    "action": "exec",
+    "errorExcerpt": "401 Unauthorized: token=[REDACTED] was rejected",
+    "inputDigest": "a291ea21c51852a6e6816d82c70707ac2dc444847e44a51517a10836e67c42d8",
+    "isError": true,
+    "resultBytes": 60,
+    "seq": 1,
+    "summary": "http POST https://example.com/deploy 'Authorization: Bearer [REDACTED]' -> 0 targets, 0 outside error",
+    "targets": [],
+    "tool": "Bash",
+    "ts": "2026-01-01T10:00:03Z"
+  },
+  "kind": "event"
+}
+{
+  "event": {
+    "action": "exec",
+    "inputDigest": "fb5faeed5ed5e985de3761f8939a69751a2d0ca15fcebb3ac77f736d8ea5c9ea",
+    "isError": false,
+    "resultBytes": 21,
+    "seq": 2,
+    "summary": "git push https://ci:[REDACTED]@example.com/repo.git -> 0 targets, 0 outside",
+    "targets": [],
+    "tool": "Bash",
+    "ts": "2026-01-01T10:00:05Z"
+  },
+  "kind": "event"
+}
+{
+  "kind": "mark",
+  "mark": {
+    "note": "now run the tests",
+    "seq": 3,
+    "type": "user-message"
+  }
+}
+{
+  "event": {
+    "action": "verify",
+    "inputDigest": "d7e5989af12b7e6bbe4472506ac9626e0f9e63fd4449d65b80dd012652e6610c",
+    "isError": false,
+    "resultBytes": 2,
+    "seq": 3,
+    "summary": "go test ./... -> 0 targets, 0 outside",
+    "targets": [],
+    "tool": "Bash",
+    "ts": "2026-01-01T10:00:08Z"
+  },
+  "kind": "event"
+}

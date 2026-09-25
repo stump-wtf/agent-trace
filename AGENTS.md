@@ -84,6 +84,12 @@ Converts classified events + marks into a `Trace` of deterministic `Span` struct
 
 **Export:** `WriteJSON(trace, w io.Writer)` serializes a Trace as OTLP-compatible JSON.
 
+### `cmd/agent-trace` — the CLI
+
+`normalize` and `otel` subcommands over one transcript: pick the adapter by `--harness`, `Parse`, redact, then write JSONL records (`{"kind":"session"|"mark"|"event",…}`, merged by seq, a mark ahead of an event sharing its seq) or `otel.BuildTrace` JSON. `run(ctx, args, stdin, stdout, stderr) int` is `main` without the process; tests drive it in-process against `testdata/claude-code.jsonl` and compare with `testdata/*.golden` (`go test ./cmd/agent-trace -update` rewrites them; session keys and trace/span IDs are placeholdered because they hash the checkout's absolute path).
+
+Redaction (`redact.go`) is on by default: `defaultRedact` goes into `classify.Options.Redact`, so an error excerpt is redacted before it is cut, and `redactAll` covers `Summary`, `Mark.Note` and `SessionMeta.Title` after parsing. Test token shapes are assembled at run time (`fake`) so gitleaks never sees a literal. Standard input (`-`, or no transcript) returns `errStdinUnsupported` until the stream API (#132) lands; the `src == "-"` branch in `load` is where it plugs in.
+
 ### `internal/strutil` — shared string utilities
 
 Contains `TruncateRunes(s, max, suffix)` used by the classify and tail packages. Eliminates the former duplication of `truncateRunes`. (`otel` keeps its own unexported `truncate`.)
