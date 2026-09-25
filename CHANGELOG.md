@@ -11,6 +11,8 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-25
+
 ### Fixed
 
 - Setting `WatchConfig.VerifyPatterns` or `WatchConfig.ErrorExcerptBytes`
@@ -119,7 +121,6 @@ breaking changes arrive in minor releases. See the note under
   `--no-redact` turns it off and `--error-excerpt-bytes` opts in to excerpts.
   Reading a stream from standard input (`-`) is reserved for #132 and returns
   an error until then.
-### Added
 
 - `classify.Usage`: token usage, recorded cost, and the served model and
   provider, as a third item kind beside events and marks (#105). A `Usage`
@@ -591,7 +592,8 @@ The module path lives on the GitHub mirror because Go resolves versions there.
 Tags are created on Gitea and reach GitHub through the push mirror — never tag the
 mirror directly, as the next sync prunes refs the source does not have.
 
-[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.6.0
 [0.5.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.5.0
 [0.4.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.4.0
 [0.3.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.3.0
