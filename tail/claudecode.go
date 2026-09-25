@@ -216,11 +216,19 @@ func (a ClaudeCodeAdapter) Summarize(ctx context.Context, path string) (SessionM
 }
 
 // Parse reads a complete session file and returns all tool call/result pairs
-// as classified events, plus timeline marks.
+// as classified events, plus timeline marks. It is ParseItems without the
+// usage reports.
 func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+	items, meta, err := a.ParseItems(ctx, path)
+	return items.Events, items.Marks, meta, err
+}
+
+// ParseItems implements ItemParser: Parse, plus one classify.Usage per API
+// response that recorded usage (see ccUsageTracker).
+func (a ClaudeCodeAdapter) ParseItems(ctx context.Context, path string) (Items, SessionMeta, error) {
 	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
-		return nil, nil, SessionMeta{}, err
+		return Items{}, SessionMeta{}, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -231,9 +239,12 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 	}
 	var events []classify.Event
 	var marks []classify.Mark
+	var usage []classify.Usage
+	usageSeen := newCCUsageTracker("", 0)
 	rec := newCCRecorder(opts, &meta,
 		func(e classify.Event) { events = append(events, e) },
-		func(m classify.Mark) { marks = append(marks, m) })
+		func(m classify.Mark) { marks = append(marks, m) },
+		usageSeen, func(u classify.Usage) { usage = append(usage, u) })
 
 	err = ReadJSONLines(f, func(data []byte) {
 		var line ccRawLine
@@ -254,9 +265,9 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 		meta.Title = filepath.Base(path)
 	}
 	if !recognized {
-		return nil, nil, SessionMeta{}, fmt.Errorf("not a Claude Code session: %s", path)
+		return Items{}, SessionMeta{}, fmt.Errorf("not a Claude Code session: %s", path)
 	}
-	return events, marks, meta, err
+	return Items{Events: events, Marks: marks, Usage: usage}, meta, err
 }
 
 // ccFoldMeta folds the session metadata a record carries into meta.
@@ -304,15 +315,23 @@ type ccRecorder struct {
 	endID string
 	event func(classify.Event)
 	mark  func(classify.Mark)
+	// usageSeen and usage are the optional usage plumbing: when usageSeen is
+	// non-nil, every Usage it reports is handed to usage (see ccUsageTracker).
+	// Parse/ParseItems set both; ParseStream leaves them nil — a stream pipe
+	// carries no usage.
+	usageSeen *ccUsageTracker
+	usage     func(classify.Usage)
 }
 
-func newCCRecorder(opts *classify.Options, meta *SessionMeta, event func(classify.Event), mark func(classify.Mark)) *ccRecorder {
+func newCCRecorder(opts *classify.Options, meta *SessionMeta, event func(classify.Event), mark func(classify.Mark), usageSeen *ccUsageTracker, usage func(classify.Usage)) *ccRecorder {
 	return &ccRecorder{
-		opts:    opts,
-		meta:    meta,
-		pending: newPendingCalls[ccPendingCall](),
-		event:   event,
-		mark:    mark,
+		opts:      opts,
+		meta:      meta,
+		pending:   newPendingCalls[ccPendingCall](),
+		event:     event,
+		mark:      mark,
+		usageSeen: usageSeen,
+		usage:     usage,
 	}
 }
 
@@ -354,6 +373,11 @@ func (r *ccRecorder) record(line ccRawLine) {
 	// ahead of anything the record itself contributes — see ccSupersedes.
 	for _, p := range r.pending.release(func(p ccPendingCall) bool { return ccSupersedes(line, msg, p) }) {
 		r.emit(p.call, classify.ToolResult{})
+	}
+	if r.usageSeen != nil {
+		if u, ok := r.usageSeen.report(line, msg, r.seq); ok {
+			r.usage(u)
+		}
 	}
 	// The turn boundary this record ends, if it ends one (#102). A response
 	// spans several lines sharing message.id and current versions copy the
@@ -469,22 +493,32 @@ func sessionHeadCwd(path string) string {
 // empty result, exactly where Parse emits it. Until such a record arrives it
 // is indistinguishable from a slow call, and holds the watermark like one.
 func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+	items, meta, wm, err := a.ParseItemsSince(ctx, path, offset, startSeq)
+	return items.Events, items.Marks, meta, wm, err
+}
+
+// ParseItemsSince implements ItemParser: ParseSince, plus the usage reports
+// in the same window, withheld past the watermark with everything else. A
+// read that resumes partway through an API response's records recognises
+// the response from the records before the watermark (ccUsageTracker), so
+// its usage is not reported a second time.
+func (a ClaudeCodeAdapter) ParseItemsSince(ctx context.Context, path string, offset int64, startSeq int) (Items, SessionMeta, int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, nil, SessionMeta{}, 0, err
+		return Items{}, SessionMeta{}, 0, err
 	}
 	// If the file shrank (truncation/rotation), reset to full parse.
 	if info.Size() < offset {
-		return nil, nil, SessionMeta{}, 0, nil
+		return Items{}, SessionMeta{}, 0, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, SessionMeta{}, 0, err
+		return Items{}, SessionMeta{}, 0, err
 	}
 	defer func() { _ = f.Close() }()
 	if offset > 0 {
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return nil, nil, SessionMeta{}, 0, err
+			return Items{}, SessionMeta{}, 0, err
 		}
 	}
 
@@ -495,6 +529,8 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 	pending := newPendingCalls[ccPendingCall]()
 	var events []classify.Event
 	var marks []classify.Mark
+	var usage []classify.Usage
+	usageSeen := newCCUsageTracker(path, offset)
 	seq := startSeq
 	meta := SessionMeta{
 		Key:     sessionKey(string(a.Harness()), path),
@@ -506,7 +542,7 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 
 	// Watermark and result counts as of the last record that left no call
 	// outstanding — the point it is safe to resume from.
-	safeOffset, safeEvents, safeMarks := offset, 0, 0
+	safeOffset, safeEvents, safeMarks, safeUsage := offset, 0, 0, 0
 	// ccTurnEndID of the previous record; see ccTurnEndMark. Until the first
 	// record has been read it is not known: that record's predecessor sits
 	// before the offset and is read only if the first record needs it.
@@ -515,7 +551,7 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 	err = readCompleteJSONLines(f, offset, func(data []byte, end int64) {
 		defer func() {
 			if pending.len() == 0 {
-				safeOffset, safeEvents, safeMarks = end, len(events), len(marks)
+				safeOffset, safeEvents, safeMarks, safeUsage = end, len(events), len(marks), len(usage)
 			}
 		}()
 		thisEndID := ""
@@ -569,6 +605,9 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 		for _, p := range pending.release(func(p ccPendingCall) bool { return ccSupersedes(line, msg, p) }) {
 			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
 			seq++
+		}
+		if u, ok := usageSeen.report(line, msg, seq); ok {
+			usage = append(usage, u)
 		}
 		if !prevKnown && ccEndsTurn(line, msg) {
 			// The first record read may continue a response whose earlier
@@ -626,13 +665,14 @@ func (a ClaudeCodeAdapter) ParseSince(ctx context.Context, path string, offset i
 		meta.Title = filepath.Base(path)
 	}
 
-	return events[:safeEvents], marks[:safeMarks], meta, safeOffset, err
+	return Items{Events: events[:safeEvents], Marks: marks[:safeMarks], Usage: usage[:safeUsage]}, meta, safeOffset, err
 }
 
 // Tail-specific types for Claude Code JSONL format.
 
 type ccRawLine struct {
 	Type        string          `json:"type"`
+	RequestID   string          `json:"requestId"`
 	Timestamp   string          `json:"timestamp"`
 	SessionID   string          `json:"sessionId"`
 	AgentID     string          `json:"agentId"`
@@ -668,6 +708,127 @@ type ccMessage struct {
 	// decodes to "".
 	StopReason string        `json:"stop_reason"`
 	Content    ccContentList `json:"content"`
+	// Usage is the response's token usage. Every line of a response repeats
+	// it; see ccUsageTracker.
+	Usage *ccUsage `json:"usage"`
+}
+
+// ccUsage is the part of an Anthropic usage object a Usage reports. Its four
+// counts are already disjoint: input_tokens excludes the cached prompt.
+type ccUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+// ccUsageTracker turns the usage Claude Code repeats on every record of an
+// API response into one classify.Usage per response.
+//
+// Claude Code writes each content block of a response — thinking, text, each
+// tool_use — on a line of its own, and every one of those lines carries the
+// whole response's usage. Across 61,000 responses in local transcripts the
+// copies agreed in all but two, both from one older build that wrote a
+// partial output_tokens on a response's first line; the first line's numbers
+// are the ones reported. A response's lines are not always adjacent: with
+// tools run while the response streams, a tool_result lands between two
+// tool_use lines of the same response. So a response is identified by its
+// requestId (the message id when there is none), and a line repeats the
+// response the same conversation's previous usage-bearing line belonged to.
+// Conversations are kept apart because a subagent's lines can interleave with
+// its parent's (see ccSupersedes).
+//
+// Parse starts with nothing seen. ParseSince starts mid-file, where the
+// response its first records belong to may already have been reported by an
+// earlier read, so for each conversation it meets it looks back past the
+// watermark, once, for that conversation's last usage-bearing line — the
+// same line a full read would have seen last. That keeps an incremental read
+// reporting exactly what Parse reports, so a response is delivered once.
+type ccUsageTracker struct {
+	path   string
+	offset int64
+	last   map[string]string // conversation → response key of its last usage-bearing line
+}
+
+func newCCUsageTracker(path string, offset int64) *ccUsageTracker {
+	return &ccUsageTracker{path: path, offset: offset, last: map[string]string{}}
+}
+
+// ccConversation names the conversation a line belongs to: the parent's, or
+// one subagent's.
+func ccConversation(line ccRawLine) string {
+	if !line.IsSidechain {
+		return ""
+	}
+	return "sidechain\x00" + line.AgentID
+}
+
+// ccUsageBearing reports whether a line is one of an API response's records
+// carrying its usage. A failed call's synthetic record is not: no response
+// was served, and it must not be taken for the response it interrupted.
+func ccUsageBearing(line ccRawLine, msg ccMessage) bool {
+	return line.Type == "assistant" && !isCCAPIError(line) && msg.Usage != nil
+}
+
+// ccResponseKey identifies the API response a line belongs to.
+func ccResponseKey(line ccRawLine, msg ccMessage) string {
+	if line.RequestID != "" {
+		return line.RequestID
+	}
+	return msg.ID
+}
+
+// report returns the Usage for a line, at seq, when the line opens a response
+// this tracker has not reported and records any usage at all. A line with no
+// response key is its own response.
+func (t *ccUsageTracker) report(line ccRawLine, msg ccMessage, seq int) (classify.Usage, bool) {
+	if !ccUsageBearing(line, msg) {
+		return classify.Usage{}, false
+	}
+	conv := ccConversation(line)
+	prev, seen := t.last[conv]
+	if !seen && t.offset > 0 {
+		prev = t.lookBack(conv)
+	}
+	key := ccResponseKey(line, msg)
+	t.last[conv] = key
+	if key != "" && key == prev {
+		return classify.Usage{}, false
+	}
+	u := msg.Usage
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadInputTokens == 0 && u.CacheCreationInputTokens == 0 {
+		return classify.Usage{}, false
+	}
+	at, _ := parseSessionTimeOk(line.Timestamp)
+	return classify.Usage{
+		Seq:          seq,
+		At:           at,
+		Model:        msg.Model,
+		RequestID:    line.RequestID,
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+		CacheRead:    u.CacheReadInputTokens,
+		CacheWrite:   u.CacheCreationInputTokens,
+	}, true
+}
+
+// lookBack returns the response key of conv's last usage-bearing line before
+// the watermark, or "" when there is none within reach.
+func (t *ccUsageTracker) lookBack(conv string) string {
+	var key string
+	jsonlLastMatchBefore(t.path, t.offset, func(data []byte) bool {
+		var line ccRawLine
+		if json.Unmarshal(data, &line) != nil || line.Type != "assistant" || ccConversation(line) != conv {
+			return false
+		}
+		var msg ccMessage
+		if json.Unmarshal(line.Message, &msg) != nil || !ccUsageBearing(line, msg) {
+			return false
+		}
+		key = ccResponseKey(line, msg)
+		return true
+	})
+	return key
 }
 
 // ccPendingCall is a tool_use waiting on its tool_result, with what a later

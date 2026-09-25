@@ -119,6 +119,31 @@ breaking changes arrive in minor releases. See the note under
   `--no-redact` turns it off and `--error-excerpt-bytes` opts in to excerpts.
   Reading a stream from standard input (`-`) is reserved for #132 and returns
   an error until then.
+### Added
+
+- `classify.Usage`: token usage, recorded cost, and the served model and
+  provider, as a third item kind beside events and marks (#105). A `Usage`
+  shares their seq space the way a `Mark` does and follows the same
+  watermark rules, so repeated incremental reads deliver each report once. A
+  transcript with no usage yields no `Usage` items; a field the transcript
+  does not record stays empty, and `CostUSD` is nil unless the agent wrote a
+  cost down — agent-trace never prices tokens.
+- `tail.ItemParser`, `tail.Items`, and the package-level `tail.ParseItems` /
+  `tail.ParseItemsSince`: `Parse` and `ParseSince` with the usage kept. The
+  interface is optional, so `Adapter`, `IncrementalParser` and their callers
+  are unchanged; the helpers fall back to `Parse` / `ParseSince` for an
+  adapter that does not implement it.
+- Usage from three readers. Claude Code: one report per API response —
+  every record of a response repeats its usage, so it is reported once, keyed
+  by `requestId`, including when an incremental read resumes mid-response.
+  Codex: one report per response from `event_msg` `token_count`
+  (`info.last_token_usage`), skipping the repeat Codex writes on a rate-limit
+  update, with the turn's model and the session's `model_provider`; cached
+  prompt tokens are moved out of `input_tokens` so the four token counts are
+  disjoint. Crush: the session's recorded cost as a cumulative report —
+  Crush's token columns hold the latest step's counts rather than a total, so
+  they are not reported. OpenCode and Pi are not read yet; the README's table
+  lists which fields each reader fills.
 
 ## [0.5.0] - 2026-09-24
 

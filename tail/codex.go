@@ -196,10 +196,18 @@ func (a CodexAdapter) Summarize(ctx context.Context, path string) (SessionMeta, 
 }
 
 // Parse reads a complete Codex session file and returns classified events.
+// It is ParseItems without the usage reports.
 func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+	items, meta, err := a.ParseItems(ctx, path)
+	return items.Events, items.Marks, meta, err
+}
+
+// ParseItems implements ItemParser: Parse, plus one classify.Usage per
+// response Codex recorded a token_count for (see codexUsageTracker).
+func (a CodexAdapter) ParseItems(ctx context.Context, path string) (Items, SessionMeta, error) {
 	f, meta, err := openJSONLSession(a.Harness(), path)
 	if err != nil {
-		return nil, nil, SessionMeta{}, err
+		return Items{}, SessionMeta{}, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -214,6 +222,8 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 	directPatches := map[string]bool{}
 	patchResults := map[string]codexEventMsg{}
 	var marks []classify.Mark
+	var usage []classify.Usage
+	usageSeen := newCodexUsageTracker("", 0)
 
 	err = ReadJSONLines(f, func(data []byte) {
 		var line codexRawLine
@@ -243,12 +253,14 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 				if payload.isSubagent() {
 					meta.Auxiliary = true
 				}
+				usageSeen.provider = payload.ModelProvider
 			}
 		case "turn_context":
 			recognized = true
 			codexReleaseOpenCalls(calls, results, callOrder)
 			var payload codexTurnContext
 			if json.Unmarshal(line.Payload, &payload) == nil {
+				usageSeen.turn(payload)
 				if payload.Cwd != "" && meta.Cwd == "" {
 					meta.Cwd = payload.Cwd
 				}
@@ -332,6 +344,9 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 			if payload.Type == "task_started" || payload.Type == "turn_started" {
 				codexReleaseOpenCalls(calls, results, callOrder)
 			}
+			if u, ok := usageSeen.report(payload, line.Timestamp, len(callOrder)); ok {
+				usage = append(usage, u)
+			}
 			if payload.Type == "context_compacted" {
 				marks = append(marks, classify.Mark{
 					Seq:       len(callOrder),
@@ -381,9 +396,9 @@ func (a CodexAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 		meta.Title = filepath.Base(path)
 	}
 	if !recognized {
-		return nil, nil, SessionMeta{}, fmt.Errorf("not a Codex session: %s", path)
+		return Items{}, SessionMeta{}, fmt.Errorf("not a Codex session: %s", path)
 	}
-	return events, marks, meta, err
+	return Items{Events: events, Marks: marks, Usage: usage}, meta, err
 }
 
 // Watermark returns the offset just past the last complete line, for use as
@@ -437,22 +452,32 @@ func codexSessionHeadCwd(path string) string {
 // direct patch call: the next line — the patch event, if one is coming — is
 // read into the same window.
 func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+	items, meta, wm, err := a.ParseItemsSince(ctx, path, offset, startSeq)
+	return items.Events, items.Marks, meta, wm, err
+}
+
+// ParseItemsSince implements ItemParser: ParseSince, plus the usage reports
+// in the same window, withheld past the watermark with everything else. A
+// read resuming mid-session recovers the turn's model and the previous
+// token_count from the records before the watermark (codexUsageTracker), so
+// it reports what a full read would.
+func (a CodexAdapter) ParseItemsSince(ctx context.Context, path string, offset int64, startSeq int) (Items, SessionMeta, int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, nil, SessionMeta{}, 0, err
+		return Items{}, SessionMeta{}, 0, err
 	}
 	// If the file shrank (truncation/rotation), reset to full parse.
 	if info.Size() < offset {
-		return nil, nil, SessionMeta{}, 0, nil
+		return Items{}, SessionMeta{}, 0, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, SessionMeta{}, 0, err
+		return Items{}, SessionMeta{}, 0, err
 	}
 	defer func() { _ = f.Close() }()
 	if offset > 0 {
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return nil, nil, SessionMeta{}, 0, err
+			return Items{}, SessionMeta{}, 0, err
 		}
 	}
 
@@ -466,6 +491,8 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 	directPatches := map[string]bool{}
 	patchResults := map[string]codexEventMsg{}
 	var marks []classify.Mark
+	var usage []classify.Usage
+	usageSeen := newCodexUsageTracker(path, offset)
 	meta := SessionMeta{
 		Key:     sessionKey(string(a.Harness()), path),
 		ID:      strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
@@ -477,7 +504,7 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 	// Watermark and result counts as of the last record that left no call
 	// outstanding — and no patch event pending — the point it is safe to
 	// resume from.
-	safeOffset, safeEvents, safeMarks := offset, 0, 0
+	safeOffset, safeEvents, safeMarks, safeUsage := offset, 0, 0, 0
 	// True when the line just processed resolved a direct patch call, making
 	// the next line the last place its patch_apply_end can appear.
 	patchCheckPending := false
@@ -485,7 +512,7 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 	err = readCompleteJSONLines(f, offset, func(data []byte, end int64) {
 		defer func() {
 			if len(calls) == len(results) && !patchCheckPending {
-				safeOffset, safeEvents, safeMarks = end, len(callOrder), len(marks)
+				safeOffset, safeEvents, safeMarks, safeUsage = end, len(callOrder), len(marks), len(usage)
 			}
 		}()
 
@@ -510,11 +537,13 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 				if payload.Git.Branch != "" && meta.GitBranch == "" {
 					meta.GitBranch = payload.Git.Branch
 				}
+				usageSeen.provider = payload.ModelProvider
 			}
 		case "turn_context":
 			codexReleaseOpenCalls(calls, results, callOrder)
 			var payload codexTurnContext
 			if json.Unmarshal(line.Payload, &payload) == nil {
+				usageSeen.turn(payload)
 				if payload.Cwd != "" && meta.Cwd == "" {
 					meta.Cwd = payload.Cwd
 				}
@@ -598,6 +627,9 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 			if payload.Type == "task_started" || payload.Type == "turn_started" {
 				codexReleaseOpenCalls(calls, results, callOrder)
 			}
+			if u, ok := usageSeen.report(payload, line.Timestamp, startSeq+len(callOrder)); ok {
+				usage = append(usage, u)
+			}
 			if payload.Type == "context_compacted" {
 				marks = append(marks, classify.Mark{
 					Seq:       startSeq + len(callOrder),
@@ -650,7 +682,7 @@ func (a CodexAdapter) ParseSince(ctx context.Context, path string, offset int64,
 		meta.Title = filepath.Base(path)
 	}
 
-	return events[:safeEvents], marks[:safeMarks], meta, safeOffset, err
+	return Items{Events: events[:safeEvents], Marks: marks[:safeMarks], Usage: usage[:safeUsage]}, meta, safeOffset, err
 }
 
 // codexReleaseOpenCalls settles every call still waiting on its output with a
@@ -705,11 +737,14 @@ type codexRawLine struct {
 }
 
 type codexSessionMeta struct {
-	ID           string          `json:"id"`
-	Cwd          string          `json:"cwd"`
-	ThreadSource string          `json:"thread_source"`
-	Source       json.RawMessage `json:"source"`
-	Git          struct {
+	ID string `json:"id"`
+	// ModelProvider is the provider id the session was opened with
+	// ("openai", or a configured one).
+	ModelProvider string          `json:"model_provider"`
+	Cwd           string          `json:"cwd"`
+	ThreadSource  string          `json:"thread_source"`
+	Source        json.RawMessage `json:"source"`
+	Git           struct {
 		Branch     string `json:"branch"`
 		CommitHash string `json:"commit_hash"`
 	} `json:"git"`
@@ -745,9 +780,12 @@ type codexResponseItem struct {
 }
 
 type codexEventMsg struct {
-	Type    string `json:"type"`
-	CallID  string `json:"call_id"`
-	Success *bool  `json:"success"`
+	Type string `json:"type"`
+	// Info is a token_count event's usage; null on one that only carries
+	// rate limits.
+	Info    *codexTokenInfo `json:"info"`
+	CallID  string          `json:"call_id"`
+	Success *bool           `json:"success"`
 	Changes map[string]struct {
 		Type string `json:"type"`
 	} `json:"changes"`
@@ -756,6 +794,139 @@ type codexEventMsg struct {
 type codexTurnContext struct {
 	Cwd   string `json:"cwd"`
 	Model string `json:"model"`
+}
+
+// codexTokenInfo is a token_count event's info: the last response's usage,
+// and the running total for the session.
+type codexTokenInfo struct {
+	Total codexTokenUsage `json:"total_token_usage"`
+	Last  codexTokenUsage `json:"last_token_usage"`
+}
+
+// codexTokenUsage is Codex's TokenUsage. cached_input_tokens and
+// cache_write_input_tokens are parts of input_tokens, not additions to it,
+// and reasoning_output_tokens is part of output_tokens.
+type codexTokenUsage struct {
+	InputTokens           int64 `json:"input_tokens"`
+	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
+	TotalTokens           int64 `json:"total_tokens"`
+}
+
+// codexUsageTracker turns a rollout's token_count events into one
+// classify.Usage per model response.
+//
+// Codex writes a token_count after each response, carrying that response's
+// usage (last_token_usage) and the session's running total
+// (total_token_usage), and writes one again when only the rate limits
+// changed — same info, repeated. A repeat is recognised by its total being
+// the previous token_count's total, and skipped. A token_count with no info
+// (rate limits only, before any response) and one whose last response spent
+// nothing (Codex writes one after filling the context window on an overflow)
+// report nothing. The names are from the codex-rs protocol (TokenCountEvent,
+// TokenUsageInfo, TokenUsage) and its rollout persistence policy, which
+// keeps every token_count event.
+//
+// The model is the one the current turn's turn_context names, the provider
+// the one session_meta names. Codex records no cost and no response id.
+//
+// ParseSince starts mid-file, so the turn_context and the previous
+// token_count may both sit before its watermark. At its first token_count
+// with info it looks back for whichever of the two it has not seen yet in
+// its own window, and takes the provider from the session's first record.
+type codexUsageTracker struct {
+	path     string
+	offset   int64
+	provider string
+
+	model     string
+	haveModel bool
+	prev      codexTokenUsage
+	havePrev  bool
+	lookedUp  bool
+}
+
+func newCodexUsageTracker(path string, offset int64) *codexUsageTracker {
+	t := &codexUsageTracker{path: path, offset: offset}
+	if offset > 0 {
+		if line := jsonlFirstLine(path); line != nil {
+			var head codexRawLine
+			var payload codexSessionMeta
+			if json.Unmarshal(line, &head) == nil && head.Type == "session_meta" &&
+				json.Unmarshal(head.Payload, &payload) == nil {
+				t.provider = payload.ModelProvider
+			}
+		}
+	}
+	return t
+}
+
+// turn records the model a turn_context names.
+func (t *codexUsageTracker) turn(tc codexTurnContext) {
+	t.model, t.haveModel = tc.Model, true
+}
+
+// report returns the Usage for an event_msg payload, at seq, when it is a
+// token_count for a response not yet reported that spent anything.
+func (t *codexUsageTracker) report(ev codexEventMsg, ts string, seq int) (classify.Usage, bool) {
+	if ev.Type != "token_count" || ev.Info == nil {
+		return classify.Usage{}, false
+	}
+	if t.offset > 0 && !t.lookedUp {
+		t.lookedUp = true
+		t.lookBack()
+	}
+	repeat := t.havePrev && ev.Info.Total == t.prev
+	t.prev, t.havePrev = ev.Info.Total, true
+	last := ev.Info.Last
+	if repeat || (last.InputTokens == 0 && last.OutputTokens == 0 &&
+		last.CachedInputTokens == 0 && last.CacheWriteInputTokens == 0) {
+		return classify.Usage{}, false
+	}
+	at, _ := parseSessionTimeOk(ts)
+	return classify.Usage{
+		Seq:      seq,
+		At:       at,
+		Model:    t.model,
+		Provider: t.provider,
+		// Codex counts cached prompt tokens inside input_tokens; Usage keeps
+		// the buckets disjoint (TokenUsage.non_cached_input does the same).
+		InputTokens:  max(last.InputTokens-last.CachedInputTokens-last.CacheWriteInputTokens, 0),
+		OutputTokens: last.OutputTokens,
+		CacheRead:    last.CachedInputTokens,
+		CacheWrite:   last.CacheWriteInputTokens,
+	}, true
+}
+
+// lookBack recovers, from the records before the watermark, the turn's model
+// and the previous token_count's total — each only if this read has not
+// already seen a newer one.
+func (t *codexUsageTracker) lookBack() {
+	needModel, needPrev := !t.haveModel, !t.havePrev
+	if !needModel && !needPrev {
+		return
+	}
+	jsonlLastMatchBefore(t.path, t.offset, func(data []byte) bool {
+		var line codexRawLine
+		if json.Unmarshal(data, &line) != nil {
+			return false
+		}
+		switch line.Type {
+		case "turn_context":
+			var tc codexTurnContext
+			if needModel && json.Unmarshal(line.Payload, &tc) == nil {
+				t.model, t.haveModel, needModel = tc.Model, true, false
+			}
+		case "event_msg":
+			var ev codexEventMsg
+			if needPrev && json.Unmarshal(line.Payload, &ev) == nil && ev.Type == "token_count" && ev.Info != nil {
+				t.prev, t.havePrev, needPrev = ev.Info.Total, true, false
+			}
+		}
+		return !needModel && !needPrev
+	})
 }
 
 type codexContentList struct {

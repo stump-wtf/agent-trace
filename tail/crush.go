@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -431,15 +432,24 @@ func (a CrushAdapter) Summarize(ctx context.Context, path string) (SessionMeta, 
 	return SessionMeta{}, fmt.Errorf("session not found: %s", sessionID)
 }
 
-// Parse reads a complete Crush session and returns classified events.
+// Parse reads a complete Crush session and returns classified events. It is
+// ParseItems without the usage report.
 func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event, []classify.Mark, SessionMeta, error) {
+	items, meta, err := a.ParseItems(ctx, path)
+	return items.Events, items.Marks, meta, err
+}
+
+// ParseItems implements ItemParser: Parse, plus the session's recorded usage
+// as one cumulative classify.Usage after everything else (see
+// crushUsageReport).
+func (a CrushAdapter) ParseItems(ctx context.Context, path string) (Items, SessionMeta, error) {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
-		return nil, nil, SessionMeta{}, fmt.Errorf("not a Crush session: %s", path)
+		return Items{}, SessionMeta{}, fmt.Errorf("not a Crush session: %s", path)
 	}
 	db, err := openSQLite(dbPath)
 	if err != nil {
-		return nil, nil, SessionMeta{}, err
+		return Items{}, SessionMeta{}, err
 	}
 
 	// Get session metadata. parent_session_id is NULL for top-level sessions;
@@ -448,12 +458,14 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 	var title string
 	var parentID sql.NullString
 	var createdAt, updatedAt int64
+	var spent crushSessionUsage
 	err = db.QueryRowContext(ctx,
-		`SELECT title, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?`, sessionID).
-		Scan(&title, &parentID, &createdAt, &updatedAt)
+		`SELECT title, parent_session_id, created_at, updated_at, prompt_tokens, completion_tokens, cost FROM sessions WHERE id = ?`, sessionID).
+		Scan(&title, &parentID, &createdAt, &updatedAt, &spent.promptTokens, &spent.completionTokens, &spent.cost)
 	if err != nil {
-		return nil, nil, SessionMeta{}, fmt.Errorf("reading crush session %s: %w", sessionID, err)
+		return Items{}, SessionMeta{}, fmt.Errorf("reading crush session %s: %w", sessionID, err)
 	}
+	spent.updatedAt = updatedAt
 
 	cwd := a.cwdForDB(dbPath)
 	meta := SessionMeta{
@@ -490,12 +502,12 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 	rows, err := db.QueryContext(ctx,
 		`SELECT rowid, role, parts, model, created_at FROM messages WHERE session_id = ? ORDER BY rowid`, sessionID)
 	if err != nil {
-		return nil, nil, meta, err
+		return Items{}, meta, err
 	}
 	defer func() { _ = rows.Close() }()
 	msgs, err := readCrushMessages(rows)
 	if err != nil {
-		return nil, nil, meta, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
+		return Items{}, meta, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
 	}
 	lookahead := newCrushLookahead(msgs)
 
@@ -615,7 +627,15 @@ func (a CrushAdapter) Parse(ctx context.Context, path string) ([]classify.Event,
 		meta.Title = filepath.Base(cwd) + " — " + sessionID[:min(8, len(sessionID))]
 	}
 
-	return events, marks, meta, nil
+	var usage []classify.Usage
+	var lastRow int64
+	if len(msgs) > 0 {
+		lastRow = msgs[len(msgs)-1].row
+	}
+	if u, ok := crushUsageReport(ctx, db, sessionID, spent, lastRow, seq); ok {
+		usage = append(usage, u)
+	}
+	return Items{Events: events, Marks: marks, Usage: usage}, meta, nil
 }
 
 // Watermark returns the rowid of the session's last message, the cursor
@@ -685,13 +705,22 @@ func (a CrushAdapter) Watermark(ctx context.Context, path string) int64 {
 // marks with seq continuing from startSeq. This avoids re-querying and
 // re-parsing the entire message history on every watcher poll.
 func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+	items, meta, wm, err := a.ParseItemsSince(ctx, path, watermark, startSeq)
+	return items.Events, items.Marks, meta, wm, err
+}
+
+// ParseItemsSince implements ItemParser: ParseSince, plus a cumulative usage
+// report whenever the read advances the watermark. A read that delivers no
+// new rows reports nothing, so a session's report is not repeated by polls
+// that find it unchanged.
+func (a CrushAdapter) ParseItemsSince(ctx context.Context, path string, watermark int64, startSeq int) (Items, SessionMeta, int64, error) {
 	dbPath, sessionID := splitDBSessionPath(path)
 	if dbPath == "" {
-		return nil, nil, SessionMeta{}, 0, fmt.Errorf("not a Crush session: %s", path)
+		return Items{}, SessionMeta{}, 0, fmt.Errorf("not a Crush session: %s", path)
 	}
 	db, err := openSQLite(dbPath)
 	if err != nil {
-		return nil, nil, SessionMeta{}, 0, err
+		return Items{}, SessionMeta{}, 0, err
 	}
 
 	var title string
@@ -703,12 +732,14 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	// every session that was not a subagent branch.
 	var parentID sql.NullString
 	var createdAt, updatedAt int64
+	var spent crushSessionUsage
 	err = db.QueryRowContext(ctx,
-		`SELECT title, parent_session_id, created_at, updated_at FROM sessions WHERE id = ?`, sessionID).
-		Scan(&title, &parentID, &createdAt, &updatedAt)
+		`SELECT title, parent_session_id, created_at, updated_at, prompt_tokens, completion_tokens, cost FROM sessions WHERE id = ?`, sessionID).
+		Scan(&title, &parentID, &createdAt, &updatedAt, &spent.promptTokens, &spent.completionTokens, &spent.cost)
 	if err != nil {
-		return nil, nil, SessionMeta{}, 0, fmt.Errorf("reading crush session %s: %w", sessionID, err)
+		return Items{}, SessionMeta{}, 0, fmt.Errorf("reading crush session %s: %w", sessionID, err)
 	}
+	spent.updatedAt = updatedAt
 
 	cwd := a.cwdForDB(dbPath)
 	meta := SessionMeta{
@@ -731,7 +762,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	query := `SELECT rowid, role, parts, model, created_at FROM messages WHERE session_id = ? AND rowid > ? ORDER BY rowid`
 	rows, err := db.QueryContext(ctx, query, sessionID, watermark)
 	if err != nil {
-		return nil, nil, meta, 0, err
+		return Items{}, meta, 0, err
 	}
 	defer func() { _ = rows.Close() }()
 	// An iteration error is returned rather than swallowed: truncating here
@@ -740,7 +771,7 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 	// session's events and marks as though it were the whole truth.
 	msgs, err := readCrushMessages(rows)
 	if err != nil {
-		return nil, nil, meta, watermark, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
+		return Items{}, meta, watermark, fmt.Errorf("reading messages for session %s: %w", sessionID, err)
 	}
 	lookahead := newCrushLookahead(msgs)
 
@@ -915,7 +946,80 @@ func (a CrushAdapter) ParseSince(ctx context.Context, path string, watermark int
 		}
 	}
 	sp := safe[len(safe)-1]
-	return events[:sp.events], marks[:sp.marks], meta, sp.row, nil
+	var usage []classify.Usage
+	if sp.row > watermark {
+		if u, ok := crushUsageReport(ctx, db, sessionID, spent, sp.row, startSeq+sp.events); ok {
+			usage = append(usage, u)
+		}
+	}
+	return Items{Events: events[:sp.events], Marks: marks[:sp.marks], Usage: usage}, meta, sp.row, nil
+}
+
+// crushSessionUsage is the usage a Crush sessions row records.
+type crushSessionUsage struct {
+	promptTokens, completionTokens int64
+	cost                           float64
+	updatedAt                      int64
+}
+
+// crushUsageReport renders a Crush session's recorded usage as one
+// cumulative classify.Usage at seq, dated by the session's updated_at, naming
+// the model and provider of the latest assistant message at or before row.
+// It reports nothing for a session Crush has recorded no usage for.
+//
+// Crush keeps usage on the session row only, and only one number there is a
+// total: sessions.cost, which updateSessionUsage adds each step's cost to and
+// which a resumed session keeps adding to across restarts. The token columns
+// are not totals — prompt_tokens and completion_tokens are overwritten with
+// the latest step's counts (Crush shows them as context-window fill) — so
+// they are not reported: as cumulative numbers they would be wrong, and as
+// per-call numbers they cover only whichever step happened to be last. The
+// token fields stay zero, and the README says so. A consumer differences
+// consecutive reports' CostUSD to get the cost between them; a report can
+// repeat the previous one's cost when the rows between them spent nothing.
+//
+// A parent session's cost includes its sub-agents': when a sub-agent session
+// finishes, Crush's coordinator (updateParentSessionCost) adds the child
+// session's whole cost to the parent's sessions.cost. The child session is
+// also a session of its own (Auxiliary), with its own report. So a consumer
+// summing cost across sessions counts the top-level sessions only, or it
+// counts every sub-agent twice; and a parent's report can jump by a sub-agent's
+// whole cost at the row where that sub-agent returned.
+//
+// Crush saves a step's cost to the session before it writes the step's
+// finish part, so a report taken once a step's row reads finished includes
+// that step.
+func crushUsageReport(ctx context.Context, db *sql.DB, sessionID string, spent crushSessionUsage, row int64, seq int) (classify.Usage, bool) {
+	if spent.cost <= 0 && spent.promptTokens <= 0 && spent.completionTokens <= 0 {
+		return classify.Usage{}, false
+	}
+	model, provider := crushLatestModel(ctx, db, sessionID, row)
+	cost := spent.cost
+	at, _ := parseSessionTimeOk(secToRFC3339(spent.updatedAt))
+	return classify.Usage{
+		Seq:        seq,
+		At:         at,
+		Model:      model,
+		Provider:   provider,
+		CostUSD:    &cost,
+		Cumulative: true,
+	}, true
+}
+
+// crushLatestModel returns the model and provider of the session's latest
+// assistant message at or before row. messages.provider is Crush's configured
+// provider name; a store from before Crush added the column (mid-2025) has
+// none, and reports the provider as unknown.
+func crushLatestModel(ctx context.Context, db *sql.DB, sessionID string, row int64) (model, provider string) {
+	const where = ` FROM messages WHERE session_id = ? AND role = 'assistant' AND rowid <= ? AND model IS NOT NULL AND model != '' ORDER BY rowid DESC LIMIT 1`
+	var p sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT model, provider`+where, sessionID, row).Scan(&model, &p)
+	if err == nil || errors.Is(err, sql.ErrNoRows) {
+		return model, p.String
+	}
+	model = ""
+	_ = db.QueryRowContext(ctx, `SELECT model`+where, sessionID, row).Scan(&model)
+	return model, ""
 }
 
 // crushEndsTurn reports whether an assistant row's finish reason ends the

@@ -1,5 +1,7 @@
 package classify
 
+import "time"
+
 // ToolCall represents a normalized tool invocation from any agent harness.
 // Adapters in the tail package convert agent-specific JSONL formats into this
 // common shape before passing to Classify.
@@ -65,6 +67,48 @@ type Mark struct {
 	Timestamp string `json:"ts,omitempty"`
 	Type      string `json:"type"`
 	Note      string `json:"note,omitempty"`
+}
+
+// Usage is one usage report a transcript recorded: the tokens a model call
+// spent, what it cost where the agent records a cost, and which model and
+// provider served it. It is a third item kind beside Event and Mark, and it
+// shares their seq space the way a Mark does: Seq is the seq of the next
+// event, so a Usage precedes the event with that seq and consumes none.
+//
+// Everything here is what the transcript says, never an estimate. A field
+// the transcript does not record stays at its zero value — an empty Model,
+// Provider or RequestID means "not recorded", which a consumer comparing a
+// served model against a pin must treat as unknown rather than as a match —
+// and CostUSD stays nil unless the agent itself wrote a cost down. Pricing
+// belongs to the consumer.
+//
+// The four token counts are disjoint: InputTokens excludes the prompt tokens
+// served from or written to a cache, which CacheRead and CacheWrite carry, so
+// their sum is the whole prompt. OutputTokens includes any reasoning tokens.
+// A reader whose agent reports cached tokens as a subset of its input total
+// (Codex does) subtracts them to keep that true.
+type Usage struct {
+	Seq int `json:"seq"`
+	// At is when the transcript dated the report; zero when it did not.
+	At time.Time `json:"at,omitzero"`
+	// Model is the model as the transcript names it, and Provider the
+	// provider when it names one.
+	Model    string `json:"model,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	// RequestID is the provider's request or response id, when recorded.
+	RequestID    string `json:"requestId,omitempty"`
+	InputTokens  int64  `json:"inputTokens"`
+	OutputTokens int64  `json:"outputTokens"`
+	CacheRead    int64  `json:"cacheRead"`
+	CacheWrite   int64  `json:"cacheWrite"`
+	// CostUSD is the cost the agent recorded, in US dollars; nil when it
+	// recorded none. It is never computed here.
+	CostUSD *float64 `json:"costUsd,omitempty"`
+	// Cumulative reports that the numbers are running totals for the
+	// session rather than one call's usage. A consumer differences
+	// consecutive cumulative reports to get the usage between them; see the
+	// reader that sets it for what the total covers.
+	Cumulative bool `json:"cumulative,omitempty"`
 }
 
 // Action constants returned by ActionFor.

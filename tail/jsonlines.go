@@ -129,42 +129,84 @@ func jsonlLeadingLines(path string, n int) [][]byte {
 // nil, which the caller reads as "cannot confirm this is a linear append" and
 // answers with a full parse: slower on that poll, never wrong.
 func jsonlLastLineBefore(path string, offset int64) []byte {
-	if offset <= 0 {
-		return nil
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
+	line, _, ok := jsonlRecordBefore(f, offset)
+	if !ok {
+		return nil
+	}
+	return line
+}
+
+// jsonlRecordBefore returns the complete record that ends immediately before
+// offset in f, and the offset at which that record starts. ok is false when
+// there is no such record or it cannot be read within jsonlLastLineCap. See
+// jsonlLastLineBefore for the windowing.
+func jsonlRecordBefore(f *os.File, offset int64) (line []byte, start int64, ok bool) {
+	if offset <= 0 {
+		return nil, 0, false
+	}
 	window := int64(8192)
 	for {
 		if window > jsonlLastLineCap {
-			return nil
+			return nil, 0, false
 		}
-		start := offset - window
-		if start < 0 {
-			start = 0
-		}
-		buf := make([]byte, offset-start)
-		if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
-			return nil
+		from := max(offset-window, 0)
+		buf := make([]byte, offset-from)
+		if _, err := f.ReadAt(buf, from); err != nil && err != io.EOF {
+			return nil, 0, false
 		}
 		if len(buf) == 0 {
-			return nil
+			return nil, 0, false
 		}
 		// The byte at offset-1 is the terminator of the record we want; the
 		// record itself starts just past the previous terminator.
 		head := buf[:len(buf)-1]
 		if idx := bytes.LastIndexByte(head, '\n'); idx >= 0 {
-			return bytes.TrimRight(head[idx+1:], "\r\n")
+			return bytes.TrimRight(head[idx+1:], "\r\n"), from + int64(idx) + 1, true
 		}
-		if start == 0 {
-			return bytes.TrimRight(head, "\r\n")
+		if from == 0 {
+			return bytes.TrimRight(head, "\r\n"), 0, true
 		}
 		window *= 2
 	}
 }
+
+// jsonlLastMatchBefore walks the complete records that end at or before
+// offset, newest first, and returns the first one match accepts, or nil when
+// none does.
+//
+// The incremental readers use it to recover state a record before their
+// watermark left behind — the API response a Claude Code usage report
+// belongs to, the model a Codex turn runs on — so that a read resuming
+// mid-session reports exactly what a full read would. The record wanted is
+// normally a few records back. The walk gives up after jsonlLastMatchCap
+// bytes rather than read a long session backwards on every poll; a caller
+// treats nil as "nothing recorded".
+func jsonlLastMatchBefore(path string, offset int64, match func([]byte) bool) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	for end := offset; end > 0 && offset-end <= jsonlLastMatchCap; {
+		line, start, ok := jsonlRecordBefore(f, end)
+		if !ok {
+			return nil
+		}
+		if len(line) > 0 && match(line) {
+			return line
+		}
+		end = start
+	}
+	return nil
+}
+
+// jsonlLastMatchCap bounds how far jsonlLastMatchBefore walks back.
+const jsonlLastMatchCap = 16 << 20
 
 // jsonlLastLineCap bounds jsonlLastLineBefore's backwards scan. It is sized
 // well past a normal record and well below a pathological one: the largest

@@ -48,7 +48,7 @@ func (a ClaudeCodeAdapter) ParseStream(ctx context.Context, r io.Reader, h Strea
 		opts = osClassifyOptions(nil)
 	}
 	meta := SessionMeta{Harness: a.Harness()}
-	rec := newCCRecorder(opts, &meta, h.event, h.mark)
+	rec := newCCRecorder(opts, &meta, h.event, h.mark, nil, nil)
 	var result *StreamResult
 	read, recognized, announced := false, false, false
 

@@ -104,6 +104,34 @@ meta, result, err := sp.ParseStream(ctx, stdout, tail.StreamHandler{
 _ = cmd.Wait()
 ```
 
+#### Token usage, cost and model
+
+`classify.Usage` is a third item kind beside events and marks: one usage report the transcript recorded — tokens, the cost where the agent records one, and the model and provider that served it. Read it with `tail.ParseItems` / `tail.ParseItemsSince`, which are `Parse` / `ParseSince` with the usage kept (the optional `ItemParser` interface); `Parse` and `ParseSince` are unchanged and drop it.
+
+```go
+items, meta, wm, err := tail.ParseItemsSince(ctx, adapter, path, watermark, nextSeq)
+for _, u := range items.Usage {
+    // u.Model, u.Provider, u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheWrite, u.CostUSD, u.Cumulative
+}
+```
+
+- **Same rules as marks.** `Usage.Seq` is the seq of the next event, so a usage report sits in the session's seq order and consumes no seq. `ParseItemsSince` withholds usage past its watermark with everything else, so repeated incremental reads deliver each report once.
+- **Nothing is invented.** A transcript with no usage yields no `Usage` items, never zero-valued ones. An empty `Model`, `Provider` or `RequestID` means the transcript did not record it — a model-pinning check must treat that as unknown, not as a match. `CostUSD` is nil unless the agent wrote a cost down; agent-trace never prices tokens.
+- **Disjoint token buckets.** `InputTokens` excludes the cached prompt, which `CacheRead` and `CacheWrite` carry, so the four add up to the whole call. `OutputTokens` includes reasoning tokens.
+- **Deltas and totals.** A report with `Cumulative` false is one model call's usage. One with `Cumulative` true is a running total for the session; difference consecutive totals to get what was spent between them.
+
+| Adapter | One report per | Model | Provider | RequestID | Tokens | CostUSD | Cumulative |
+|---|---|---|---|---|---|---|---|
+| Claude Code | API response (its records repeat one usage; reported once) | `message.model` | not recorded | `requestId` | all four | not recorded | no |
+| Codex | response (`event_msg` `token_count`, from `info.last_token_usage`; a rate-limit repeat is skipped) | the turn's `turn_context.model` | `session_meta.model_provider` | not recorded | all four; cached tokens moved out of `input_tokens` | not recorded | no |
+| Crush | read that advances past new rows, plus one at the end of `Parse` | latest assistant `messages.model` | latest assistant `messages.provider` | not recorded | **not reported** (zero) | `sessions.cost` | yes |
+| OpenCode | not read yet | | | | | | |
+| Pi / OMP | not read yet | | | | | | |
+
+Crush keeps usage only on the session row, and only its cost is a total: `sessions.prompt_tokens` and `completion_tokens` are overwritten with the latest step's counts (context-window fill), so they are neither a total nor a per-call figure and are not reported. A resident Crush resumes one session across restarts and keeps adding to `sessions.cost`, so the difference between two reports is what was spent between them. A parent session's `sessions.cost` also includes its sub-agents': Crush adds a sub-agent session's whole cost to its parent's when the sub-agent finishes. The sub-agent session is listed and reported on its own too (`Auxiliary`), so sum cost over top-level sessions only, or every sub-agent is counted twice.
+
+OpenCode and Pi also record usage — Pi on every assistant message (tokens, a cost it computes, provider, model, response id), OpenCode per message and as session totals — but neither reader surfaces it yet. Pi's tree is the open question: `Parse` follows only the current branch, and a response on a branch that was later edited away was still paid for.
+
 ### `otel`
 
 Converts classified events and marks into OpenTelemetry span structs. Maps user messages to parent spans, tool calls to child spans, errors to status codes. Deterministic trace/span IDs enable idempotent re-submission.
