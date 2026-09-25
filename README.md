@@ -87,6 +87,22 @@ Alongside events, `Parse` and `ParseSince` return `classify.Mark`s — timeline 
 | `turn-end` | the agent finished its turn, dated by the boundary; `Note` is the agent's reason where it records one | Claude Code, Codex, Crush |
 
 `turn-end` comes from a Claude Code response's `stop_reason` (`end_turn`, `stop_sequence`, `max_tokens`, `refusal` — never `tool_use`), once per response even though Claude Code writes one line per content block; from Codex's `task_complete` event; and from a Crush assistant row's finish part (`end_turn`, `max_tokens`, `content_filter`). `ParseSince` delivers each exactly once across polls.
+An adapter whose agent can write its run to stdout in a structured format implements `StreamParser`: `StreamFormat()` names the format and the argv flags that select it, and `ParseStream` reads that output from an `io.Reader` — the agent's stdout pipe — handing over events, marks and the session's metadata as the records arrive, then returns the run's `StreamResult` (outcome, turns, duration, cost, token usage). The result is nil when the process died before reporting one. Claude Code's `stream-json` is supported today:
+
+```go
+var cc tail.Adapter = &tail.ClaudeCodeAdapter{}
+sp, ok := cc.(tail.StreamParser)
+if !ok {
+    return // no structured output mode
+}
+cmd := exec.Command("claude", append([]string{"-p", prompt}, sp.StreamFormat().Args...)...)
+stdout, _ := cmd.StdoutPipe()
+_ = cmd.Start()
+meta, result, err := sp.ParseStream(ctx, stdout, tail.StreamHandler{
+    Event: func(ev classify.Event) { fmt.Println(ev.Summary) },
+})
+_ = cmd.Wait()
+```
 
 ### `otel`
 

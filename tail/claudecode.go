@@ -229,16 +229,13 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 	if opts == nil {
 		opts = osClassifyOptions(nil)
 	}
-	pending := newPendingCalls[ccPendingCall]()
 	var events []classify.Event
 	var marks []classify.Mark
-	seq := 0
-	// ccTurnEndID of the previous record; see ccTurnEndMark.
-	prevEndID := ""
+	rec := newCCRecorder(opts, &meta,
+		func(e classify.Event) { events = append(events, e) },
+		func(m classify.Mark) { marks = append(marks, m) })
 
 	err = ReadJSONLines(f, func(data []byte) {
-		thisEndID := ""
-		defer func() { prevEndID = thisEndID }()
 		var line ccRawLine
 		if json.Unmarshal(data, &line) != nil {
 			return
@@ -246,107 +243,13 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 		if isCCLine(line) {
 			recognized = true
 		}
-		if line.SessionID != "" {
-			meta.ID = line.SessionID
-		}
-		if line.Cwd != "" && meta.Cwd == "" {
-			meta.Cwd = line.Cwd
-		}
-		if line.GitBranch != "" && meta.GitBranch == "" {
-			meta.GitBranch = line.GitBranch
-		}
-		if line.IsSidechain {
-			meta.IsSidechain = true
-			meta.Auxiliary = true
-		}
-		if line.AgentID != "" && meta.AgentID == "" {
-			meta.AgentID = line.AgentID
-		}
-		if line.Timestamp != "" {
-			if meta.StartedAt == "" {
-				meta.StartedAt = line.Timestamp
-			}
-			meta.EndedAt = line.Timestamp
-		}
-		if line.Type == "ai-title" && line.AITitle != "" {
-			meta.Title = line.AITitle
-			return
-		}
-		if isCCCompaction(line) {
-			marks = append(marks, classify.Mark{Seq: seq, Type: "compaction"})
-		}
-		if isCCAPIError(line) {
-			// A failed call is not a model turn: it holds no tool calls, and
-			// its "<synthetic>" model must not become the session's model.
-			marks = append(marks, ccAPIErrorMark(line, seq))
-			return
-		}
-		if len(line.Message) == 0 {
-			return
-		}
-		var msg ccMessage
-		if json.Unmarshal(line.Message, &msg) != nil {
-			return
-		}
-		// A call this record proves can never be answered is emitted here,
-		// ahead of anything the record itself contributes — see ccSupersedes.
-		for _, p := range pending.release(func(p ccPendingCall) bool { return ccSupersedes(line, msg, p) }) {
-			events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
-			seq++
-		}
-		if m, ok := ccTurnEndMark(line, msg, prevEndID, seq); ok {
-			marks = append(marks, m)
-		}
-		if ccEndsTurn(line, msg) {
-			thisEndID = msg.ID
-		}
-		if line.Type == "user" && hasCCUserMessage(msg.Content) {
-			text := ccUserMessageText(msg.Content)
-			if !injectedUserMessage(text) {
-				marks = append(marks, classify.Mark{
-					Seq:  seq,
-					Type: "user-message",
-					Note: strutil.TruncateRunes(text, 2000, "…"),
-				})
-			}
-		}
-		if msg.Model != "" && meta.Model == "" {
-			meta.Model = msg.Model
-		}
-		for _, item := range msg.Content.Items {
-			switch item.Type {
-			case "tool_use":
-				call := classify.ToolCall{
-					ID:        item.ID,
-					Name:      item.Name,
-					Input:     item.Input,
-					Timestamp: line.Timestamp,
-				}
-				if call.Name == "Task" || call.Name == "Agent" {
-					marks = append(marks, classify.Mark{Seq: seq, Type: "subagent", Note: call.Name})
-				}
-				pending.put(call.ID, ccPendingCall{call: call, messageID: msg.ID, sidechain: line.IsSidechain, agentID: line.AgentID})
-			case "tool_result":
-				p, ok := pending.take(item.ToolUseID)
-				if !ok {
-					continue
-				}
-				result := classify.ToolResult{
-					Content: classify.ContentToString(item.Content),
-					IsError: item.IsError,
-				}
-				events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, result))
-				seq++
-			}
-		}
+		ccFoldMeta(&meta, line)
+		rec.record(line)
 	})
 	// Flush the calls still open at the end of the session, last and in issue
 	// order. Nothing after them proves they are dead, so they may yet be
 	// answered — a live session's calls in flight look exactly like this.
-	for _, p := range pending.release(func(ccPendingCall) bool { return true }) {
-		events = append(events, classify.BuildEventWith(opts, seq, meta.Cwd, p.call, classify.ToolResult{}))
-		seq++
-	}
+	rec.flush()
 	if meta.Title == "" {
 		meta.Title = filepath.Base(path)
 	}
@@ -354,6 +257,158 @@ func (a ClaudeCodeAdapter) Parse(ctx context.Context, path string) ([]classify.E
 		return nil, nil, SessionMeta{}, fmt.Errorf("not a Claude Code session: %s", path)
 	}
 	return events, marks, meta, err
+}
+
+// ccFoldMeta folds the session metadata a record carries into meta.
+func ccFoldMeta(meta *SessionMeta, line ccRawLine) {
+	if line.SessionID != "" {
+		meta.ID = line.SessionID
+	}
+	if line.Cwd != "" && meta.Cwd == "" {
+		meta.Cwd = line.Cwd
+	}
+	if line.GitBranch != "" && meta.GitBranch == "" {
+		meta.GitBranch = line.GitBranch
+	}
+	if line.IsSidechain {
+		meta.IsSidechain = true
+		meta.Auxiliary = true
+	}
+	if line.AgentID != "" && meta.AgentID == "" {
+		meta.AgentID = line.AgentID
+	}
+	if line.Timestamp != "" {
+		if meta.StartedAt == "" {
+			meta.StartedAt = line.Timestamp
+		}
+		meta.EndedAt = line.Timestamp
+	}
+}
+
+// ccRecorder turns Claude Code records into classified events and marks, in
+// order, one record at a time. Parse drives it from a transcript file and
+// ParseStream from a stream-json pipe, so the two cannot drift apart: the same
+// records yield the same events, the same marks and the same seqs.
+//
+// It reads meta (Cwd for classification, Model and Title to fill) but leaves
+// the rest of the metadata to its caller, whose records are shaped
+// differently.
+type ccRecorder struct {
+	opts    *classify.Options
+	meta    *SessionMeta
+	pending *pendingCalls[ccPendingCall]
+	seq     int
+	// endID is the message id of the previous record's turn-ending response,
+	// so a line that continues it adds no second turn-end mark (#102). See
+	// ccTurnEndMark.
+	endID string
+	event func(classify.Event)
+	mark  func(classify.Mark)
+}
+
+func newCCRecorder(opts *classify.Options, meta *SessionMeta, event func(classify.Event), mark func(classify.Mark)) *ccRecorder {
+	return &ccRecorder{
+		opts:    opts,
+		meta:    meta,
+		pending: newPendingCalls[ccPendingCall](),
+		event:   event,
+		mark:    mark,
+	}
+}
+
+// emit classifies a call with its result and hands the event on.
+func (r *ccRecorder) emit(call classify.ToolCall, result classify.ToolResult) {
+	r.event(classify.BuildEventWith(r.opts, r.seq, r.meta.Cwd, call, result))
+	r.seq++
+}
+
+// record handles one record's timeline content: marks, and the events of the
+// calls it answers or proves dead.
+func (r *ccRecorder) record(line ccRawLine) {
+	// endID must reflect the record immediately before this one, and a record
+	// that ends no turn (including one carrying no message at all) clears it —
+	// otherwise a stale id would suppress a later turn-end mark.
+	endID := r.endID
+	r.endID = ""
+	if line.Type == "ai-title" && line.AITitle != "" {
+		r.meta.Title = line.AITitle
+		return
+	}
+	if isCCCompaction(line) {
+		r.mark(classify.Mark{Seq: r.seq, Type: "compaction"})
+	}
+	if isCCAPIError(line) {
+		// A failed call is not a model turn: it holds no tool calls, and
+		// its "<synthetic>" model must not become the session's model.
+		r.mark(ccAPIErrorMark(line, r.seq))
+		return
+	}
+	if len(line.Message) == 0 {
+		return
+	}
+	var msg ccMessage
+	if json.Unmarshal(line.Message, &msg) != nil {
+		return
+	}
+	// A call this record proves can never be answered is emitted here,
+	// ahead of anything the record itself contributes — see ccSupersedes.
+	for _, p := range r.pending.release(func(p ccPendingCall) bool { return ccSupersedes(line, msg, p) }) {
+		r.emit(p.call, classify.ToolResult{})
+	}
+	// The turn boundary this record ends, if it ends one (#102). A response
+	// spans several lines sharing message.id and current versions copy the
+	// stop_reason onto each, so a line continuing the previous record's
+	// turn-ending response adds nothing — hence r.endID.
+	if m, ok := ccTurnEndMark(line, msg, endID, r.seq); ok {
+		r.mark(m)
+	}
+	if ccEndsTurn(line, msg) {
+		r.endID = msg.ID
+	}
+	if line.Type == "user" && hasCCUserMessage(msg.Content) {
+		text := ccUserMessageText(msg.Content)
+		if !injectedUserMessage(text) {
+			r.mark(classify.Mark{
+				Seq:  r.seq,
+				Type: "user-message",
+				Note: strutil.TruncateRunes(text, 2000, "…"),
+			})
+		}
+	}
+	if msg.Model != "" && r.meta.Model == "" {
+		r.meta.Model = msg.Model
+	}
+	for _, item := range msg.Content.Items {
+		switch item.Type {
+		case "tool_use":
+			call := classify.ToolCall{
+				ID:        item.ID,
+				Name:      item.Name,
+				Input:     item.Input,
+				Timestamp: line.Timestamp,
+			}
+			if call.Name == "Task" || call.Name == "Agent" {
+				r.mark(classify.Mark{Seq: r.seq, Type: "subagent", Note: call.Name})
+			}
+			r.pending.put(call.ID, ccPendingCall{call: call, messageID: msg.ID, sidechain: line.IsSidechain, agentID: line.AgentID})
+		case "tool_result":
+			p, ok := r.pending.take(item.ToolUseID)
+			if !ok {
+				continue
+			}
+			r.emit(p.call, classify.ToolResult{
+				Content: classify.ContentToString(item.Content),
+				IsError: item.IsError,
+			})
+		}
+	}
+}
+
+// flush emits every call still open, in issue order, with an empty result.
+func (r *ccRecorder) flush() {
+	for _, p := range r.pending.release(func(ccPendingCall) bool { return true }) {
+		r.emit(p.call, classify.ToolResult{})
+	}
 }
 
 // Watermark returns the offset just past the last complete line, for use as an

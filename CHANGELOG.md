@@ -90,6 +90,23 @@ breaking changes arrive in minor releases. See the note under
   stops between two lines of one Claude Code response. Pi and OpenCode emit
   none yet. `otel` makes no span for the mark, but a turn's last tool span
   now ends at the turn end instead of stretching to the next user message.
+- `tail.StreamParser`, an optional adapter interface for an agent's
+  structured stdout, read from an `io.Reader` as it arrives rather than from
+  a transcript file afterwards. `StreamFormat()` names the format and the
+  argv flags that select it; `ParseStream` hands each `classify.Event`,
+  `classify.Mark` and the session's `SessionMeta` to a `StreamHandler` as the
+  records that produce them are read, and returns a `StreamResult` — subtype,
+  `IsError`, turns, wall and API duration, cost and `TokenUsage`. The result
+  is nil when the stream ends without one, as it does when the process is
+  killed; everything read before that is still delivered. Nothing normalized
+  a run's stdout before, so a one-shot run that pipes it could not treat the
+  stream as its record.
+- `ClaudeCodeAdapter` implements it for `claude -p --output-format
+  stream-json --verbose`. Each record is read through the same handler as
+  `Parse`, so a run's stream and its transcript yield the same events and
+  marks; only the prompt's user-message mark is transcript-only, because -p
+  does not echo the prompt. A subagent's records, which share the parent's
+  stream, pair within their own conversation.
 
 ## [0.5.0] - 2026-09-24
 

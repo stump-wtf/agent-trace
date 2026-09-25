@@ -10,13 +10,26 @@ import (
 // ReadJSONLines streams JSON lines from r, calling visit for each non-empty
 // line. Handles both \n and \r\n line endings. Returns nil on EOF.
 func ReadJSONLines(r io.Reader, visit func([]byte)) error {
+	return scanJSONLines(r, func(line []byte) error {
+		visit(line)
+		return nil
+	})
+}
+
+// scanJSONLines is ReadJSONLines with a way out: it stops at, and returns,
+// the first error visit returns. Each line is handed over as soon as its
+// terminator is read, so on a pipe a record is visited while the writer is
+// still running.
+func scanJSONLines(r io.Reader, visit func([]byte) error) error {
 	reader := bufio.NewReaderSize(r, 64*1024)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			line = bytes.TrimRight(line, "\r\n")
 			if len(line) > 0 {
-				visit(line)
+				if verr := visit(line); verr != nil {
+					return verr
+				}
 			}
 		}
 		if err != nil {
