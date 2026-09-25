@@ -261,11 +261,17 @@ func NewWatcherWithConfig(cfg WatchConfig, adapters []Adapter) *Watcher {
 	if len(cfg.VerifyPatterns) > 0 || cfg.ErrorExcerptBytes > 0 {
 		for _, a := range adapters {
 			if os, ok := a.(OptionsSetter); ok {
-				os.SetOptions(&classify.Options{
-					VerifyPatterns:    cfg.VerifyPatterns,
-					ErrorExcerptBytes: cfg.ErrorExcerptBytes,
-					Redact:            cfg.Redact,
-				})
+				// Start from the filesystem-backed default each adapter falls
+				// back to when it has no Options, not an empty struct: the
+				// injected value replaces that default, so leaving out
+				// FileExists, HomeDir and TmpDir kept every missing weak
+				// target and lost home/tmp scoping whenever either setting
+				// was on (#116). One Options per adapter, so no adapter can
+				// see another's.
+				opts := osClassifyOptions(cfg.VerifyPatterns)
+				opts.ErrorExcerptBytes = cfg.ErrorExcerptBytes
+				opts.Redact = cfg.Redact
+				os.SetOptions(opts)
 			}
 		}
 	}

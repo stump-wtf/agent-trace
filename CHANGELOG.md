@@ -11,6 +11,20 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Fixed
+
+- Setting `WatchConfig.VerifyPatterns` or `WatchConfig.ErrorExcerptBytes`
+  no longer drops the filesystem-backed classification every adapter uses by
+  default. `NewWatcherWithConfig` injected a `classify.Options` holding only
+  those fields, which replaced the adapter's default and so carried no
+  `FileExists`, `HomeDir` or `TmpDir`: a weak target inferred from command
+  text (`cat does/not/exist.go`) was kept even when the file did not exist,
+  and a file under the home directory landed in `Outside` as `other` instead
+  of `home`. The watcher now starts from the same default and adds the
+  settings to it (#116). A consumer that sets either field will see fewer
+  weak `Targets` and different `Outside` scopes than before — the values an
+  unconfigured watcher already produced.
+
 ## [0.5.0] - 2026-09-24
 
 ### Added
