@@ -11,6 +11,17 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Changed
+
+- `tail`: the Claude Code usage lookback a `ParseSince` performs for each
+  conversation it first meets is now capped at 4 MiB instead of the general
+  16 MiB record-walk default. The cap bounds the backwards read a
+  latency-sensitive poll pays the first time a conversation appears. When a
+  conversation's last pre-watermark usage record lies farther back than the
+  cap, the first post-watermark record of the response an earlier read
+  already reported is reported a second time — a once-per-conversation
+  double count that inflates usage, never drops it (see #143).
+
 ## [0.6.0] - 2026-09-25
 
 ### Fixed

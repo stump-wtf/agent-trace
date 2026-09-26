@@ -177,7 +177,8 @@ func jsonlRecordBefore(f *os.File, offset int64) (line []byte, start int64, ok b
 
 // jsonlLastMatchBefore walks the complete records that end at or before
 // offset, newest first, and returns the first one match accepts, or nil when
-// none does.
+// none does. It gives up after jsonlLastMatchCap bytes; pass
+// jsonlLastMatchBeforeUpTo for a caller-specific bound.
 //
 // The incremental readers use it to recover state a record before their
 // watermark left behind — the API response a Claude Code usage report
@@ -187,12 +188,19 @@ func jsonlRecordBefore(f *os.File, offset int64) (line []byte, start int64, ok b
 // bytes rather than read a long session backwards on every poll; a caller
 // treats nil as "nothing recorded".
 func jsonlLastMatchBefore(path string, offset int64, match func([]byte) bool) []byte {
+	return jsonlLastMatchBeforeUpTo(path, offset, jsonlLastMatchCap, match)
+}
+
+// jsonlLastMatchBeforeUpTo is jsonlLastMatchBefore with a caller-supplied
+// bound on how far the walk goes back, for readers whose recovery step can
+// afford a documented miss where the 16 MiB default would not.
+func jsonlLastMatchBeforeUpTo(path string, offset int64, cap int64, match func([]byte) bool) []byte {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
-	for end := offset; end > 0 && offset-end <= jsonlLastMatchCap; {
+	for end := offset; end > 0 && offset-end <= cap; {
 		line, start, ok := jsonlRecordBefore(f, end)
 		if !ok {
 			return nil

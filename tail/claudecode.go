@@ -744,14 +744,33 @@ type ccUsage struct {
 // watermark, once, for that conversation's last usage-bearing line — the
 // same line a full read would have seen last. That keeps an incremental read
 // reporting exactly what Parse reports, so a response is delivered once.
+// The walk is bounded (ccUsageLookBackCap); see lookBack for what a miss
+// costs.
 type ccUsageTracker struct {
 	path   string
 	offset int64
 	last   map[string]string // conversation → response key of its last usage-bearing line
+	// lookBackCap bounds how far lookBack walks back, in bytes. Tests set it
+	// small to pin the documented miss; production callers take the default.
+	lookBackCap int64
 }
 
+// ccUsageLookBackCap bounds how far a ParseSince's usage lookback walks
+// back past the watermark: 4 MiB, a quarter of jsonlLastMatchCap's default.
+// The record wanted — the conversation's last usage-bearing line — is
+// normally a few records back, and Claude Code records average tens of
+// kilobytes against a measured worst case of ~1.1 MiB per line, so 4 MiB
+// still reaches it in all but pathological sessions. When the walk gives up,
+// a response may double-count once: the first usage-bearing record a
+// resuming read sees for that conversation reports as new what an earlier
+// read already reported. That is the documented tradeoff (#143) for not
+// paying up to 16 MiB of backwards reads on the latency-sensitive poll path
+// the first time each conversation appears. The counts never silently drop —
+// the duplicate inflates, and a full read never duplicates.
+const ccUsageLookBackCap = 4 << 20
+
 func newCCUsageTracker(path string, offset int64) *ccUsageTracker {
-	return &ccUsageTracker{path: path, offset: offset, last: map[string]string{}}
+	return &ccUsageTracker{path: path, offset: offset, last: map[string]string{}, lookBackCap: ccUsageLookBackCap}
 }
 
 // ccConversation names the conversation a line belongs to: the parent's, or
@@ -813,10 +832,14 @@ func (t *ccUsageTracker) report(line ccRawLine, msg ccMessage, seq int) (classif
 }
 
 // lookBack returns the response key of conv's last usage-bearing line before
-// the watermark, or "" when there is none within reach.
+// the watermark, or "" when there is none within reach. Reach is bounded by
+// the tracker's lookBackCap (ccUsageLookBackCap): a conversation whose last
+// pre-watermark response lies farther back yields "", and the first response
+// the resuming read sees for it is reported a second time — the documented
+// once-per-conversation double count (#143), never a dropped count.
 func (t *ccUsageTracker) lookBack(conv string) string {
 	var key string
-	jsonlLastMatchBefore(t.path, t.offset, func(data []byte) bool {
+	jsonlLastMatchBeforeUpTo(t.path, t.offset, t.lookBackCap, func(data []byte) bool {
 		var line ccRawLine
 		if json.Unmarshal(data, &line) != nil || line.Type != "assistant" || ccConversation(line) != conv {
 			return false
