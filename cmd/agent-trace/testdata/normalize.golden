@@ -46,6 +46,9 @@
     "errorExcerpt": "401 Unauthorized: token=[REDACTED] was rejected",
     "inputDigest": "a291ea21c51852a6e6816d82c70707ac2dc444847e44a51517a10836e67c42d8",
     "isError": true,
+    "programs": [
+      "http"
+    ],
     "resultBytes": 60,
     "seq": 1,
     "summary": "http POST https://example.com/deploy 'Authorization: Bearer [REDACTED]' -> 0 targets, 0 outside error",
@@ -60,6 +63,9 @@
     "action": "exec",
     "inputDigest": "fb5faeed5ed5e985de3761f8939a69751a2d0ca15fcebb3ac77f736d8ea5c9ea",
     "isError": false,
+    "programs": [
+      "git"
+    ],
     "resultBytes": 21,
     "seq": 2,
     "summary": "git push https://ci:[REDACTED]@example.com/repo.git -> 0 targets, 0 outside",
@@ -82,6 +88,9 @@
     "action": "verify",
     "inputDigest": "d7e5989af12b7e6bbe4472506ac9626e0f9e63fd4449d65b80dd012652e6610c",
     "isError": false,
+    "programs": [
+      "go"
+    ],
     "resultBytes": 2,
     "seq": 3,
     "summary": "go test ./... -> 0 targets, 0 outside",

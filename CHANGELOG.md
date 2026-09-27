@@ -11,6 +11,19 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Added
+
+- `classify.Event.Programs` (`programs` in JSON): the programs a shell call
+  runs, as executable basenames in first-seen order, with the exported
+  `classify.Programs` that computes it. A consumer can now key what a run
+  executed (a linter, a test runner) without re-parsing command text, which
+  `Event` never kept. It covers `Bash`, `bash`, `exec_command` (a string or an
+  argv array) and an `exec` wrapper's static commands. The parse honors quotes,
+  redirects and heredoc bodies, unwraps `sudo`/`env`/`timeout`/`xargs` and
+  similar, follows `sh -c` scripts up to three levels, drops shell builtins and
+  keywords, keeps at most 32, and leaves out any program whose name is computed
+  at run time, so the list is a lower bound.
+
 ### Changed
 
 - `tail`: the Claude Code usage lookback a `ParseSince` performs for each

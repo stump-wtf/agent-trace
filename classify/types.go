@@ -40,6 +40,12 @@ type Event struct {
 	// order the transcript stored them in, and different otherwise. It does
 	// not include the tool name. See digest.go.
 	InputDigest string `json:"inputDigest,omitempty"`
+	// Programs lists the programs a shell call runs, as executable basenames
+	// in first-seen order: `cd x && go test ./... | tee out` gives go and tee.
+	// It is empty for any tool that is not a shell, and a lower bound for one
+	// that is: a program whose name is computed at run time is left out. See
+	// Programs in programs.go.
+	Programs []string `json:"programs,omitempty"`
 }
 
 // Target is a repo file touched by a tool call, with the deepest interaction
