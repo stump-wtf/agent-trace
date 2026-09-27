@@ -616,7 +616,8 @@ The module path lives on the GitHub mirror because Go resolves versions there.
 Tags are created on Gitea and reach GitHub through the push mirror — never tag the
 mirror directly, as the next sync prunes refs the source does not have.
 
-[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/stump-wtf/agent-trace/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.6.0
 [0.5.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.5.0
 [0.4.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.4.0
