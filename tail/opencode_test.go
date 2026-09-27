@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stump-wtf/agent-trace/classify"
 	_ "modernc.org/sqlite"
 )
 
@@ -280,5 +281,79 @@ func TestOpenCodeMissingDB(t *testing.T) {
 	}
 	if len(metas) != 0 {
 		t.Errorf("expected 0 sessions for missing DB, got %d", len(metas))
+	}
+}
+
+func TestOpenCodeShellFailed(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "opencode.db")
+	createTestOpenCodeDB(t, dbPath)
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "oc-session-fail"
+	modelJSON := `{"id":"gpt-5","providerID":"openai"}`
+	if _, err := db.Exec(`INSERT INTO session (id, project_id, slug, directory, title, version, model, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, "proj-1", "test-slug", "/test/project", "Fail Session", "1.0.0", modelJSON, 1784148215000, 1784148220000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		"msg-1", sessionID, 1784148216000, 1784148216000, `{"role":"user","content":"run the tests"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		"msg-2", sessionID, 1784148217000, 1784148217000, `{"role":"assistant","content":"running"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	parts := []struct {
+		id   string
+		data string
+	}{
+		{"part-1", `{"type":"tool","tool":"bash","callID":"call-1","state":{"status":"completed","input":{"command":"go test ./..."},"metadata":{"exit":1,"output":"FAIL"},"output":"FAIL"}}`},
+		{"part-2", `{"type":"tool","tool":"bash","callID":"call-2","state":{"status":"completed","input":{"command":"ls"},"metadata":{"exit":0},"output":""}}`},
+		{"part-3", `{"type":"tool","tool":"bash","callID":"call-3","state":{"status":"completed","input":{"command":"sleep 999"},"metadata":{"exit":null},"output":"aborted"}}`},
+		{"part-4", `{"type":"tool","tool":"read","callID":"call-4","state":{"status":"completed","input":{"path":"x.go"},"output":"ok"}}`},
+		{"part-5", `{"type":"tool","tool":"bash","callID":"call-5","state":{"status":"error","input":{"command":"go test"},"error":"test failed"}}`},
+	}
+	for _, p := range parts {
+		if _, err := db.Exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+			p.id, "msg-2", sessionID, 1784148217000, 1784148217000, p.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+
+	adapter := OpenCodeAdapter{DBPath: dbPath}
+	path := dbPath + "/" + sessionID
+
+	for _, run := range []struct {
+		name  string
+		parse func() ([]classify.Event, []classify.Mark, SessionMeta, int64, error)
+	}{
+		{"Parse", func() ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+			events, marks, meta, err := adapter.Parse(context.Background(), path)
+			return events, marks, meta, 0, err
+		}},
+		{"ParseSince", func() ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
+			return adapter.ParseSince(context.Background(), path, 0, 0)
+		}},
+	} {
+		t.Run(run.name, func(t *testing.T) {
+			events, _, _, _, err := run.parse()
+			if err != nil {
+				t.Fatalf("parse failed: %v", err)
+			}
+			if len(events) != len(parts) {
+				t.Fatalf("expected %d events, got %d", len(parts), len(events))
+			}
+			for i, want := range []bool{true, false, false, false, true} {
+				if events[i].IsError != want {
+					t.Errorf("event %d (%s) IsError = %v, want %v", i, events[i].Tool, events[i].IsError, want)
+				}
+			}
+		})
 	}
 }

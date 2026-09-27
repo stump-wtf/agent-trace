@@ -395,6 +395,7 @@ func (a OpenCodeAdapter) Parse(ctx context.Context, path string) ([]classify.Eve
 				switch part.State.Status {
 				case "completed":
 					result.Content = part.State.Output
+					result.IsError = opencodeShellFailed(part.Tool, part.State)
 				case "error":
 					result.Content = part.State.Error
 					result.IsError = true
@@ -710,6 +711,7 @@ func (a OpenCodeAdapter) ParseSince(ctx context.Context, path string, watermark 
 				switch part.State.Status {
 				case "completed":
 					result.Content = part.State.Output
+					result.IsError = opencodeShellFailed(part.Tool, part.State)
 				case "error":
 					result.Content = part.State.Error
 					result.IsError = true
@@ -826,6 +828,22 @@ func opencodeSuperseded(msgCreated int64, lastAssistant sql.NullInt64) bool {
 	return lastAssistant.Valid && lastAssistant.Int64 > msgCreated
 }
 
+// opencodeShellFailed reports whether a completed tool part's state records a
+// failed shell command. OpenCode's bash tool finishes with
+// state.status "completed" whatever the exit code was and puts the code in
+// state.metadata.exit — a number, or null when the command was aborted or
+// timed out (packages/opencode/src/tool/shell.ts). Only bash and shell
+// metadata carries an exit field, so every other tool is never a failure
+// here. Aborted and timed-out commands stay unflagged: the state is
+// "completed" with a null exit, and the part's own text already notes why.
+func opencodeShellFailed(tool string, st *opencodeToolState) bool {
+	if (tool != "bash" && tool != "shell") || st == nil || st.Metadata == nil {
+		return false
+	}
+	exit, ok := (*st.Metadata)["exit"].(float64)
+	return ok && exit > 0
+}
+
 // windowMark pairs a mark with the storage timestamp of the row that produced
 // it, so an incremental window can trim its withheld tail by time — the raw
 // value the watermark compares against, which the rendered RFC 3339 string
@@ -851,11 +869,12 @@ type opencodePart struct {
 }
 
 type opencodeToolState struct {
-	Status string          `json:"status"`
-	Input  *map[string]any `json:"input"`
-	Raw    string          `json:"raw"`
-	Output string          `json:"output"`
-	Error  string          `json:"error"`
+	Status   string          `json:"status"`
+	Input    *map[string]any `json:"input"`
+	Metadata *map[string]any `json:"metadata"`
+	Raw      string          `json:"raw"`
+	Output   string          `json:"output"`
+	Error    string          `json:"error"`
 }
 
 // msToRFC3339 renders an OpenCode timestamp as RFC 3339. OpenCode writes

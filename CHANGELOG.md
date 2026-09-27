@@ -60,6 +60,19 @@ breaking changes arrive in minor releases. See the note under
   keywords, keeps at most 32, and leaves out any program whose name is computed
   at run time, so the list is a lower bound.
 
+### Fixed
+
+- `tail`: the OpenCode adapter flags a failed shell command as `IsError`,
+  completing for OpenCode what 0.6.0 did for Crush. A bash or shell part
+  finishes with `state.status "completed"` whatever the exit code was, and
+  the adapter read only the part's own error flag — so a build or test that
+  failed never reached `IsError`, `Summary`, the span status or
+  `ErrorExcerpt`. The adapter now reads the exit code the tool records in
+  `state.metadata.exit`: a non-zero number sets `IsError`, zero does not,
+  and a null exit — an aborted or timed-out command — stays unflagged. This
+  changes `IsError`, and with it `Summary` and span status, for existing
+  consumers (see #115).
+
 ### Changed
 
 - `tail`: the Claude Code usage lookback a `ParseSince` performs for each
