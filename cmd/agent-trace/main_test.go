@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	redactpkg "github.com/stump-wtf/agent-trace/redact"
 	"github.com/stump-wtf/agent-trace/tail"
 )
 
@@ -108,8 +109,8 @@ func TestRedactedByDefault(t *testing.T) {
 					t.Errorf("output carries %q", s)
 				}
 			}
-			if !strings.Contains(out, redacted) {
-				t.Errorf("output has no %s marker", redacted)
+			if !strings.Contains(out, redactpkg.Mask) {
+				t.Errorf("output has no %s marker", redactpkg.Mask)
 			}
 		})
 	}
@@ -124,15 +125,15 @@ func TestNoRedactKeepsRawText(t *testing.T) {
 					t.Errorf("--no-redact output lacks %q", s)
 				}
 			}
-			if strings.Contains(out, redacted) {
-				t.Errorf("--no-redact output has a %s marker", redacted)
+			if strings.Contains(out, redactpkg.Mask) {
+				t.Errorf("--no-redact output has a %s marker", redactpkg.Mask)
 			}
 		})
 	}
 }
 
 // TestErrorExcerptOptIn checks --error-excerpt-bytes reaches the adapter: no
-// excerpt without it, and the redacted one with it.
+// excerpt without it, and the redactpkg.Mask one with it.
 func TestErrorExcerptOptIn(t *testing.T) {
 	_, out, _ := cli(t, "normalize", "--harness", "claude-code", fixture)
 	if strings.Contains(out, "errorExcerpt") {
@@ -140,7 +141,7 @@ func TestErrorExcerptOptIn(t *testing.T) {
 	}
 	_, out, _ = cli(t, "normalize", "--harness", "claude-code", "--error-excerpt-bytes", "200", fixture)
 	if !strings.Contains(out, `"errorExcerpt":"401 Unauthorized: token=[REDACTED] was rejected"`) {
-		t.Fatalf("want the redacted excerpt, got:\n%s", out)
+		t.Fatalf("want the redactpkg.Mask excerpt, got:\n%s", out)
 	}
 }
 

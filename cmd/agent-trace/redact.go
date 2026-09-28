@@ -1,7 +1,7 @@
 package main
 
 import (
-	"regexp"
+	redactpkg "github.com/stump-wtf/agent-trace/redact"
 
 	"github.com/stump-wtf/agent-trace/classify"
 	"github.com/stump-wtf/agent-trace/tail"
@@ -31,59 +31,11 @@ import (
 //
 // @joestump-agent 09/25/2026 - Added with the agent-trace CLI (#133).
 
-// redacted replaces every secret the redactor finds.
-const redacted = "[REDACTED]"
-
-// credentialLabel opens capture group 1 on a key that names a credential and
-// its separator, up to where the value starts; each pattern using it closes
-// the group itself. The keyword must end the key or be followed by a
-// separator, so max_tokens and input_tokens — counts, not credentials — are
-// left alone.
-const credentialLabel = `(?i)(\b[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)(?:[_.-][A-Za-z0-9_.-]*)?["']?\s*[:=]\s*`
-
-// secretPatterns are applied in order. Each replaces its match with repl, a
-// regexp.Expand template: a pattern that names a credential by its label —
-// "Bearer ", "password=" — keeps the label in ${1}, so the output still says
-// what kind of value was removed.
-var secretPatterns = []struct {
-	re   *regexp.Regexp
-	repl string
-}{
-	// A PEM private key block, header to footer.
-	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`), redacted},
-	// An Authorization header, whatever its scheme, bare or as a quoted JSON
-	// or dict value.
-	{regexp.MustCompile(`(?i)(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|token)\s+)?)[^\s"',;]+`), "${1}" + redacted},
-	// A bearer credential outside a header.
-	{regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{16,}`), "${1}" + redacted},
-	// The password in URL userinfo: scheme://user:password@host.
-	{regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^\s/:@]+:)[^\s/@]+@`), "${1}" + redacted + "@"},
-	// key=value and key: value where the key names a credential, quoted
-	// values first so the quotes survive around the marker.
-	{regexp.MustCompile(credentialLabel + `")[^"\n]*"`), "${1}" + redacted + `"`},
-	{regexp.MustCompile(credentialLabel + `')[^'\n]*'`), "${1}" + redacted + `'`},
-	{regexp.MustCompile(credentialLabel + `)[^\s"',;&|)]+`), "${1}" + redacted},
-	// A command-line flag naming a credential, with its value as the next
-	// argument: --password hunter2, --api-key "abc". The flag name must end
-	// on the keyword, so --token-file and --max-tokens are left alone.
-	{regexp.MustCompile(`(?i)((?:^|\s)--?[A-Za-z0-9-]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key)\s+["']?)[^\s"',;&|)]+`), "${1}" + redacted},
-	// curl's user:password credential: curl -u user:pass, --user user:pass.
-	{regexp.MustCompile(`(\bcurl\b[^\n]*?\s(?:-u\s*|--user[=\s]\s*)["']?[^\s:"']+:)[^\s"']+`), "${1}" + redacted},
-	// Well-known token shapes, wherever they appear.
-	{regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,})`), redacted},
-	{regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}`), redacted},
-	{regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{8,}`), redacted},
-	{regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`), redacted},
-	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), redacted},
-}
-
-// defaultRedact removes the credentials secretPatterns recognise from s.
-// It is the redactor the CLI applies unless --no-redact is given.
+// defaultRedact is the shared redactor (github.com/stump-wtf/agent-trace/redact,
+// the one redactor Harness, agent-trace and Cairn use per ADR-0033). It is the
+// redactor the CLI applies unless --no-redact is given.
 func defaultRedact(s string) string {
-	for _, p := range secretPatterns {
-		s = p.re.ReplaceAllString(s, p.repl)
-	}
-	return s
+	return redactpkg.Redact(s)
 }
 
 // redactAll runs redact over every free-text field of a parsed session that

@@ -11,6 +11,21 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Added
+
+- `redact`, the one credential redactor Harness, agent-trace and Cairn share
+  (Harness ADR-0033, Decision 7). The engine is betterleaks v1.8.1 with its
+  default rule set, pinned to an exact version and imported by this package
+  alone; on top of it sit the rules ported from Harness's `internal/redact` —
+  URL userinfo, Authorization-style headers, secret-named assignments, flags
+  and `curl -u`, vendor token shapes, and multi-line PEM blocks. The API is
+  ours: `Redact(string) string`, `Findings(string) []Finding`, and a
+  `Lines` line-stream redactor that carries PEM block state across calls.
+  Mask is `[REDACTED]`, matching Harness and Cairn, live validation is off —
+  redaction never touches the network — and the detector is built once per
+  process. The CLI's `defaultRedact` hook is now this package, replacing the
+  CLI-local pattern list (see #134).
+
 ## [0.7.1] - 2026-09-27
 
 ### Fixed
