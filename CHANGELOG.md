@@ -11,6 +11,18 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-27
+
+### Fixed
+
+- No code change. The `v0.7.0` tag was pushed, its release failed, and the
+  tag was re-pointed at the fixed commit — but the Go module checksum
+  database had already cached the first tag's bytes, so
+  `go install ...@v0.7.0` fails a checksum mismatch for every external
+  consumer and cannot be repaired. `v0.7.1` is the same commit re-released
+  under a fresh tag; install that. Homebrew is unaffected either way: the
+  tap formula pins the release tarball directly.
+
 ## [0.7.0] - 2026-09-27
 
 ### Added
@@ -618,7 +630,8 @@ The module path lives on the GitHub mirror because Go resolves versions there.
 Tags are created on Gitea and reach GitHub through the push mirror — never tag the
 mirror directly, as the next sync prunes refs the source does not have.
 
-[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/stump-wtf/agent-trace/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/stump-wtf/agent-trace/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.6.0
 [0.5.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.5.0
