@@ -11,6 +11,8 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-27
+
 ### Added
 
 - `classify.Event.Programs` (`programs` in JSON): the programs a shell call
