@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,6 +40,14 @@ func cli(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
 	code = run(context.Background(), args, strings.NewReader(""), &out, &errOut)
+	return code, out.String(), errOut.String()
+}
+
+// cliStdin is cli with the given standard input.
+func cliStdin(t *testing.T, in io.Reader, args ...string) (int, string, string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), args, in, &out, &errOut)
 	return code, out.String(), errOut.String()
 }
 
@@ -145,31 +153,50 @@ func TestErrorExcerptOptIn(t *testing.T) {
 	}
 }
 
-func TestStdinNotSupportedYet(t *testing.T) {
-	for _, args := range [][]string{
-		{"normalize", "--harness", "claude-code", "-"},
-		{"normalize", "--harness", "claude-code"},
-		{"otel", "--harness", "claude-code", "-"},
-	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			code, out, errOut := cli(t, args...)
-			if code != exitError {
-				t.Errorf("exit %d, want %d", code, exitError)
-			}
-			if out != "" {
-				t.Errorf("wrote to stdout: %q", out)
-			}
-			if !strings.Contains(errOut, errStdinUnsupported.Error()) {
-				t.Errorf("stderr = %q, want the not-supported error", errOut)
-			}
-		})
+// streamFixture is a recorded claude-code stream, replayed through the CLI's
+// stdin path: an init record, an answered Read tool call, a text turn and a
+// final result.
+var streamFixture = strings.Join([]string{
+	`{"type":"system","subtype":"init","cwd":"/home/user/project","session_id":"5f0c2a4e-0000-4000-8000-000000000132","tools":["Bash","Read"],"mcp_servers":[]}`,
+	`{"type":"assistant","message":{"id":"msg_01A","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[{"type":"tool_use","id":"toolu_01A","name":"Read","input":{"file_path":"/home/user/project/note.txt"}}]},"session_id":"5f0c2a4e-0000-4000-8000-000000000132"}`,
+	`{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01A","type":"tool_result","content":"     1\thello fixture\n"}]},"parent_tool_use_id":null,"session_id":"5f0c2a4e-0000-4000-8000-000000000132"}`,
+	`{"type":"assistant","message":{"id":"msg_01B","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[{"type":"text","text":"hello"}]},"session_id":"5f0c2a4e-0000-4000-8000-000000000132"}`,
+	`{"type":"result","subtype":"success","is_error":false,"duration_ms":6120,"duration_api_ms":5480,"num_turns":3,"result":"done","session_id":"5f0c2a4e-0000-4000-8000-000000000132"}`,
+	"",
+}, "\n")
+
+func TestStdinStream(t *testing.T) {
+	code, out, errOut := cliStdin(t, strings.NewReader(streamFixture), "normalize", "--harness", "claude-code", "-")
+	if code != exitOK {
+		t.Fatalf("exit %d, stderr: %s", code, errOut)
+	}
+	var kinds []string
+	for i, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		var rec record
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("output line %d is not a record: %v\n%s", i+1, err, line)
+		}
+		kinds = append(kinds, rec.Kind)
+	}
+	want := []string{"session", "event", "result"}
+	if len(kinds) != len(want) {
+		t.Fatalf("record kinds = %v, want %v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Errorf("record %d kind = %q, want %q", i, kinds[i], want[i])
+		}
 	}
 
-	// The sentinel is what #132 replaces, so it must come back unwrapped
-	// enough for errors.Is.
-	_, err := load(context.Background(), config{harness: "claude-code"}, "-", strings.NewReader("{}\n"))
-	if !errors.Is(err, errStdinUnsupported) {
-		t.Fatalf("load(-) = %v, want errStdinUnsupported", err)
+	// otel builds from a stream too.
+	if _, _, errOut := cliStdin(t, strings.NewReader(streamFixture), "otel", "--harness", "claude-code", "-"); errOut != "" {
+		t.Errorf("otel from stdin: %s", errOut)
+	}
+
+	// A harness without a stream format names the problem.
+	code, _, errOut = cliStdin(t, strings.NewReader("{}\n"), "normalize", "--harness", "crush", "-")
+	if code != exitError || !strings.Contains(errOut, "no structured stream format") {
+		t.Errorf("crush stdin: exit %d, stderr %q, want the no-stream error", code, errOut)
 	}
 }
 

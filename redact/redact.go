@@ -184,20 +184,29 @@ func Findings(s string) []Finding {
 	for _, r := range rules {
 		for _, loc := range r.re.FindAllStringSubmatchIndex(s, -1) {
 			// The secret is the last capture group the rule fills; for the
-			// value-keeping rules it is the final group.
-			secretStart, secretEnd := loc[len(loc)-2], loc[len(loc)-1]
+			// value-keeping rules it is the final group. A rule with no
+			// capture group leaves that pair -1/-1, and the whole match is
+			// then the only span there is to report.
+			secretStart, secretEnd := loc[0], loc[1]
 			secret := ""
-			if secretStart >= 0 {
+			if n := len(loc); n >= 4 && loc[n-2] >= 0 {
+				secretStart, secretEnd = loc[n-2], loc[n-1]
 				secret = s[secretStart:secretEnd]
 			}
+			// Lines and columns count from 1, as betterleaks' findings do, so
+			// a caller can put the two engines' positions side by side. The
+			// column is offset from the start of the secret's own line, not
+			// from the start of s.
+			lineStart := strings.LastIndex(s[:secretStart], "\n") + 1
+			line := 1 + strings.Count(s[:secretStart], "\n")
 			out = append(out, Finding{
 				RuleID:      r.id,
 				Description: r.re.String(),
 				Secret:      secret,
-				StartLine:   1,
-				EndLine:     1 + strings.Count(s[:secretStart], "\n"),
-				StartColumn: secretStart,
-				EndColumn:   secretEnd,
+				StartLine:   line,
+				EndLine:     line,
+				StartColumn: secretStart - lineStart + 1,
+				EndColumn:   secretEnd - lineStart + 1,
 			})
 		}
 	}

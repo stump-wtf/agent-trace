@@ -198,6 +198,33 @@ func TestFindings(t *testing.T) {
 	}
 }
 
+// TestFindingsPositions: a finding's line and column count from 1, the way
+// betterleaks' own findings do, so a caller can put the two engines' positions
+// side by side. The parser rules reported 0-based lines and columns while the
+// betterleaks findings beside them were 1-based, which put a secret on the last
+// of three lines at line 3 from one engine and line 2 from the other.
+func TestFindingsPositions(t *testing.T) {
+	secret := fixtures.Replace("<TOKEN>")
+	in := fixtures.Replace("first line\nsecond line\nGITEA_TOKEN=<TOKEN>")
+	// The secret begins one column past the newline that opens its line,
+	// columns counting from 1.
+	at := strings.Index(in, secret)
+	wantCol := at - strings.LastIndex(in[:at], "\n")
+	for _, f := range Findings(in) {
+		if f.Secret != secret {
+			continue
+		}
+		if f.StartLine != 3 || f.EndLine != 3 {
+			t.Errorf("lines = %d-%d, want 3-3", f.StartLine, f.EndLine)
+		}
+		if f.StartColumn != wantCol {
+			t.Errorf("column = %d, want %d", f.StartColumn, wantCol)
+		}
+		return
+	}
+	t.Fatalf("no finding for the assignment value in %q", in)
+}
+
 // blockingTransport fails any HTTP request. Swapped in for
 // http.DefaultTransport around redaction, it turns "no network" from a claim
 // into a failing test: betterleaks' live validation would have to dial out to

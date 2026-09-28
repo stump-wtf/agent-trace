@@ -8,8 +8,11 @@
 //
 // Output is redacted by default; see redact.go.
 //
-// @joestump-agent 09/25/2026 - Added for #133. Reading a structured stream
-// from stdin ("-") waits on the io.Reader API in #132.
+// @joestump-agent 09/25/2026 - Added for #133. The stdin ("-") path reads a
+// structured stream through tail.StreamParser (#132).
+// @joestump-agent 09/27/2026 - Wired stdin to ParseStream now that #132 has
+// landed, and switched the default redactor to the shared redact package
+// (#134).
 package main
 
 import (
@@ -53,8 +56,9 @@ Harnesses:
   ` + "%s" + `
 
 The transcript is a session file for the JSONL harnesses, and
-<database>/<session-id> for crush and opencode. "-" (standard input) is
-reserved for reading a structured stream and is not supported yet.
+<database>/<session-id> for crush and opencode. "-" reads a structured
+stream from standard input (claude-code's stream-json), for piping the
+agent's stdout straight in: agent-trace normalize --harness claude-code -
 
 Flags:
 `
@@ -182,11 +186,6 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 // errUnknownHarness reports a --harness value no adapter answers to.
 var errUnknownHarness = errors.New("unknown harness")
 
-// errStdinUnsupported is what reading a stream from standard input returns
-// until the io.Reader API (#132) lands. It is a sentinel rather than a usage
-// error so the stdin branch in load is the one place #132 plugs into.
-var errStdinUnsupported = errors.New(`reading a stream from standard input ("-") is not supported yet (needs agent-trace#132); pass a transcript path`)
-
 // adapters maps each --harness name to a constructor for its adapter. A fresh
 // adapter per call, because SetOptions mutates it.
 var adapters = map[tail.Harness]func() tail.Adapter{
@@ -212,6 +211,9 @@ type session struct {
 	meta   tail.SessionMeta
 	events []classify.Event
 	marks  []classify.Mark
+	// result is the stream's final result; nil for a transcript read, and
+	// for a stream that ended without one (a killed process).
+	result *tail.StreamResult
 }
 
 // load parses src with the adapter for cfg.harness and applies redaction
@@ -241,10 +243,11 @@ func load(ctx context.Context, cfg config, src string, stdin io.Reader) (session
 	}
 
 	if src == "-" {
-		// #132 plugs in here: an adapter with a stream format reads stdin
-		// and returns the same events, marks and meta Parse does.
-		_ = stdin
-		return session{}, errStdinUnsupported
+		sp, ok := a.(tail.StreamParser)
+		if !ok {
+			return session{}, fmt.Errorf("harness %q has no structured stream format to read from standard input; pass a transcript path", cfg.harness)
+		}
+		return loadStream(ctx, sp, stdin, redact)
 	}
 
 	events, marks, meta, err := a.Parse(ctx, src)
@@ -258,6 +261,41 @@ func load(ctx context.Context, cfg config, src string, stdin io.Reader) (session
 		redactAll(redact, &meta, events, marks)
 	}
 	return session{meta: meta, events: events, marks: marks}, nil
+}
+
+// loadStream reads a structured stream with sp's ParseStream, redacting as
+// the records arrive. The stream is the run as it happens, so nothing waits
+// for EOF: each event and mark is redacted and collected in the handler, and
+// the final metadata and Result arrive with ParseStream's return.
+func loadStream(ctx context.Context, sp tail.StreamParser, r io.Reader, redact func(string) string) (session, error) {
+	var s session
+	h := tail.StreamHandler{
+		Event: func(e classify.Event) {
+			if redact != nil {
+				e.Summary = redact(e.Summary)
+				e.ErrorExcerpt = redact(e.ErrorExcerpt)
+			}
+			s.events = append(s.events, e)
+		},
+		Mark: func(m classify.Mark) {
+			if redact != nil {
+				m.Note = redact(m.Note)
+			}
+			s.marks = append(s.marks, m)
+		},
+	}
+	meta, result, err := sp.ParseStream(ctx, r, h)
+	if err != nil {
+		return session{}, err
+	}
+	if redact != nil {
+		meta.Title = redact(meta.Title)
+	}
+	s.meta = meta
+	// A stream arrives in order; ParseStream hands events and marks out in
+	// stream order, which is seq order, so there is nothing to sort.
+	s.result = result
+	return s, nil
 }
 
 // fsClassifyOptions mirrors the Options tail's adapters build for themselves
@@ -278,14 +316,16 @@ func fsClassifyOptions() *classify.Options {
 	}
 }
 
-// record is one line of normalize output. Exactly one of Session, Event and
-// Mark is set, named by Kind, so a consumer switches on kind without probing
-// fields. A stream's final result (#132) becomes a fourth kind.
+// record is one line of normalize output. Exactly one of Session, Event,
+// Mark and Result is set, named by Kind, so a consumer switches on kind
+// without probing fields. Result only ever follows the records it belongs
+// to: it is a stream's final summary, and never written for a transcript.
 type record struct {
-	Kind    string            `json:"kind"`
-	Session *tail.SessionMeta `json:"session,omitempty"`
-	Event   *classify.Event   `json:"event,omitempty"`
-	Mark    *classify.Mark    `json:"mark,omitempty"`
+	Kind    string             `json:"kind"`
+	Session *tail.SessionMeta  `json:"session,omitempty"`
+	Event   *classify.Event    `json:"event,omitempty"`
+	Mark    *classify.Mark     `json:"mark,omitempty"`
+	Result  *tail.StreamResult `json:"result,omitempty"`
 }
 
 // writeNormalized writes the session record, then events and marks merged in
@@ -309,6 +349,11 @@ func writeNormalized(w io.Writer, s session) error {
 			ei++
 		}
 		if err := enc.Encode(rec); err != nil {
+			return err
+		}
+	}
+	if s.result != nil {
+		if err := enc.Encode(record{Kind: "result", Result: s.result}); err != nil {
 			return err
 		}
 	}

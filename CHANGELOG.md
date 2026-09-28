@@ -26,6 +26,13 @@ breaking changes arrive in minor releases. See the note under
   process. The CLI's `defaultRedact` hook is now this package, replacing the
   CLI-local pattern list (see #134).
 
+- `cmd/agent-trace` reads a structured stream from standard input:
+  `agent-trace normalize --harness claude-code -` pipes the agent's stdout
+  straight through the same normalization a transcript gets, with the run's
+  final `result` record — outcome, turns, duration, cost and usage — written
+  last when the stream carries one. A harness with no stream format names
+  that instead of a generic error (see #132, #133).
+
 ## [0.7.1] - 2026-09-27
 
 ### Fixed
