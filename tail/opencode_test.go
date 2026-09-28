@@ -357,3 +357,67 @@ func TestOpenCodeShellFailed(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenCodeShellFailedEdges covers the metadata shapes the seeded-store
+// test above does not reach: a missing exit key, an exit encoded as a string
+// rather than a number, the shell alias, and a namespaced tool name. Each is
+// a shape a live store can produce, and each must decide IsError without
+// panicking or silently inverting the rule.
+func TestOpenCodeShellFailedEdges(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "opencode.db")
+	createTestOpenCodeDB(t, dbPath)
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "oc-session-edges"
+	modelJSON := `{"id":"gpt-5","providerID":"openai"}`
+	if _, err := db.Exec(`INSERT INTO session (id, project_id, slug, directory, title, version, model, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, "proj-1", "test-slug", "/test/project", "Edge Session", "1.0.0", modelJSON, 1784148215000, 1784148220000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		"msg-1", sessionID, 1784148216000, 1784148216000, `{"role":"user","content":"run the tests"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		"msg-2", sessionID, 1784148217000, 1784148217000, `{"role":"assistant","content":"running"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	parts := []struct {
+		id   string
+		data string
+	}{
+		{"part-1", `{"type":"tool","tool":"bash","callID":"call-1","state":{"status":"completed","input":{"command":"go test"},"metadata":{"output":"FAIL"},"output":"FAIL"}}`},
+		{"part-2", `{"type":"tool","tool":"bash","callID":"call-2","state":{"status":"completed","input":{"command":"go test"},"metadata":{"exit":"1"},"output":"FAIL"}}`},
+		{"part-3", `{"type":"tool","tool":"shell","callID":"call-3","state":{"status":"completed","input":{"command":"go test"},"metadata":{"exit":2},"output":"FAIL"}}`},
+		{"part-4", `{"type":"tool","tool":"functions.bash","callID":"call-4","state":{"status":"completed","input":{"command":"go test"},"metadata":{"exit":1},"output":"FAIL"}}`},
+		{"part-5", `{"type":"tool","tool":"bash","callID":"call-5","state":{"status":"completed","input":{"command":"ls"},"metadata":{},"output":""}}`},
+	}
+	for _, p := range parts {
+		if _, err := db.Exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+			p.id, "msg-2", sessionID, 1784148217000, 1784148217000, p.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+
+	adapter := OpenCodeAdapter{DBPath: dbPath}
+	events, _, _, err := adapter.Parse(context.Background(), dbPath+"/"+sessionID)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(events) != len(parts) {
+		t.Fatalf("expected %d events, got %d", len(parts), len(events))
+	}
+	// A missing exit key, a string exit and a namespaced tool name all stay
+	// unflagged, which is the conservative reading of each.
+	for i, want := range []bool{false, false, true, false, false} {
+		if events[i].IsError != want {
+			t.Errorf("event %d (tool %q) IsError = %v, want %v", i, events[i].Tool, events[i].IsError, want)
+		}
+	}
+}

@@ -832,16 +832,29 @@ func opencodeSuperseded(msgCreated int64, lastAssistant sql.NullInt64) bool {
 // failed shell command. OpenCode's bash tool finishes with
 // state.status "completed" whatever the exit code was and puts the code in
 // state.metadata.exit — a number, or null when the command was aborted or
-// timed out (packages/opencode/src/tool/shell.ts). Only bash and shell
+// timed out (packages/opencode/src/tool/shell.ts, where the recording is
+// `exit: code` and code is null on abort or timeout). Only the shell tool's
 // metadata carries an exit field, so every other tool is never a failure
 // here. Aborted and timed-out commands stay unflagged: the state is
 // "completed" with a null exit, and the part's own text already notes why.
+//
+// A null exit and a missing one both parse to nil, which reads as "not a
+// failure" — opencodePart is decoded with encoding/json, which rejects fields
+// it cannot parse rather than tolerating them. The tool names are literal:
+// never derive them from the classify code-tool option, which strips a
+// namespace prefix ("functions.bash" -> "bash") for the classify path only.
 func opencodeShellFailed(tool string, st *opencodeToolState) bool {
 	if (tool != "bash" && tool != "shell") || st == nil || st.Metadata == nil {
 		return false
 	}
-	exit, ok := (*st.Metadata)["exit"].(float64)
-	return ok && exit > 0
+	var envelope struct {
+		Exit *int64 `json:"exit"`
+	}
+	encoded, err := json.Marshal(*st.Metadata)
+	if err != nil || json.Unmarshal(encoded, &envelope) != nil {
+		return false
+	}
+	return envelope.Exit != nil && *envelope.Exit > 0
 }
 
 // windowMark pairs a mark with the storage timestamp of the row that produced
