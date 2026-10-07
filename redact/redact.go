@@ -55,6 +55,10 @@ type Finding struct {
 	EndColumn   int
 }
 
+// secretWords are the words a secret-named assignment, flag or JSON key ends
+// in (jsonline.go's secretKey reuses them).
+const secretWords = `token|secret|password|passwd|passphrase|api[_-]?key|access[_-]?key|private[_-]?key`
+
 // rules are the ported Harness rules, run in order. Each keeps the label that
 // identified the secret and swaps only the value. No value rule starts on "["
 // or "$", so a Mask already in place, or a reference to a secret, is never
@@ -89,7 +93,7 @@ var rules = []struct {
 	// The name must END in the secret word (max_tokens= is not a secret) and
 	// not sit inside ${…} (a default, not a value); a value starting with "="
 	// is Go's := and one starting with "-" is the next flag.
-	{regexp.MustCompile(`(?i)(^|[^\w.${-])([a-z0-9_.-]*(?:token|secret|password|passwd|passphrase|api[_-]?key|access[_-]?key|private[_-]?key)"?\s*[=:]\s*)("[^"$][^"]*"|'[^'$][^']*'|[^\s"',;&=\[$-][^\s"',;&]*)`), "${1}${2}" + Mask, "secret-assignment"},
+	{regexp.MustCompile(`(?i)(^|[^\w.${-])([a-z0-9_.-]*(?:` + secretWords + `)"?\s*[=:]\s*)("[^"$][^"]*"|'[^'$][^']*'|[^\s"',;&=\[$-][^\s"',;&]*)`), "${1}${2}" + Mask, "secret-assignment"},
 	// A secret-named flag given its value as the next word.
 	{regexp.MustCompile(`(?i)(\s--?(?:password|passwd|token|api-key|secret|client-secret)\s+)("[^"$][^"]*"|'[^'$][^']*'|[^\s"'\[$-]\S*)`), "${1}" + Mask, "secret-flag"},
 	// Basic auth handed to curl or wget through their -u and --user flags,
@@ -158,6 +162,15 @@ func Redact(s string) string {
 		if f.Secret != "" && !strings.Contains(f.Secret, Mask) {
 			s = strings.ReplaceAll(s, f.Secret, Mask)
 		}
+	}
+	return applyRules(s)
+}
+
+// applyRules runs the ported rules over s, skipping them when no rule's
+// literal is present (prefilter.go).
+func applyRules(s string) string {
+	if !mayMatch(s) {
+		return s
 	}
 	for _, r := range rules {
 		s = r.re.ReplaceAllString(s, r.repl)

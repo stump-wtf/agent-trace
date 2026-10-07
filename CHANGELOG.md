@@ -35,6 +35,15 @@ breaking changes arrive in minor releases. See the note under
   last when the stream carries one. A harness with no stream format names
   that instead of a generic error (see #132, #133).
 
+- `redact.Lines.JSONLine` masks one line of a JSON-lines stream (Claude
+  Code's stream-json, a JSONL transcript) string literal by string literal:
+  a clean line comes back byte-identical, a masked one still parses, and a
+  string under a secret-named key (`password`, `api_key`, `GITEA_TOKEN`) is
+  masked whole. Masked as plain text, a rule ends a value at the escaped
+  quote and the line stops being JSON. Ported from Harness's
+  `internal/redact` with its tests, so Harness can drop its own redactor
+  (stump.wtf/harness#912).
+
 ### Fixed
 
 - `tail`: the OpenCode adapter flags a failed shell command as `IsError`,
@@ -52,6 +61,17 @@ breaking changes arrive in minor releases. See the note under
   The exit code is decoded into an integer field rather than asserted as a
   float, so a decoder change cannot silently stop flagging failures, and a
   missing, null or string exit stays unflagged.
+
+### Changed
+
+- `redact.Redact` skips the ported Harness rules for a string carrying none
+  of their literals (a scheme's `://`, a header name, a vendor prefix, a
+  secret word before `=` or `:`). Over 4 MiB of base64 (an image in a tool
+  result) those regexes cost 1.3s on Go's NFA, and now cost nothing. The
+  betterleaks pass is unchanged; it gates on its own rule keywords.
+  `FuzzMayMatchCoversRules` holds the prefilter to never skipping a string a
+  rule would change.
+
 
 ## [0.7.1] - 2026-09-27
 
