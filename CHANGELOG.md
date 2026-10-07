@@ -11,10 +11,12 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-07
+
 ### Added
 
 - `redact`, the one credential redactor Harness, agent-trace and Cairn share
-  (Harness ADR-0033, Decision 7). The engine is betterleaks v1.8.1 with its
+  (Harness ADR-0033, Decision 7). The engine is betterleaks v1.9.0 with its
   default rule set, pinned to an exact version and imported by this package
   alone; on top of it sit the rules ported from Harness's `internal/redact` —
   URL userinfo, Authorization-style headers, secret-named assignments, flags
@@ -32,6 +34,24 @@ breaking changes arrive in minor releases. See the note under
   final `result` record — outcome, turns, duration, cost and usage — written
   last when the stream carries one. A harness with no stream format names
   that instead of a generic error (see #132, #133).
+
+### Fixed
+
+- `tail`: the OpenCode adapter flags a failed shell command as `IsError`,
+  completing for OpenCode what 0.6.0 did for Crush. A bash or shell part
+  finishes with `state.status "completed"` whatever the exit code was, and
+  the adapter read only the part's own error flag — so a build or test that
+  failed never reached `IsError`, `Summary`, the span status or
+  `ErrorExcerpt`. The adapter now reads the exit code the tool records in
+  `state.metadata.exit`: a non-zero number sets `IsError`, zero does not,
+  and a null exit — an aborted or timed-out command — stays unflagged. This
+  changes `IsError`, and with it `Summary` and span status, for existing
+  consumers (see #115). The 0.7.0 notes listed this fix, but it merged
+  after the `v0.7.1` tag and first ships here.
+
+  The exit code is decoded into an integer field rather than asserted as a
+  float, so a decoder change cannot silently stop flagging failures, and a
+  missing, null or string exit stays unflagged.
 
 ## [0.7.1] - 2026-09-27
 
@@ -59,19 +79,6 @@ breaking changes arrive in minor releases. See the note under
   similar, follows `sh -c` scripts up to three levels, drops shell builtins and
   keywords, keeps at most 32, and leaves out any program whose name is computed
   at run time, so the list is a lower bound.
-
-### Fixed
-
-- `tail`: the OpenCode adapter flags a failed shell command as `IsError`,
-  completing for OpenCode what 0.6.0 did for Crush. A bash or shell part
-  finishes with `state.status "completed"` whatever the exit code was, and
-  the adapter read only the part's own error flag — so a build or test that
-  failed never reached `IsError`, `Summary`, the span status or
-  `ErrorExcerpt`. The adapter now reads the exit code the tool records in
-  `state.metadata.exit`: a non-zero number sets `IsError`, zero does not,
-  and a null exit — an aborted or timed-out command — stays unflagged. This
-  changes `IsError`, and with it `Summary` and span status, for existing
-  consumers (see #115).
 
 ### Changed
 
@@ -665,7 +672,8 @@ The module path lives on the GitHub mirror because Go resolves versions there.
 Tags are created on Gitea and reach GitHub through the push mirror — never tag the
 mirror directly, as the next sync prunes refs the source does not have.
 
-[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/stump-wtf/agent-trace/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/stump-wtf/agent-trace/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/stump-wtf/agent-trace/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/stump-wtf/agent-trace/releases/tag/v0.6.0
