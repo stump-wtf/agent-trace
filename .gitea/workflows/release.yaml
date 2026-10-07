@@ -102,50 +102,9 @@ jobs:
           fi
           echo "Created Gitea release $VERSION"
 
-      # The push mirror replicates git refs, not release objects, so the
-      # GitHub release page stays empty unless it is created explicitly. This
-      # is cosmetic for Go consumers — `go get` needs only the tag, which the
-      # mirror already carried — so a missing token skips the step instead of
-      # failing a release that has otherwise succeeded.
-      - name: Mirror the release to GitHub
-        env:
-          GH_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
-          VERSION: ${{ steps.notes.outputs.version }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::GH_MIRROR_TOKEN not set — skipping the GitHub release."
-            echo "The tag itself reached GitHub via the push mirror, so 'go get ${VERSION}' works regardless."
-            exit 0
-          fi
-
-          for attempt in 1 2 3 4 5 6; do
-            if curl -sSf -H "Authorization: Bearer $GH_TOKEN" \
-                 "https://api.github.com/repos/stump-wtf/agent-trace/git/ref/tags/${VERSION}" \
-                 >/dev/null 2>&1; then
-              break
-            fi
-            echo "Waiting for the push mirror to carry ${VERSION} to GitHub (attempt $attempt)..."
-            sleep 10
-          done
-
-          jq -n \
-            --arg tag "$VERSION" \
-            --arg name "$VERSION" \
-            --rawfile body /tmp/notes.md \
-            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}' \
-            > /tmp/gh_payload.json
-
-          code=$(curl -sS -o /tmp/gh_resp.json -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'Accept: application/vnd.github+json' \
-            --data @/tmp/gh_payload.json \
-            "https://api.github.com/repos/stump-wtf/agent-trace/releases")
-
-          if [ "$code" != "201" ]; then
-            echo "::warning::creating the GitHub release failed with HTTP $code — the tag is still published."
-            jq -r '.message // "no message"' /tmp/gh_resp.json || true
-            exit 0
-          fi
-          echo "Mirrored release $VERSION to GitHub"
+      # The GitHub release is NOT made here. The push mirror carries the tag,
+      # and .github/workflows/release.yml on the mirror publishes the release
+      # with GitHub's own token. A step here used to do it with a
+      # GH_MIRROR_TOKEN secret that was never provisioned, skipped with a
+      # warning, and let this job pass green: v0.3.0 through v0.8.0 shipped
+      # with no GitHub release.

@@ -1,0 +1,83 @@
+---
+# agent-trace — publish a GitHub Release for a tag that arrived on the mirror.
+#
+# Gitea (gitea.stump.rocks/stump.wtf/agent-trace) is canonical, and
+# .gitea/workflows/release.yaml cuts the release there. The push mirror
+# carries git REFS ONLY: the tag travels, its release does not. So a GitHub
+# Release exists only if something on GitHub creates one. This workflow is
+# that something, and it needs no cross-host secret: it publishes with the
+# run's own GITHUB_TOKEN. It follows Harness's .github/workflows/release.yml.
+#
+# TRIGGER: the mirror's tag push. Mirror pushes authenticate with a PAT, and
+# PAT pushes start workflows. workflow_dispatch is the manual path for a tag
+# that predates this file (v0.3.0 to v0.8.0 shipped without a GitHub release).
+#
+# NOTES: the tag's own CHANGELOG.md section, extracted by
+# scripts/release-notes.sh, the same script the Gitea release uses, so the two
+# release pages cannot disagree. There are no artifacts: agent-trace is a Go
+# module, and `go get` needs only the tag.
+#
+# @joestump 10/07/2026 - Added after v0.8.0 shipped with GitHub's release
+# page six versions behind.
+name: release (GitHub mirror)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, e.g. v0.8.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: github-release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A tag can name any commit, so re-run the correctness gate here rather
+      # than publish on trust, as the Gitea release does.
+      - name: Test
+        run: go test ./...
+
+      # The notes come from the checked-out tag's own CHANGELOG.md. A missing
+      # section fails the job rather than publishing an empty release.
+      # Re-running against a tag that already has a release refuses: delete
+      # the GitHub release first if a re-cut is real.
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! bash scripts/release-notes.sh "$TAG" CHANGELOG.md > "$RUNNER_TEMP/notes.md"; then
+            echo "::error::no CHANGELOG.md section for $TAG"
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::a GitHub release for ${TAG} already exists; delete it first to re-cut"
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --verify-tag
+          echo "published ${TAG} at ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
