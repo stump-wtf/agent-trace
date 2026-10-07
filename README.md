@@ -1,6 +1,6 @@
 # agent-trace
 
-Agent session trace libraries extracted from [cosmtrek/mindwalk](https://github.com/cosmtrek/mindwalk). Classify tool actions, tail live session logs, and emit OpenTelemetry spans. Used by [Harness](https://gitea.stump.rocks/stump.wtf/harness) for idle detection and trajectory export to [Cairn](https://gitea.stump.rocks/stump.wtf/cairn).
+Agent session trace libraries extracted from [cosmtrek/mindwalk](https://github.com/cosmtrek/mindwalk). Classify tool actions, tail live session logs, and emit OpenTelemetry spans. Used by [Harness](https://github.com/stump-wtf/harness) for idle detection and trajectory export to [Cairn](https://github.com/stump-wtf/cairn).
 
 ## Scope
 
@@ -45,7 +45,7 @@ event := classify.BuildEventWith(opts, seq, cwd, call, result)
 - **Shape.** Terminal escape sequences are stripped, surrounding whitespace is trimmed, and the excerpt is at most `ErrorExcerptBytes` bytes without splitting a UTF-8 rune. Longer text keeps its head and tail joined by `classify.ErrorExcerptElision`, because errors tend to lead and verdicts like `FAIL pkg` tend to close; each cut snaps to a nearby line break.
 - **`Redact` runs before anything is stored**, over the whole cleaned text rather than the cut excerpt, so a secret straddling the cut is still whole when your redactor sees it, and a redactor that lengthens its input cannot push the excerpt past the budget.
 
-In `tail`, set the same two fields on `WatchConfig` and the watcher hands them to every adapter. An excerpt only appears where the adapter knows the call failed: Claude Code and Pi record their own flag, Codex's is inferred from the exit code in the output, OpenCode's comes from a part in the `error` state, and Crush's from the `tool_result` part's `is_error`. Crush records a shell command that exits non-zero as an ordinary result whose text ends `Exit code N`, and the adapter keeps `is_error` alone rather than guessing from that text. OpenCode is narrower for a different reason: the adapter reads only a part's `state.error`, so a failed shell command — which lands in `state.output` under a `completed` status — carries no excerpt either.
+In `tail`, set the same two fields on `WatchConfig` and the watcher hands them to every adapter. An excerpt only appears where the adapter knows the call failed: Claude Code and Pi record their own flag, Codex's is inferred from the exit code in the output, OpenCode's comes from a part in the `error` state or, for a shell command, from the non-zero exit code it records in `state.metadata.exit`, and Crush's from the `tool_result` part's `is_error`, or, for a `bash` or `job_output` result, from the exit line its text ends with. Crush records a shell command that exits non-zero as an ordinary result whose text ends `Exit code N`; the part's own flag stays false for those, but the adapter reads that line, or `Command was aborted before completion`, and flags the call from it, so a failed Crush shell command carries an excerpt like any other error. An OpenCode shell command with a null exit (aborted or timed out) is not flagged either.
 
 An `Event` also keeps no arguments, and for a tool the classifier does not know — any MCP tool — `Summary` is only the tool name. `Event.InputDigest` (`inputDigest` in JSON) is the hex SHA-256 of the call's input encoded as JSON with sorted keys, so two calls with the same arguments share a digest whatever order the transcript stored them in, and a consumer can tell an agent repeating one call from an agent working through a list. It is always filled, it does not include the tool name (pair it with `Event.Tool`), and it is a fingerprint rather than a redaction: an input small enough to guess can be confirmed by hashing the guess.
 
@@ -153,6 +153,19 @@ err := otel.WriteJSON(os.Stdout, trace)
 
 No `time.Now()` — missing timestamps fall back to the nearest event, then `SessionMeta.StartedAt`, then zero. Building the same trace twice produces identical timings.
 
+### `redact`
+
+The credential redactor Harness, agent-trace and Cairn share, so a credential shape one learns, the others catch. `redact.Redact(s)` replaces every recognised credential with `[REDACTED]` and is idempotent.
+
+- **Two engines.** [betterleaks](https://github.com/betterleaks/betterleaks)' default rules catch vendor token shapes. A set of transcript rules catches what agents actually type: URL userinfo, Authorization and token headers, bearer credentials, secret-named assignments and flags, `curl -u`, and PEM private keys.
+- **References are left alone.** `$VAR`, `$(cat file)`, `${VAR:-}` and bare 40-hex commit SHAs are not credentials and are not masked.
+- **No network.** betterleaks' live validation is off.
+- **Lines.** `redact.Lines` masks a stream one line at a time and carries PEM state across calls, so a key's body is masked as well as its BEGIN line.
+- **JSONLine.** `Lines.JSONLine` masks one line of a JSON-lines stream (stream-json, a JSONL transcript) string literal by string literal. A clean line comes back byte-identical, a masked line still parses, and a value under a secret-named key is masked whole.
+- **Fast on large text.** A prefilter skips the transcript rules for text that carries none of their literals, so megabytes of base64 in a tool result cost milliseconds, not seconds.
+
+It is defence in depth for display, not a guarantee: a secret in an unrecognised shape passes through.
+
 ## CLI
 
 `cmd/agent-trace` runs one transcript through the same pipeline Harness uses — a `tail` adapter, `classify`, and for `otel` the span builder — and writes the result to stdout, for shell pipelines, CI jobs and debugging a run by hand.
@@ -178,9 +191,15 @@ agent-trace normalize --harness crush <path/to/crush.db>/<session-id>
 | `--error-excerpt-bytes <n>` | `0` | keep up to *n* bytes of each errored result's text on `errorExcerpt` (see `classify.Options.ErrorExcerptBytes`) |
 | `--no-redact` | off | write text fields unredacted |
 
-**Redaction is on by default.** Event summaries, mark notes, the session title and error excerpts pass through a pattern-based redactor before anything is written — Authorization headers, bearer tokens, URL and `curl -u` passwords, `key=value` pairs and `--flag value` arguments whose key names a credential, PEM private keys, and GitHub, OpenAI-style, Slack, AWS and JWT token shapes become `[REDACTED]`. The error excerpt is redacted through `classify.Options.Redact`, before it is cut. It is best-effort: `classify` truncates a summary before the CLI sees it, so a token cut short there can survive in part. Paths are not redacted, and `inputDigest` is a hash of the raw arguments.
+**Redaction is on by default.** Event summaries, mark notes, the session title and error excerpts pass through the [`redact`](#redact) package before anything is written. The error excerpt is redacted through `classify.Options.Redact`, before it is cut. It is best-effort: `classify` truncates a summary before the CLI sees it, so a token cut short there can survive in part. Paths are not redacted, and `inputDigest` is a hash of the raw arguments.
 
-Exit status is 0 on success, 1 when the transcript cannot be read, and 2 on a usage error. Reading a structured stream from standard input (`-`, or no transcript) is reserved for the planned `io.Reader` stream API and fails with an error until that lands.
+Exit status is 0 on success, 1 when the transcript cannot be read, and 2 on a usage error.
+
+`-` (or no transcript) reads a structured stream from standard input through the adapter's `StreamParser`, so an agent's stdout pipes straight into the same normalization a transcript gets. The run's final result record (outcome, turns, duration, cost and usage) is written last when the stream carries one. Claude Code's `stream-json` is the only stream format today; any other `--harness` names that instead of reading.
+
+```sh
+claude -p "$PROMPT" --output-format stream-json --verbose | agent-trace normalize --harness claude-code -
+```
 
 ## Architecture
 
