@@ -92,7 +92,11 @@ func (a CrushAdapter) Diagnostics() []DiagnosticCheck {
 // project database and links children to their parents.
 func (a CrushAdapter) AgentGraph(ctx context.Context) (*AgentGraph, error) {
 	graph := &AgentGraph{Children: map[string][]AgentNode{}}
-	for _, db := range a.dbPaths() {
+	dbs := a.dbPaths()
+	var failed int
+	var lastPath string
+	var lastErr error
+	for _, db := range dbs {
 		// Checked per database rather than once up front: the loop is the part
 		// that scales with the number of projects, and each graphNodes opens
 		// and queries a database. A cancelled caller gets context.Canceled
@@ -102,6 +106,10 @@ func (a CrushAdapter) AgentGraph(ctx context.Context) (*AgentGraph, error) {
 		}
 		nodes, err := a.graphNodes(ctx, db.dbPath)
 		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				failed++
+				lastPath, lastErr = db.dbPath, err
+			}
 			continue
 		}
 		for _, node := range nodes {
@@ -111,6 +119,9 @@ func (a CrushAdapter) AgentGraph(ctx context.Context) (*AgentGraph, error) {
 				graph.Children[node.ParentID] = append(graph.Children[node.ParentID], node)
 			}
 		}
+	}
+	if err := allDatabasesFailed(len(dbs), failed, lastPath, lastErr); err != nil {
+		return nil, err
 	}
 	return graph, nil
 }
@@ -128,17 +139,17 @@ func (a CrushAdapter) graphNodes(ctx context.Context, dbPath string) ([]AgentNod
 	defer func() { _ = rows.Close() }()
 	var nodes []AgentNode
 	for rows.Next() {
-		var id, title string
+		var id, title sql.NullString
 		var parentID sql.NullString
-		var createdAt int64
+		var createdAt sql.NullInt64
 		if err := rows.Scan(&id, &parentID, &title, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning sessions in %s: %w", dbPath, err)
 		}
 		node := AgentNode{
-			SessionID: id,
+			SessionID: id.String,
 			Harness:   a.Harness(),
-			StartedAt: secToRFC3339(createdAt),
-			Title:     title,
+			StartedAt: secToRFC3339(createdAt.Int64),
+			Title:     title.String,
 		}
 		if parentID.Valid {
 			node.ParentID = parentID.String
@@ -305,18 +316,52 @@ func (a CrushAdapter) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 func (a CrushAdapter) ListSessionsFiltered(ctx context.Context, f SessionFilter) ([]SessionMeta, error) {
 	sinceSec, hasSince := sinceLowerBoundSec(f)
 	var metas []SessionMeta
-	for _, db := range a.dbPaths() {
+	dbs := a.dbPaths()
+	var scanned, failed int
+	var lastPath string
+	var lastErr error
+	for _, db := range dbs {
 		if f.Cwd != "" && !cwdMatches(db.cwd, f.Cwd) {
 			continue
 		}
 		sessions, err := a.listDBSessionsSince(ctx, db.dbPath, db.cwd, sinceSec, hasSince)
 		if err != nil {
+			// A database that is simply not there is nothing to list, not a
+			// failure: a machine with no Crush projects must still start.
+			if !errors.Is(err, os.ErrNotExist) {
+				failed++
+				lastPath, lastErr = db.dbPath, err
+			}
 			continue
 		}
+		scanned++
 		metas = append(metas, sessions...)
+	}
+	if err := allDatabasesFailed(scanned+failed, failed, lastPath, lastErr); err != nil {
+		return nil, err
 	}
 	sortSessionsByRecency(metas)
 	return filterSessions(metas, f), nil
+}
+
+// allDatabasesFailed turns "every database we tried to read failed" into an
+// error while still tolerating one unreadable project among many.
+//
+// Both multi-database loops used to `continue` past any failure, so a Crush
+// schema change — which fails every database identically — looked exactly like
+// an empty store. That failure class is what tail/crush.go's own comments
+// record three incidents of, and the report in #159 names it as its third
+// finding. The per-row scans now error too, so what a schema change produces is
+// this error rather than a short listing. A database that fails while another
+// still answers is left tolerated: one corrupt or locked project must not hide
+// every other project's sessions. Absent databases are not counted at all, so
+// the empty store of a machine that has never run Crush stays an empty listing
+// rather than an error.
+func allDatabasesFailed(total, failed int, lastPath string, lastErr error) error {
+	if total == 0 || failed < total {
+		return nil
+	}
+	return fmt.Errorf("no crush database could be read (%d databases, last failure %s: %w)", total, lastPath, lastErr)
 }
 
 func (a CrushAdapter) listDBSessions(ctx context.Context, dbPath, cwd string) ([]SessionMeta, error) {
@@ -335,8 +380,9 @@ func (a CrushAdapter) listDBSessionsSince(ctx context.Context, dbPath, cwd strin
 	}
 	// Composed rather than written out twice: the column list and the ORDER BY
 	// exist once, so a schema change cannot update the bounded query and leave
-	// the unbounded one behind (rows.Scan would then fail below and the
-	// per-row `continue` would silently return zero sessions).
+	// the unbounded one behind. A change to either shape is now an error: a
+	// missing column fails the query, and a row that will not scan fails below
+	// instead of being skipped.
 	query := `SELECT id, title, parent_session_id, created_at, updated_at FROM sessions`
 	var args []any
 	if hasSince {
@@ -351,26 +397,29 @@ func (a CrushAdapter) listDBSessionsSince(ctx context.Context, dbPath, cwd strin
 	defer func() { _ = rows.Close() }()
 	var metas []SessionMeta
 	for rows.Next() {
-		var id, title string
+		var id, title sql.NullString
 		// parent_session_id is nullable — the schema says so, and Crush writes
-		// NULL for every top-level session. Scanning it into a string fails on
-		// those rows, and the `continue` below turns that into a silent drop:
-		// listing returned only subagent sessions, never a real one. The
-		// OpenCode adapter already scans its equivalent as a NullString.
+		// NULL for every top-level session. Scanning it into a string failed on
+		// those rows, and the `continue` that used to follow turned that into a
+		// silent drop: listing returned only subagent sessions, never a real
+		// one. The OpenCode adapter already scans its equivalent as a
+		// NullString. The other columns scan nullably for the same reason: a
+		// NULL is data, so it degrades to a zero value, while anything that
+		// still fails to scan is a schema change and is returned.
 		var parentID sql.NullString
-		var createdAt, updatedAt int64
+		var createdAt, updatedAt sql.NullInt64
 		if err := rows.Scan(&id, &title, &parentID, &createdAt, &updatedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning sessions in %s: %w", dbPath, err)
 		}
 		meta := SessionMeta{
-			Key:       sessionKey(string(a.Harness()), dbPath+"/"+id),
-			ID:        id,
+			Key:       sessionKey(string(a.Harness()), dbPath+"/"+id.String),
+			ID:        id.String,
 			Harness:   a.Harness(),
-			Path:      dbPath + "/" + id,
+			Path:      dbPath + "/" + id.String,
 			Cwd:       cwd,
-			Title:     title,
-			StartedAt: secToRFC3339(createdAt),
-			EndedAt:   secToRFC3339(updatedAt),
+			Title:     title.String,
+			StartedAt: secToRFC3339(createdAt.Int64),
+			EndedAt:   secToRFC3339(updatedAt.Int64),
 		}
 		if parentID.Valid && parentID.String != "" {
 			meta.Auxiliary = true
@@ -382,7 +431,7 @@ func (a CrushAdapter) listDBSessionsSince(ctx context.Context, dbPath, cwd strin
 			// Bounded like the OpenCode twin: a row whose id is shorter than 8
 			// bytes would otherwise panic the whole listing, and this listing
 			// now runs from ListSessions, ListSessionsFiltered and Summarize.
-			meta.Title = filepath.Base(cwd) + " — " + id[:min(8, len(id))]
+			meta.Title = filepath.Base(cwd) + " — " + id.String[:min(8, len(id.String))]
 		}
 		metas = append(metas, meta)
 	}
@@ -1118,18 +1167,23 @@ type crushMessage struct {
 }
 
 // readCrushMessages drains rows selected as (rowid, role, parts, model,
-// created_at). A row that fails to scan is skipped, as it always was; an
-// iteration error is returned.
+// created_at). A row that will not scan is an error rather than a skipped row:
+// a silent drop is how a schema change becomes a session that looks short
+// instead of one that failed. NULLs are not that case — model and parts are
+// nullable columns — so they scan to zero values and the row survives.
 func readCrushMessages(rows *sql.Rows) ([]crushMessage, error) {
 	var msgs []crushMessage
 	for rows.Next() {
 		var m crushMessage
-		var partsJSON string
-		if rows.Scan(&m.row, &m.role, &partsJSON, &m.model, &m.createdAt) != nil {
-			continue
+		var role, partsJSON sql.NullString
+		var createdAt sql.NullInt64
+		if err := rows.Scan(&m.row, &role, &partsJSON, &m.model, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning crush message row: %w", err)
 		}
+		m.role = role.String
+		m.createdAt = createdAt.Int64
 		var parts []crushPart
-		if json.Unmarshal([]byte(partsJSON), &parts) == nil {
+		if json.Unmarshal([]byte(partsJSON.String), &parts) == nil {
 			m.parts = parts
 			if m.parts == nil {
 				m.parts = []crushPart{}

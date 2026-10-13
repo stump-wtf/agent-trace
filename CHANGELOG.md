@@ -11,6 +11,13 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+### Fixed
+
+- A Crush store this tool cannot read is now an error, not an empty session
+  list. Rows whose nullable columns are empty still load, but a row that will
+  not scan at all, and a store in which every project database failed to read,
+  are reported instead of looking like a history with nothing in it (#159).
+
 ## [0.8.0] - 2026-10-07
 
 ### Added
