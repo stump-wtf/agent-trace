@@ -11,6 +11,8 @@ breaking changes arrive in minor releases. See the note under
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-18
+
 ### Fixed
 
 - A Crush store this tool cannot read is now an error, not an empty session
@@ -699,7 +701,8 @@ The module path lives on the GitHub mirror because Go resolves versions there.
 Tags are created on Gitea and reach GitHub through the push mirror — never tag the
 mirror directly, as the next sync prunes refs the source does not have.
 
-[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/stump-wtf/agent-trace/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/stump-wtf/agent-trace/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/stump-wtf/agent-trace/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/stump-wtf/agent-trace/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/stump-wtf/agent-trace/compare/v0.6.0...v0.7.0
