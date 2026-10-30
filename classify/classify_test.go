@@ -23,6 +23,15 @@ func TestActionFor(t *testing.T) {
 		{"Bash", map[string]any{"command": "echo hello"}, "", ActionExec},
 		{"bash", map[string]any{"command": "npm test"}, "", ActionVerify},
 		{"bash", map[string]any{"command": "make build"}, "", ActionExec},
+		{"shell", map[string]any{"command": "go test ./..."}, "", ActionVerify},
+		{"shell", map[string]any{"command": "cat foo.go"}, "", ActionRead},
+		{"shell", map[string]any{"command": "find . -name '*.go'"}, "", ActionSearch},
+		{"shell", map[string]any{"command": "python3 main.py"}, "", ActionExec},
+		{"Shell", map[string]any{"command": "npm test"}, "", ActionVerify},
+		{"tree", map[string]any{"path": "src"}, "", ActionSearch},
+		{"Tree", map[string]any{"path": "src"}, "", ActionSearch},
+		{"read_image", map[string]any{"source": "img.png"}, "", ActionRead},
+		{"ReadImage", map[string]any{"path": "diagram.jpg"}, "", ActionRead},
 		{"unknown_tool", nil, "", ActionOther},
 	}
 	for _, tt := range tests {
@@ -125,5 +134,33 @@ func TestContentToString(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("ContentToString(%v) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestTargetsForGooseTools(t *testing.T) {
+	cwd := "/workspace/repo"
+
+	// shell tool extracts read paths and command paths
+	targets, _ := TargetsFor(cwd, "shell", map[string]any{"command": "cat internal/util.go"}, "")
+	if len(targets) == 0 || targets[0].Path != "internal/util.go" {
+		t.Fatalf("TargetsFor(shell) targets = %v, want internal/util.go", targets)
+	}
+
+	// tree tool extracts path as TouchHit
+	targets, _ = TargetsFor(cwd, "tree", map[string]any{"path": "pkg/api"}, "")
+	if len(targets) != 1 || targets[0].Path != "pkg/api" || targets[0].Touch != TouchHit {
+		t.Fatalf("TargetsFor(tree) targets = %v, want pkg/api (hit)", targets)
+	}
+
+	// read_image extracts local file path as TouchRead
+	targets, _ = TargetsFor(cwd, "read_image", map[string]any{"source": "docs/architecture.png"}, "")
+	if len(targets) != 1 || targets[0].Path != "docs/architecture.png" || targets[0].Touch != TouchRead {
+		t.Fatalf("TargetsFor(read_image local) targets = %v, want docs/architecture.png (read)", targets)
+	}
+
+	// read_image ignores remote URLs
+	targets, outside := TargetsFor(cwd, "read_image", map[string]any{"source": "https://example.com/logo.png"}, "")
+	if len(targets) != 0 || len(outside) != 0 {
+		t.Fatalf("TargetsFor(read_image remote) returned targets=%v outside=%v, want none", targets, outside)
 	}
 }

@@ -143,6 +143,7 @@ func TestDefaultAdaptersIn(t *testing.T) {
 			HarnessClaudeCode: false,
 			HarnessCodex:      false,
 			HarnessCrush:      false,
+			HarnessGoose:      false,
 			HarnessOpenCode:   false,
 			HarnessPi:         false,
 		}
@@ -187,6 +188,10 @@ func TestDefaultAdaptersIn(t *testing.T) {
 				if v.ProjectsPath != "" || v.DBPath != "" || v.Cwd != "" {
 					t.Errorf("CrushAdapter has non-empty fields: ProjectsPath=%q DBPath=%q Cwd=%q",
 						v.ProjectsPath, v.DBPath, v.Cwd)
+				}
+			case *GooseAdapter:
+				if v.DBPath != "" {
+					t.Errorf("GooseAdapter.DBPath = %q, want empty", v.DBPath)
 				}
 			case *OpenCodeAdapter:
 				if v.DBPath != "" {
@@ -327,6 +332,7 @@ func TestDefaultAdaptersCoversEveryShippedHarness(t *testing.T) {
 		HarnessClaudeCode,
 		HarnessCodex,
 		HarnessCrush,
+		HarnessGoose,
 		HarnessOpenCode,
 		HarnessPi,
 	}

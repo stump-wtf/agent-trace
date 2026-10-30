@@ -39,7 +39,7 @@ Stateless core with one opt-in I/O surface: the `Options` struct supplies a `Fil
 
 ### `tail` — session discovery and parsing
 
-Discovers and parses live agent session logs from per-harness directories, emitting `classify.ToolCall`/`ToolResult` pairs that feed `classify.BuildEvent`. Supports JSONL-backed adapters (Claude Code, Codex, Pi) and SQLite-backed adapters (Crush, OpenCode).
+Discovers and parses live agent session logs from per-harness directories, emitting `classify.ToolCall`/`ToolResult` pairs that feed `classify.BuildEvent`. Supports JSONL-backed adapters (Claude Code, Codex, Pi) and SQLite-backed adapters (Crush, Goose, OpenCode).
 
 **Adapter pattern** (`watcher.go`): `Adapter` interface with `Harness()`, `SessionDir()`, `ListSessions(ctx)`, `Parse(ctx, path)`. Five implementations:
 
@@ -47,17 +47,18 @@ Discovers and parses live agent session logs from per-harness directories, emitt
 |---|---|---|
 | `ClaudeCodeAdapter` | `~/.claude/projects/` | One JSONL per session, `tool_use`/`tool_result` content items |
 | `CodexAdapter` | `~/.codex/sessions/` | `response_item` lines with `function_call`/`function_call_output` |
+| `GooseAdapter` | `~/.local/share/goose/sessions/sessions.db` | SQLite (`sessions.db`), messages stored as JSON blocks |
 | `PiAdapter` | `~/.pi/agent/sessions/` (`~/.omp/agent/sessions/` with `OMP`) | Append-only tree linearized via `parentId` chain; an oh-my-pi file's leading 256-byte title slot is skipped (`parsePiTitleSlot`) |
 | `CrushAdapter` | `~/.local/share/crush/projects.json` | SQLite (`crush.db`), messages stored as JSON parts |
 | `OpenCodeAdapter` | `~/.opencode/opencode.db` | SQLite, parts stored as JSON |
 
-`DefaultAdapters()` returns all five adapters (Claude Code, Codex, Crush, OpenCode, Pi); a machine without a given harness simply contributes no sessions. `NewWatcher` + `ScanOnce` for batch processing. Each adapter has a `Dir` field (JSONL) or `DBPath`/`ProjectsPath` fields (SQLite) to override the default session directory (useful for testing).
+`DefaultAdapters()` returns all six adapters (Claude Code, Codex, Crush, Goose, OpenCode, Pi); a machine without a given harness simply contributes no sessions. `NewWatcher` + `ScanOnce` for batch processing. Each adapter has a `Dir` field (JSONL) or `DBPath`/`ProjectsPath` fields (SQLite) to override the default session directory (useful for testing).
 
-**SQLite helpers** (`sqlite_helpers.go`): `openSQLite` opens a read-only SQLite database with a `sync.Map`-based connection cache to avoid per-poll open/close churn. `splitDBSessionPath` splits composite `"dbPath/sessionID"` paths. Both are generic — shared by Crush and OpenCode adapters.
+**SQLite helpers** (`sqlite_helpers.go`): `openSQLite` opens a read-only SQLite database with a `sync.Map`-based connection cache to avoid per-poll open/close churn. `splitDBSessionPath` splits composite `"dbPath/sessionID"` paths. Both are generic — shared by Crush, Goose, and OpenCode adapters.
 
-**Usage items** come through the optional `ItemParser` (`ParseItems` / `ParseItemsSince`, of which `Parse` / `ParseSince` are the usage-dropping wrappers); Claude Code, Codex and Crush implement it, and `TestUsageReadersImplementItemParser` keeps them from silently dropping out. A read resuming mid-session recovers what the records before its watermark decide — the Claude Code response a record belongs to, the Codex turn's model and previous `token_count` — with `jsonlLastMatchBefore`, so incremental usage equals a full read's. Crush's token columns are a last-step gauge, not totals, so Crush reports only its cumulative `sessions.cost`.
+**Usage items** come through the optional `ItemParser` (`ParseItems` / `ParseItemsSince`, of which `Parse` / `ParseSince` are the usage-dropping wrappers); Claude Code, Codex, Crush, and Goose implement it, and `TestUsageReadersImplementItemParser` keeps them from silently dropping out. A read resuming mid-session recovers what the records before its watermark decide — the Claude Code response a record belongs to, the Codex turn's model and previous `token_count` — with `jsonlLastMatchBefore`, so incremental usage equals a full read's. Crush's token columns are a last-step gauge, not totals, so Crush reports only its cumulative `sessions.cost`.
 
-**Optional interfaces:** `FilteredLister` (`SessionFilter` pushdown) and `IncrementalParser` are both implemented by all five adapters, and both are *optional* — an adapter that stops implementing one keeps compiling and keeps returning correct, merely slower, results. `TestEveryDefaultAdapterImplementsFilteredLister` and `TestAllAdaptersImplementIncrementalParser` are what make that visible. Every `FilteredLister` is checked against `assertFilteredMatchesInMemory`, the shared oracle for its contract: a pushdown must produce results identical to `ListSessions` followed by in-memory filtering.
+**Optional interfaces:** `FilteredLister` (`SessionFilter` pushdown) and `IncrementalParser` are both implemented by all six adapters, and both are *optional* — an adapter that stops implementing one keeps compiling and keeps returning correct, merely slower, results. `TestEveryDefaultAdapterImplementsFilteredLister` and `TestAllAdaptersImplementIncrementalParser` are what make that visible. Every `FilteredLister` is checked against `assertFilteredMatchesInMemory`, the shared oracle for its contract: a pushdown must produce results identical to `ListSessions` followed by in-memory filtering.
 
 **Stream parsing** (`stream.go`, `claudecode_stream.go`): `StreamParser` is the optional interface for an agent's structured stdout — `StreamFormat()` reports the format and the argv flags that select it, `ParseStream(ctx, io.Reader, StreamHandler)` hands events, marks and `SessionMeta` over as records arrive and returns a `*StreamResult` that is nil when the stream ended without a result record. Only Claude Code implements it (`--output-format stream-json --verbose`). Its reader maps each stream-json record onto the transcript line carrying the same message and feeds it through `ccRecorder`, the handler `Parse` uses, so the two cannot drift; `TestClaudeCodeStreamMatchesTranscript` holds that against recorded pairs. A subagent's records arrive on the parent's stream tagged `parent_tool_use_id`, which is read as that subagent's `agentId` on a sidechain line. Codex `exec --json` is not supported yet: its format has not been confirmed against a real run.
 
@@ -102,10 +103,10 @@ Contains `TruncateRunes(s, max, suffix)` used by the classify and tail packages.
 - Touch ranking: `edit > read > hit` (see `RankTouch`). When merging targets for the same file, keep the deepest interaction.
 - All exported types/functions have doc comments starting with the identifier name.
 - Tests are table-driven with inline struct slices.
-- Third-party dependency: `modernc.org/sqlite` (pure-Go SQLite driver for Crush and OpenCode adapters).
+- Third-party dependency: `modernc.org/sqlite` (pure-Go SQLite driver for Crush, Goose, and OpenCode adapters).
 
 ## Gotchas
 
 - **`Weak` target filtering does filesystem I/O** despite the package doc's "no filesystem access" framing — it calls `Options.FileExists`, which `osClassifyOptions` backs with `os.Stat`. Pass `Options{FileExists: nil}` to disable.
 - **Pi adapter `linearizePi`** walks `parentId` from the last entry backward. If the file is truncated mid-write (live tailing), the leaf may be incomplete.
-- **Incremental parsing is opt-in per adapter** via the `IncrementalParser` interface (byte-offset tailing for JSONL, message-timestamp watermarks for SQLite); adapters that do not implement it still full-parse every cycle. All five implement it — `TestAllAdaptersImplementIncrementalParser` keeps that from silently regressing — but the *watermark* rules differ per harness and are not interchangeable: a Pi branch (an edited turn re-linearizes the tree) falls back to a full parse, and an OpenCode tool call is one mutating row rather than a call/result pair, so its part is withheld until the row turns terminal.
+- **Incremental parsing is opt-in per adapter** via the `IncrementalParser` interface (byte-offset tailing for JSONL, message-timestamp watermarks for SQLite); adapters that do not implement it still full-parse every cycle. All six implement it — `TestAllAdaptersImplementIncrementalParser` keeps that from silently regressing — but the *watermark* rules differ per harness and are not interchangeable: a Pi branch (an edited turn re-linearizes the tree) falls back to a full parse, and an OpenCode tool call is one mutating row rather than a call/result pair, so its part is withheld until the row turns terminal.

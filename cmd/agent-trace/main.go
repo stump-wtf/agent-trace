@@ -56,7 +56,7 @@ Harnesses:
   ` + "%s" + `
 
 The transcript is a session file for the JSONL harnesses, and
-<database>/<session-id> for crush and opencode. "-" reads a structured
+<database>/<session-id> for crush, goose, and opencode. "-" reads a structured
 stream from standard input (claude-code's stream-json), for piping the
 agent's stdout straight in: agent-trace normalize --harness claude-code -
 
@@ -192,6 +192,7 @@ var adapters = map[tail.Harness]func() tail.Adapter{
 	tail.HarnessClaudeCode: func() tail.Adapter { return &tail.ClaudeCodeAdapter{} },
 	tail.HarnessCodex:      func() tail.Adapter { return &tail.CodexAdapter{} },
 	tail.HarnessCrush:      func() tail.Adapter { return &tail.CrushAdapter{} },
+	tail.HarnessGoose:      func() tail.Adapter { return &tail.GooseAdapter{} },
 	tail.HarnessOpenCode:   func() tail.Adapter { return &tail.OpenCodeAdapter{} },
 	tail.HarnessPi:         func() tail.Adapter { return &tail.PiAdapter{} },
 	tail.HarnessOMP:        func() tail.Adapter { return &tail.PiAdapter{OMP: true} },

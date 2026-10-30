@@ -210,6 +210,7 @@ func DefaultAdapters() []Adapter {
 		&ClaudeCodeAdapter{},
 		&CodexAdapter{},
 		&CrushAdapter{},
+		&GooseAdapter{},
 		&OpenCodeAdapter{},
 		&PiAdapter{},
 	}
