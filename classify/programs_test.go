@@ -64,6 +64,8 @@ func TestProgramsToolShapes(t *testing.T) {
 		want  []string
 	}{
 		{"crush bash", "bash", map[string]any{"command": "make build"}, []string{"make"}},
+		{"goose shell", "shell", map[string]any{"command": "pytest -v"}, []string{"pytest"}},
+		{"goose Shell", "Shell", map[string]any{"command": "cargo build"}, []string{"cargo"}},
 		{"codex exec_command string", "exec_command", map[string]any{"cmd": "rg -n foo"}, []string{"rg"}},
 		{"codex argv array", "exec_command", map[string]any{"command": []any{"bash", "-lc", "go test ./..."}}, []string{"go"}},
 		{"argv with a quote", "exec_command", map[string]any{"command": []any{"git", "commit", "-m", "it's done"}}, []string{"git"}},

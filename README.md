@@ -53,7 +53,7 @@ An `Event` also keeps no arguments, and for a tool the classifier does not know 
 
 ### `tail`
 
-Live session log discovery and per-agent JSONL parsing. Watches agent session directories, tails growing files, and emits classified `Event`s. Supports Claude Code, Codex, Crush, OpenCode, and Pi via the `Adapter` interface — `DefaultAdapters()` returns all five. The Pi adapter also reads oh-my-pi (OMP) sessions; set `PiAdapter.OMP` to label them `omp` and default to `~/.omp/agent/sessions`.
+Live session log discovery and per-agent JSONL parsing. Watches agent session directories, tails growing files, and emits classified `Event`s. Supports Claude Code, Codex, Crush, Goose, OpenCode, and Pi via the `Adapter` interface — `DefaultAdapters()` returns all six. The Pi adapter also reads oh-my-pi (OMP) sessions; set `PiAdapter.OMP` to label them `omp` and default to `~/.omp/agent/sessions`.
 
 ```go
 import "github.com/stump-wtf/agent-trace/tail"
@@ -127,6 +127,7 @@ for _, u := range items.Usage {
 | Claude Code | API response (its records repeat one usage; reported once) | `message.model` | not recorded | `requestId` | all four | not recorded | no |
 | Codex | response (`event_msg` `token_count`, from `info.last_token_usage`; a rate-limit repeat is skipped) | the turn's `turn_context.model` | `session_meta.model_provider` | not recorded | all four; cached tokens moved out of `input_tokens` | not recorded | no |
 | Crush | read that advances past new rows, plus one at the end of `Parse` | latest assistant `messages.model` | latest assistant `messages.provider` | not recorded | **not reported** (zero) | `sessions.cost` | yes |
+| Goose | each `usage_ledger` row | `model` | not recorded | not recorded | all four | `cost` | no |
 | OpenCode | not read yet | | | | | | |
 | Pi / OMP | not read yet | | | | | | |
 
@@ -183,7 +184,7 @@ agent-trace otel --harness codex ~/.codex/sessions/2026/09/25/rollout-<id>.jsonl
 agent-trace normalize --harness crush <path/to/crush.db>/<session-id>
 ```
 
-`--harness` is one of `claude-code`, `codex`, `crush`, `omp`, `opencode`, `pi`. Each `normalize` line is `{"kind":"session","session":{…}}`, `{"kind":"mark","mark":{…}}` or `{"kind":"event","event":{…}}`; a mark sorts ahead of an event with the same `seq`, the order `otel.BuildTrace` reads them in.
+`--harness` is one of `claude-code`, `codex`, `crush`, `goose`, `omp`, `opencode`, `pi`. Each `normalize` line is `{"kind":"session","session":{…}}`, `{"kind":"mark","mark":{…}}` or `{"kind":"event","event":{…}}`; a mark sorts ahead of an event with the same `seq`, the order `otel.BuildTrace` reads them in.
 
 | Flag | Default | Effect |
 |---|---|---|
