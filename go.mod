@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/betterleaks/betterleaks v1.9.0
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 )
 
 require (
