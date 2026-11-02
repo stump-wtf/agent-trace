@@ -1,5 +1,7 @@
 package classify
 
+import "strings"
+
 // ActionFor classifies a tool call into a semantic action based on the tool
 // name, its input parameters, and the result content. Shell commands are
 // further classified by inspecting the command text (searchCommand,
@@ -12,13 +14,13 @@ func ActionFor(tool string, input map[string]any, result string) string {
 // verify command patterns.
 func ActionForWith(opts *Options, tool string, input map[string]any, result string) string {
 	switch tool {
-	case "Read", "read", "view":
+	case "Read", "read", "view", "read_image", "ReadImage":
 		return ActionRead
 	case "Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", "write", "edit", "multiedit":
 		return ActionEdit
-	case "Grep", "Glob", "LS", "view_image", "grep", "find", "ls", "glob":
+	case "Grep", "Glob", "LS", "view_image", "grep", "find", "ls", "glob", "tree", "Tree":
 		return ActionSearch
-	case "Bash", "bash", "exec_command", "write_stdin", "js", "js_repl":
+	case "Bash", "bash", "exec_command", "write_stdin", "js", "js_repl", "shell", "Shell":
 		command := firstString(input, "command", "cmd", "code", "chars", "script", "_raw")
 		if VerifyCommandWith(opts, command) {
 			return ActionVerify
@@ -129,14 +131,14 @@ func TargetsForWith(opts *Options, cwd, tool string, input map[string]any, resul
 				add(path, TouchHit, true, nil, "")
 			}
 		}
-	case "Glob", "LS", "find", "ls", "glob":
+	case "Glob", "LS", "find", "ls", "glob", "tree", "Tree":
 		for _, hit := range parsePathHits(result) {
 			add(hit.path, TouchHit, false, nil, "")
 		}
 		if path, ok := input["path"].(string); ok && len(targets) == 0 {
 			add(path, TouchHit, true, nil, "")
 		}
-	case "Bash", "bash":
+	case "Bash", "bash", "shell", "Shell":
 		command := firstString(input, "command")
 		for _, path := range CommandReadPaths(command) {
 			add(path, TouchRead, true, nil, "")
@@ -188,8 +190,9 @@ func TargetsForWith(opts *Options, cwd, tool string, input map[string]any, resul
 		for _, path := range parsePatchPaths(patch) {
 			add(path, TouchEdit, false, nil, "")
 		}
-	case "view_image":
-		if path := firstString(input, "path"); path != "" {
+	case "view_image", "read_image", "ReadImage":
+		path := firstString(input, "source", "path")
+		if path != "" && !strings.HasPrefix(path, "http://") && !strings.HasPrefix(path, "https://") {
 			add(path, TouchRead, false, nil, "")
 		}
 	case "js", "js_repl":

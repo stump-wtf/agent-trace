@@ -91,7 +91,7 @@ func assertParseDropsOnlyUsage(t *testing.T, a Adapter, path string) {
 // dropping out: ItemParser is optional, so an adapter that stopped
 // implementing it would keep compiling and quietly report no usage.
 func TestUsageReadersImplementItemParser(t *testing.T) {
-	for _, a := range []Adapter{&ClaudeCodeAdapter{}, &CodexAdapter{}, &CrushAdapter{}} {
+	for _, a := range []Adapter{&ClaudeCodeAdapter{}, &CodexAdapter{}, &CrushAdapter{}, &GooseAdapter{}} {
 		if _, ok := a.(ItemParser); !ok {
 			t.Errorf("%s adapter does not implement ItemParser", a.Harness())
 		}

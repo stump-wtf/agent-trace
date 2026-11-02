@@ -31,7 +31,7 @@ var programNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 func Programs(tool string, input map[string]any) []string {
 	var scripts []string
 	switch tool {
-	case "Bash", "bash", "exec_command":
+	case "Bash", "bash", "exec_command", "shell", "Shell":
 		for _, key := range []string{"command", "cmd"} {
 			if s, ok := input[key].(string); ok {
 				scripts = append(scripts, s)
