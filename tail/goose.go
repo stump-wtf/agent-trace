@@ -250,6 +250,78 @@ func (a GooseAdapter) Watermark(ctx context.Context, path string) int64 {
 	return maxID.Int64
 }
 
+// goosePendingCall is a tool request whose response has not been read yet.
+type goosePendingCall struct {
+	call classify.ToolCall
+}
+
+// seedGooseOpenCalls fills pending with tool requests at or below watermark
+// that have no response at or below watermark, so a tool call whose request
+// landed in a previous read still pairs with its response in this one.
+func seedGooseOpenCalls(ctx context.Context, db *sql.DB, sessionID string, watermark int64, pending map[string]goosePendingCall) error {
+	reqRows, err := db.QueryContext(ctx,
+		`SELECT created_timestamp, content_json FROM messages
+		  WHERE session_id = ? AND id <= ? AND role = 'assistant' AND content_json LIKE '%"toolRequest"%'
+		  ORDER BY id ASC`, sessionID, watermark)
+	if err != nil {
+		return fmt.Errorf("scanning goose tool requests for %s: %w", sessionID, err)
+	}
+	defer func() { _ = reqRows.Close() }()
+	for reqRows.Next() {
+		var createdSec sql.NullInt64
+		var contentJSON sql.NullString
+		if err := reqRows.Scan(&createdSec, &contentJSON); err != nil {
+			return fmt.Errorf("scanning goose tool request: %w", err)
+		}
+		if !contentJSON.Valid {
+			continue
+		}
+		ts := secToRFC3339(createdSec.Int64)
+		for _, block := range decodeGooseContent(contentJSON.String) {
+			if bType, _ := block["type"].(string); bType == "toolRequest" {
+				callID, toolName, callArgs := parseGooseToolRequest(block)
+				if callID != "" && toolName != "" {
+					pending[callID] = goosePendingCall{call: classify.ToolCall{
+						ID:        callID,
+						Name:      toolName,
+						Input:     callArgs,
+						Timestamp: ts,
+					}}
+				}
+			}
+		}
+	}
+	if err := reqRows.Err(); err != nil {
+		return fmt.Errorf("scanning goose tool requests for %s: %w", sessionID, err)
+	}
+
+	respRows, err := db.QueryContext(ctx,
+		`SELECT content_json FROM messages
+		  WHERE session_id = ? AND id <= ? AND role = 'user' AND content_json LIKE '%"toolResponse"%'`,
+		sessionID, watermark)
+	if err != nil {
+		return fmt.Errorf("scanning goose tool responses for %s: %w", sessionID, err)
+	}
+	defer func() { _ = respRows.Close() }()
+	for respRows.Next() {
+		var contentJSON sql.NullString
+		if err := respRows.Scan(&contentJSON); err != nil {
+			return fmt.Errorf("scanning goose tool response: %w", err)
+		}
+		if !contentJSON.Valid {
+			continue
+		}
+		for _, block := range decodeGooseContent(contentJSON.String) {
+			if bType, _ := block["type"].(string); bType == "toolResponse" {
+				if respID, _, _ := parseGooseToolResponse(block); respID != "" {
+					delete(pending, respID)
+				}
+			}
+		}
+	}
+	return respRows.Err()
+}
+
 // ParseSince extracts events, marks, and metadata incrementally starting after watermark.
 func (a GooseAdapter) ParseSince(ctx context.Context, path string, watermark int64, startSeq int) ([]classify.Event, []classify.Mark, SessionMeta, int64, error) {
 	items, meta, wm, err := a.ParseItemsSince(ctx, path, watermark, startSeq)
@@ -285,40 +357,54 @@ func (a GooseAdapter) parseItemsInternal(ctx context.Context, path string, water
 	}
 	msgQuery += ` ORDER BY id ASC`
 
+	pending := make(map[string]goosePendingCall)
+
+	// A poll can land between a toolRequest row and its toolResponse: neither
+	// half of the pair would be inside the next read together, and the call
+	// would be lost. Seed pending with open calls at or below the watermark -
+	// before the message rows open, which otherwise hold the pooled connection.
+	if hasWatermark && watermark > 0 {
+		if err := seedGooseOpenCalls(ctx, db, sessionID, watermark, pending); err != nil {
+			return Items{}, SessionMeta{}, watermark, err
+		}
+	}
+
 	rows, err := db.QueryContext(ctx, msgQuery, args...)
 	if err != nil {
 		return Items{}, SessionMeta{}, watermark, fmt.Errorf("querying goose messages for %s: %w", sessionID, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	type pendingCall struct {
-		call classify.ToolCall
-	}
-	pending := make(map[string]pendingCall)
-
 	var events []classify.Event
 	var marks []classify.Mark
 	seq := startSeq
 	newWatermark := watermark
+	newestMsgTS := int64(0)
 
 	for rows.Next() {
 		var id int64
-		var role, contentJSON string
-		var createdSec int64
+		var role, contentJSON sql.NullString
+		var createdSec sql.NullInt64
 		if err := rows.Scan(&id, &role, &contentJSON, &createdSec); err != nil {
 			return Items{}, SessionMeta{}, watermark, fmt.Errorf("scanning goose message: %w", err)
 		}
 		if id > newWatermark {
 			newWatermark = id
 		}
+		if createdSec.Valid && createdSec.Int64 > newestMsgTS {
+			newestMsgTS = createdSec.Int64
+		}
+		if !role.Valid || !contentJSON.Valid {
+			continue
+		}
 
-		ts := secToRFC3339(createdSec)
-		blocks := decodeGooseContent(contentJSON)
+		ts := secToRFC3339(createdSec.Int64)
+		blocks := decodeGooseContent(contentJSON.String)
 
 		for _, block := range blocks {
 			bType, _ := block["type"].(string)
 			switch {
-			case role == "user" && bType == "text":
+			case role.String == "user" && bType == "text":
 				if text, ok := block["text"].(string); ok && strings.TrimSpace(text) != "" {
 					if !injectedUserMessage(text) {
 						marks = append(marks, classify.Mark{
@@ -330,20 +416,20 @@ func (a GooseAdapter) parseItemsInternal(ctx context.Context, path string, water
 					}
 				}
 
-			case role == "assistant" && bType == "toolRequest":
-				callID, toolName, args := parseGooseToolRequest(block)
+			case role.String == "assistant" && bType == "toolRequest":
+				callID, toolName, callArgs := parseGooseToolRequest(block)
 				if callID != "" && toolName != "" {
-					pending[callID] = pendingCall{
+					pending[callID] = goosePendingCall{
 						call: classify.ToolCall{
 							ID:        callID,
 							Name:      toolName,
-							Input:     args,
+							Input:     callArgs,
 							Timestamp: ts,
 						},
 					}
 				}
 
-			case role == "user" && bType == "toolResponse":
+			case role.String == "user" && bType == "toolResponse":
 				respID, content, isErr := parseGooseToolResponse(block)
 				if p, ok := pending[respID]; ok {
 					ev := classify.BuildEventWith(a.opts, seq, meta.Cwd, p.call, classify.ToolResult{
@@ -355,7 +441,7 @@ func (a GooseAdapter) parseItemsInternal(ctx context.Context, path string, water
 					delete(pending, respID)
 				}
 
-			case role == "assistant" && bType == "error":
+			case role.String == "assistant" && bType == "error":
 				errMsg := firstString(block, "message", "error")
 				if errMsg == "" {
 					if k, ok := block["kind"].(string); ok {
@@ -384,11 +470,25 @@ func (a GooseAdapter) parseItemsInternal(ctx context.Context, path string, water
 		}
 	}
 
-	// Read usage ledger entries.
-	usageItems, compactions, err := a.readUsageLedger(ctx, db, sessionID, seq)
-	if err == nil {
-		marks = append(marks, compactions...)
+	// Read usage ledger entries. An incremental read delivers exactly the rows
+	// in (lastMessageTSAtWatermark, newestMessageTSRead]: each usage row once,
+	// the same way events and marks are withheld past the watermark.
+	var usageItems []classify.Usage
+	var compactions []classify.Mark
+	ledgerErr := error(nil)
+	if !hasWatermark || watermark == 0 {
+		usageItems, compactions, ledgerErr = a.readUsageLedger(ctx, db, sessionID, seq, 0, 0)
+	} else if newestMsgTS > 0 {
+		var prevTS int64
+		prevTS, ledgerErr = gooseLedgerCutoff(ctx, db, sessionID, watermark)
+		if ledgerErr == nil {
+			usageItems, compactions, ledgerErr = a.readUsageLedger(ctx, db, sessionID, seq, prevTS, newestMsgTS)
+		}
 	}
+	if ledgerErr != nil && !strings.Contains(ledgerErr.Error(), "no such table") {
+		return Items{}, SessionMeta{}, watermark, ledgerErr
+	}
+	marks = append(marks, compactions...)
 
 	items := Items{
 		Events: events,
@@ -398,10 +498,35 @@ func (a GooseAdapter) parseItemsInternal(ctx context.Context, path string, water
 	return items, meta, newWatermark, nil
 }
 
-func (a GooseAdapter) readUsageLedger(ctx context.Context, db *sql.DB, sessionID string, seq int) ([]classify.Usage, []classify.Mark, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT created_timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, is_compaction
-		 FROM usage_ledger WHERE session_id = ? ORDER BY id ASC`, sessionID)
+// gooseLedgerCutoff is the newest message timestamp at or below the watermark:
+// the lower edge of the usage window for the next incremental read.
+func gooseLedgerCutoff(ctx context.Context, db *sql.DB, sessionID string, watermark int64) (int64, error) {
+	var cutoff int64
+	err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(created_timestamp), 0) FROM messages WHERE session_id = ? AND id <= ?`,
+		sessionID, watermark).Scan(&cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("locating goose ledger cutoff for %s: %w", sessionID, err)
+	}
+	return cutoff, nil
+}
+
+// readUsageLedger reads usage rows; with throughTS > 0 only rows in
+// (afterTS, throughTS] are returned, so incremental reads deliver each row once.
+func (a GooseAdapter) readUsageLedger(ctx context.Context, db *sql.DB, sessionID string, seq int, afterTS, throughTS int64) ([]classify.Usage, []classify.Mark, error) {
+	query := `SELECT created_timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, is_compaction
+		 FROM usage_ledger WHERE session_id = ?`
+	args := []any{sessionID}
+	if afterTS > 0 {
+		query += ` AND created_timestamp > ?`
+		args = append(args, afterTS)
+	}
+	if throughTS > 0 {
+		query += ` AND created_timestamp <= ?`
+		args = append(args, throughTS)
+	}
+	query += ` ORDER BY id ASC`
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -287,6 +287,8 @@ func TestGooseParseSinceIncrementalParity(t *testing.T) {
 		VALUES (2, ?, 'assistant', '[{"type":"toolRequest","id":"c1","toolCall":{"value":{"name":"tree","arguments":{"path":"."}}}}]', 1785710001)`, sessionID)
 	_, _ = db.Exec(`INSERT INTO messages (id, session_id, role, content_json, created_timestamp)
 		VALUES (3, ?, 'user', '[{"type":"toolResponse","id":"c1","toolResult":{"value":{"content":"ok"}}}]', 1785710002)`, sessionID)
+	_, _ = db.Exec(`INSERT INTO usage_ledger (id, session_id, created_timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, is_compaction)
+		VALUES (11, ?, 1785710002, 'gpt-5.6-sol', 100, 50, 0, 0, 0.005, 0)`, sessionID)
 
 	a := GooseAdapter{DBPath: dbPath}
 	path := dbPath + "/" + sessionID
@@ -302,6 +304,9 @@ func TestGooseParseSinceIncrementalParity(t *testing.T) {
 	if len(items1.Events) != 1 || len(items1.Marks) != 1 {
 		t.Fatalf("items1: events=%d marks=%d", len(items1.Events), len(items1.Marks))
 	}
+	if len(items1.Usage) != 1 {
+		t.Fatalf("items1: usage=%d, want 1", len(items1.Usage))
+	}
 
 	// Turn 2
 	_, _ = db.Exec(`INSERT INTO messages (id, session_id, role, content_json, created_timestamp)
@@ -310,6 +315,8 @@ func TestGooseParseSinceIncrementalParity(t *testing.T) {
 		VALUES (5, ?, 'assistant', '[{"type":"toolRequest","id":"c2","toolCall":{"value":{"name":"write","arguments":{"path":"foo.txt","content":"hello"}}}}]', 1785710011)`, sessionID)
 	_, _ = db.Exec(`INSERT INTO messages (id, session_id, role, content_json, created_timestamp)
 		VALUES (6, ?, 'user', '[{"type":"toolResponse","id":"c2","toolResult":{"value":{"content":"written"}}}]', 1785710012)`, sessionID)
+	_, _ = db.Exec(`INSERT INTO usage_ledger (id, session_id, created_timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, is_compaction)
+		VALUES (12, ?, 1785710012, 'gpt-5.6-sol', 80, 40, 0, 0, 0.004, 0)`, sessionID)
 
 	// Second incremental parse
 	items2, _, wm2, err := a.ParseItemsSince(context.Background(), path, wm1, len(items1.Events))
@@ -322,6 +329,9 @@ func TestGooseParseSinceIncrementalParity(t *testing.T) {
 	if len(items2.Events) != 1 || len(items2.Marks) != 1 {
 		t.Fatalf("items2: events=%d marks=%d", len(items2.Events), len(items2.Marks))
 	}
+	if len(items2.Usage) != 1 {
+		t.Fatalf("items2: usage=%d, want 1 (usage past its watermark must be withheld)", len(items2.Usage))
+	}
 
 	// Full parse comparison
 	fullItems, _, err := a.ParseItems(context.Background(), path)
@@ -333,6 +343,138 @@ func TestGooseParseSinceIncrementalParity(t *testing.T) {
 	}
 	if len(fullItems.Marks) != len(items1.Marks)+len(items2.Marks) {
 		t.Errorf("marks count mismatch: full=%d, combined=%d", len(fullItems.Marks), len(items1.Marks)+len(items2.Marks))
+	}
+	if len(fullItems.Usage) != len(items1.Usage)+len(items2.Usage) {
+		t.Errorf("usage count mismatch: full=%d, combined=%d", len(fullItems.Usage), len(items1.Usage)+len(items2.Usage))
+	}
+}
+
+// TestGooseParseSinceStraddlingToolCall covers the tool call whose request sat
+// at or below the previous watermark when its response arrives in the next
+// read: the event must still be emitted, not lost with the request row.
+func TestGooseParseSinceStraddlingToolCall(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.db")
+	cwd := filepath.Join(dir, "repo")
+	createTestGooseDB(t, dbPath)
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	sessionID := "20260802_3"
+	_, err = db.Exec(`INSERT INTO sessions (id, name, working_dir, session_type, created_at, updated_at)
+		VALUES (?, 'Straddling Call', ?, 'user', '2026-08-02 12:00:00', '2026-08-02 12:05:00')`,
+		sessionID, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO messages (id, session_id, role, content_json, created_timestamp)
+		VALUES (1, ?, 'user', '[{"type":"text","text":"run it"}]', 1785710100)`, sessionID)
+	_, _ = db.Exec(`INSERT INTO messages (id, session_id, role, content_json, created_timestamp)
+		VALUES (2, ?, 'assistant', '[{"type":"toolRequest","id":"slow","toolCall":{"value":{"name":"shell","arguments":{"command":"sleep 60"}}}}]', 1785710101)`, sessionID)
+
+	a := GooseAdapter{DBPath: dbPath}
+	path := dbPath + "/" + sessionID
+
+	// First read stops after the request row: no event yet, watermark at 2.
+	items1, _, wm1, err := a.ParseItemsSince(context.Background(), path, 0, 0)
+	if err != nil {
+		t.Fatalf("first ParseItemsSince failed: %v", err)
+	}
+	if wm1 != 2 || len(items1.Events) != 0 {
+		t.Fatalf("read 1: wm=%d events=%d, want wm=2 events=0", wm1, len(items1.Events))
+	}
+
+	// The response lands after a read window that started above the request.
+	_, _ = db.Exec(`INSERT INTO messages (id, session_id, role, content_json, created_timestamp)
+		VALUES (3, ?, 'user', '[{"type":"toolResponse","id":"slow","toolResult":{"value":{"content":"done"}}}]', 1785710170)`, sessionID)
+
+	items2, _, wm2, err := a.ParseItemsSince(context.Background(), path, wm1, len(items1.Events))
+	if err != nil {
+		t.Fatalf("second ParseItemsSince failed: %v", err)
+	}
+	if wm2 != 3 {
+		t.Fatalf("read 2: wm=%d, want 3", wm2)
+	}
+	if len(items2.Events) != 1 {
+		t.Fatalf("straddling tool call lost: events=%d, want 1", len(items2.Events))
+	}
+}
+
+// TestGooseParseToleratesNullRows checks that one row with NULL role or
+// content does not abort the whole session read on an older Goose schema.
+func TestGooseParseToleratesNullRows(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.db")
+	cwd := filepath.Join(dir, "repo")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Schema variant without NOT NULL on the message columns.
+	for _, stmt := range []string{
+		`CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			session_type TEXT DEFAULT 'user',
+			working_dir TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			provider_name TEXT,
+			model_config_json TEXT,
+			parent_session_id TEXT
+		)`,
+		`CREATE TABLE messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			role TEXT,
+			content_json TEXT,
+			created_timestamp INTEGER NOT NULL
+		)`,
+		`CREATE TABLE usage_ledger (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			created_timestamp INTEGER NOT NULL,
+			model TEXT,
+			input_tokens INTEGER,
+			output_tokens INTEGER,
+			cache_read_tokens INTEGER,
+			cache_write_tokens INTEGER,
+			cost REAL,
+			is_compaction INTEGER DEFAULT 0
+		)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sessionID := "nullrows"
+	if _, err := db.Exec(`INSERT INTO sessions (id, name, working_dir) VALUES (?, 'Null Rows', ?)`, sessionID, cwd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages (id, session_id, role, content_json, created_timestamp)
+		VALUES (1, ?, NULL, NULL, 1785710200)`, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages (id, session_id, role, content_json, created_timestamp)
+		VALUES (2, ?, 'user', '[{"type":"text","text":"still works"}]', 1785710201)`, sessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	a := GooseAdapter{DBPath: dbPath}
+	items, _, _, err := a.ParseItemsSince(context.Background(), dbPath+"/"+sessionID, 0, 0)
+	if err != nil {
+		t.Fatalf("NULL row aborted the read: %v", err)
+	}
+	if len(items.Marks) != 1 {
+		t.Fatalf("expected the one valid user-message mark, got %d", len(items.Marks))
 	}
 }
 
