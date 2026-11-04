@@ -13,6 +13,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// createTestGooseDB writes the schema the test suite invents, which is what
+// lets a test name exact values. It is not evidence that the adapter matches
+// a real Goose install: that is tail/testdata/goose_sessions.db, owed by #168,
+// and read by the tests in goose_fixture_test.go, which skip while it is
+// absent. Each call site names the hand-written case it exists to exercise.
 func createTestGooseDB(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -100,6 +105,8 @@ func TestGooseDiagnostics(t *testing.T) {
 		t.Fatalf("expected warn for non-existent database, got %v", diag)
 	}
 
+	// Hand-written schema: only the file's existence is under test here, so
+	// Goose's shape is not what this call is for.
 	createTestGooseDB(t, dbPath)
 	diag = a.Diagnostics()
 	if len(diag) != 1 || diag[0].Status != "ok" {
@@ -125,6 +132,9 @@ func TestGooseFilteredListerMatchesInMemory(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "sessions.db")
 	cwd := filepath.Join(dir, "workdir")
+	// Hand-written schema: the sessions carry clock values this test chooses,
+	// which is the point - the SQL time bound is checked against known
+	// timestamps, something a recorded session could not supply.
 	createTestGooseDB(t, dbPath)
 
 	db, err := sql.Open("sqlite", dbPath)
@@ -153,6 +163,10 @@ func TestGooseParse(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "sessions.db")
 	cwd := filepath.Join(dir, "repo")
+	// Hand-written schema: this session is written row by row below so the
+	// mapping from Goose content blocks to events, marks and usage has exact
+	// values to be checked against. TestGooseFixtureSessionRead is what reads
+	// those same queries over a session Goose actually wrote.
 	createTestGooseDB(t, dbPath)
 
 	db, err := sql.Open("sqlite", dbPath)
@@ -264,6 +278,10 @@ func TestGooseParseSinceIncrementalParity(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "sessions.db")
 	cwd := filepath.Join(dir, "repo")
+	// Hand-written schema: the two turns and their ledger rows are written
+	// here so the rule that withholds usage past the watermark has known
+	// numbers. The same replay over a real session is
+	// TestGooseFixtureReplayWatermarkParity.
 	createTestGooseDB(t, dbPath)
 
 	db, err := sql.Open("sqlite", dbPath)
@@ -356,6 +374,8 @@ func TestGooseParseSinceStraddlingToolCall(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "sessions.db")
 	cwd := filepath.Join(dir, "repo")
+	// Hand-written edge case: a request below the watermark whose response
+	// lands above it only exists if the test writes that boundary itself.
 	createTestGooseDB(t, dbPath)
 
 	db, err := sql.Open("sqlite", dbPath)
@@ -417,7 +437,8 @@ func TestGooseParseToleratesNullRows(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	// Schema variant without NOT NULL on the message columns.
+	// Hand-written older schema: the columns drop NOT NULL so the read can be
+	// shown to survive a row whose role or content is NULL.
 	for _, stmt := range []string{
 		`CREATE TABLE sessions (
 			id TEXT PRIMARY KEY,
@@ -481,6 +502,8 @@ func TestGooseParseToleratesNullRows(t *testing.T) {
 func TestGooseAgentGraph(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "sessions.db")
+	// Hand-written schema: the root and its subagents are invented here so the
+	// graph has known ids and a known order to check.
 	createTestGooseDB(t, dbPath)
 
 	db, err := sql.Open("sqlite", dbPath)
@@ -521,6 +544,8 @@ func TestGooseOrphanedToolCalls(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "sessions.db")
 	cwd := filepath.Join(dir, "repo")
+	// Hand-written edge case: a session that dies with a tool request still
+	// unanswered, which a recorded session would only show by luck.
 	createTestGooseDB(t, dbPath)
 
 	db, err := sql.Open("sqlite", dbPath)
