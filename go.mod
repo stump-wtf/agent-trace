@@ -3,7 +3,7 @@ module github.com/stump-wtf/agent-trace
 go 1.26.5
 
 require (
-	github.com/betterleaks/betterleaks v1.9.0
+	github.com/betterleaks/betterleaks v1.10.0
 	modernc.org/sqlite v1.61.1
 )
 
